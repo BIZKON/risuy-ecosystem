@@ -75,28 +75,24 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
         source = "other"
     await state.clear()
     await db.upsert_start(tg_user_id=message.from_user.id, source=source)
+    # Имя берём из Telegram (как пользователь сам себя назвал) — без ручного ввода.
+    name = (message.from_user.full_name or "").strip()[:100] or "друг"
+    await db.set_name(message.from_user.id, name)
     await state.set_state(Funnel.consent)
-    await message.answer(texts.GREETING, reply_markup=_consent_kb())
+    await message.answer(texts.greeting(name), reply_markup=_consent_kb())
 
 
 @router.callback_query(Funnel.consent, F.data == "consent_yes")
 async def on_consent(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await db.set_consent(cb.from_user.id, True)
-    await state.set_state(Funnel.name)
+    await state.set_state(Funnel.phone)
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await cb.message.answer(texts.ASK_NAME)
-
-
-@router.message(Funnel.name, F.text)
-async def on_name(message: Message, state: FSMContext):
-    name = message.text.strip()[:100]
-    await db.set_name(message.from_user.id, name)
-    await state.set_state(Funnel.phone)
-    await message.answer(texts.ask_phone(name), reply_markup=_phone_kb())
+    name = (cb.from_user.full_name or "друг").strip()[:100]
+    await cb.message.answer(texts.ask_phone(name), reply_markup=_phone_kb())
 
 
 @router.message(Funnel.phone, F.contact)
