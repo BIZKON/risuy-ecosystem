@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / фронтенд (появится позже)
+node_modules/
+dist/
+
+# Секреты — КРИТИЧНО для ботов!
+.env
+.env.*
+!.env.example
+*.key
+bot_token.txt
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
