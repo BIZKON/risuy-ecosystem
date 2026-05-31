@@ -49,6 +49,15 @@ async def main() -> None:
     else:
         bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher()
+
+    # ВРЕМЕННО: диагностика входящих апдейтов (тип + текст), чтобы понять, почему /start не матчится.
+    @dp.update.outer_middleware()
+    async def _log_update(handler, event, data):
+        m = event.message
+        extra = f" text={m.text!r} content={m.content_type} from={m.from_user.id if m.from_user else None}" if m is not None else ""
+        logger.info("RAW UPDATE type=%s%s", event.event_type, extra)
+        return await handler(event, data)
+
     dp.include_router(router)
 
     nurture_task = asyncio.create_task(nurture.run(bot))
