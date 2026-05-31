@@ -4,7 +4,7 @@ import logging
 
 from aiogram import Router, F, Bot
 from aiogram.enums import ChatMemberStatus
-from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -68,7 +68,7 @@ def _guide_kb() -> InlineKeyboardMarkup:
     ])
 
 
-@router.message(CommandStart())
+@router.message(Command("start", ignore_case=True))
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
     source = (command.args or "other").lower()
     if source not in VALID_SOURCES:
