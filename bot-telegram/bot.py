@@ -8,6 +8,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import BotCommand
 from aiohttp import web
 
 import config
@@ -53,6 +54,8 @@ async def main() -> None:
 
     nurture_task = asyncio.create_task(nurture.run(bot))
     try:
+        # Кнопка-меню (☰) с /start — всегда доступна, тапом запускает воронку без ручного ввода.
+        await bot.set_my_commands([BotCommand(command="start", description="Начать заново 🌷")])
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Бот запущен на long-polling")
         await dp.start_polling(bot)
