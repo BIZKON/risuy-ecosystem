@@ -27,6 +27,12 @@ PRIVACY_URL = os.environ.get("PRIVACY_URL", "")
 # file_id видео-кружка Насти (необязательно). Записывается заранее, см. README.
 VIDEO_NOTE_FILE_ID = os.environ.get("VIDEO_NOTE_FILE_ID", "")
 
+# Прокси для Telegram API: нужен, если api.telegram.org недоступен напрямую
+# из дата-центра (РФ-хостинг часто не достукивается до Telegram).
+# Формат: socks5://user:pass@host:port или http://user:pass@host:port.
+# Пусто = подключаться к Telegram напрямую (поведение по умолчанию).
+TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
+
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
 

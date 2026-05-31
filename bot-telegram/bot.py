@@ -7,6 +7,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 
 import config
@@ -41,7 +42,12 @@ async def main() -> None:
     await db.init()
     health = await _start_health()
 
-    bot = Bot(token=config.BOT_TOKEN)
+    if config.TELEGRAM_PROXY:
+        # Прячем креды прокси в логе — печатаем только host:port.
+        logger.info("Telegram через прокси: %s", config.TELEGRAM_PROXY.rsplit("@", 1)[-1])
+        bot = Bot(token=config.BOT_TOKEN, session=AiohttpSession(proxy=config.TELEGRAM_PROXY))
+    else:
+        bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
 
