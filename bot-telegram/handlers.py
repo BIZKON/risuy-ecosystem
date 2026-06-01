@@ -4,7 +4,7 @@ import logging
 
 from aiogram import Router, F, Bot
 from aiogram.enums import ChatMemberStatus
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -13,6 +13,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
 )
 
+import ai
 import config
 import db
 import texts
@@ -120,6 +121,27 @@ async def on_check_sub(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await _deliver(cb.from_user.id, cb.message, state, bot)
     else:
         await cb.answer(texts.NOT_SUBSCRIBED_ALERT, show_alert=True)
+
+
+@router.message(StateFilter(None), F.text)
+async def on_free_text(message: Message, state: FSMContext, bot: Bot):
+    """Свободное сообщение ВНЕ воронки → отвечает AI-ассистент Лия.
+
+    Срабатывает только при пустом состоянии (StateFilter(None)). Шаги воронки
+    (у них своё состояние) и команда /start (свой хендлер выше) сюда не попадают.
+    parent_message_id храним в FSM data — для контекста диалога.
+    """
+    if message.text.startswith("/"):
+        return  # неизвестные команды в AI не отправляем
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
+    data = await state.get_data()
+    answer, msg_id = await ai.ask_liya(message.text, data.get("ai_parent_id"))
+    if msg_id:
+        await state.update_data(ai_parent_id=msg_id)
+    await message.answer(answer)
 
 
 async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bot):

@@ -33,6 +33,11 @@ VIDEO_NOTE_FILE_ID = os.environ.get("VIDEO_NOTE_FILE_ID", "")
 # Пусто = подключаться к Telegram напрямую (поведение по умолчанию).
 TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
 
+# AI-ассистент Лия — агент Timeweb Cloud (cloud-ai). Без этих значений AI-ответы
+# отключены (бот отдаёт мягкий фолбэк). Только из env, в репозиторий не коммитим.
+AGENT_ID = os.environ.get("AGENT_ID", "")
+TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
+
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
 
