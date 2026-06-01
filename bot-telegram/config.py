@@ -13,8 +13,10 @@ BOT_TOKEN = _req("BOT_TOKEN")
 DATABASE_URL = _req("DATABASE_URL")
 
 # Канал для гейта подписки. Бот ДОЛЖЕН быть админом канала, иначе проверка не сработает.
-# Можно @username (для публичного канала) или числовой id вида -100xxxxxxxxxx.
-CHANNEL_ID = _req("CHANNEL_ID")
+# Надёжнее числовой id вида -100xxxxxxxxxx (работает и для приватных каналов), чем @username.
+# Числовую строку приводим к int, чтобы get_chat_member получил корректный chat_id.
+_channel_id_raw = _req("CHANNEL_ID")
+CHANNEL_ID = int(_channel_id_raw) if _channel_id_raw.lstrip("-").isdigit() else _channel_id_raw
 # Ссылка для подписки, которую видит пользователь, напр. https://t.me/risuysdushoy
 CHANNEL_URL = _req("CHANNEL_URL")
 

@@ -156,11 +156,17 @@ async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bo
 async def _is_subscribed(bot: Bot, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(config.CHANNEL_ID, user_id)
-        return member.status in _SUBSCRIBED
     except Exception as e:
-        # Чаще всего — бот не админ канала или пользователь ещё не взаимодействовал.
+        # Бот не админ канала, неверный CHANNEL_ID или Telegram недоступен.
+        # Фейлимся ЗАКРЫТО: при ошибке проверки материал НЕ выдаём — гейт держит.
         logger.warning("Не удалось проверить подписку user=%s: %s", user_id, e)
         return False
+    if member.status in _SUBSCRIBED:
+        return True
+    # «restricted» — это всё ещё участник канала, если is_member=True.
+    if member.status == ChatMemberStatus.RESTRICTED:
+        return bool(getattr(member, "is_member", False))
+    return False  # left / kicked / прочее — не подписан
 
 
 async def _deliver(user_id: int, message: Message, state: FSMContext, bot: Bot):
