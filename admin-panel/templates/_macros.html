@@ -1,0 +1,134 @@
+{# Переиспользуемые макросы панели. Никакого inline-JS — CSP это запрещает.
+   Контракт макросов: status_badge, source_badge, phone_masked, bool_mark,
+   stat_card, pager, flash. #}
+
+{# --- Человекочитаемые подписи статусов воронки (new|guide_sent|nurturing|converted|lost) --- #}
+{% set STATUS_LABELS = {
+  'new':        'Новый',
+  'guide_sent': 'Гайд выдан',
+  'nurturing':  'Прогрев',
+  'converted':  'Купили',
+  'lost':       'Потеряны',
+} %}
+
+{# --- Подписи источников (reels|dzen|youtube|vk|max|other) --- #}
+{% set SOURCE_LABELS = {
+  'reels':   'Reels',
+  'dzen':    'Дзен',
+  'youtube': 'YouTube',
+  'vk':      'VK',
+  'max':     'MAX',
+  'other':   'Другое',
+} %}
+
+{# --- Подписи мессенджеров (tg|max) --- #}
+{% set MESSENGER_LABELS = {
+  'tg':  'Telegram',
+  'max': 'MAX',
+} %}
+
+
+{# Бейдж статуса лида. Цвет несётся через data-атрибут (стили в styles.css). #}
+{% macro status_badge(status) %}
+  {%- set key = status if status in STATUS_LABELS else 'other' -%}
+  <span class="badge badge--status" data-status="{{ status|e }}">{{ STATUS_LABELS.get(status, status|e) }}</span>
+{%- endmacro %}
+
+
+{# Бейдж источника площадки. #}
+{% macro source_badge(source) %}
+  <span class="badge badge--source" data-source="{{ source|e }}">{{ SOURCE_LABELS.get(source, source|e) }}</span>
+{%- endmacro %}
+
+
+{# Бейдж мессенджера (мелкая утилита для таблицы/карточки). #}
+{% macro messenger_badge(messenger) %}
+  <span class="badge badge--messenger" data-messenger="{{ messenger|e }}">{{ MESSENGER_LABELS.get(messenger, messenger|e) }}</span>
+{%- endmacro %}
+
+
+{# Замаскированный телефон (вид +7 ··· ··-NN, NN — две последние цифры).
+   На вход — УЖЕ замаскированная строка из бэкенда (security.mask_phone): полный
+   номер физически не покидает Postgres для списка/дефолт-карточки (план §2),
+   так что сюда приходит готовая маска, а не сырой телефон. Прочерк, если пусто
+   (телефон не оставлен / обезличен). #}
+{% macro phone_masked(masked) %}
+  {%- set s = (masked|string)|trim -%}
+  {%- if s and s != '—' and s != 'None' %}
+    <span class="phone phone--masked" title="Скрыто. Показать целиком — на карточке лида">{{ s|e }}</span>
+  {%- else -%}
+    <span class="phone phone--empty" title="Телефон не указан">—</span>
+  {%- endif -%}
+{%- endmacro %}
+
+
+{# Полный телефон — рендерится только после reveal на карточке. Помечаем как раскрытый. #}
+{% macro phone_full(phone) %}
+  {%- if phone -%}
+    <span class="phone phone--revealed">{{ phone|e }}</span>
+  {%- else -%}
+    <span class="phone phone--empty">—</span>
+  {%- endif -%}
+{%- endmacro %}
+
+
+{# Да/нет-отметка (consent, subscribed). #}
+{% macro bool_mark(value) %}
+  {%- if value -%}
+    <span class="mark mark--yes" title="Да" aria-label="Да">✔</span>
+  {%- else -%}
+    <span class="mark mark--no" title="Нет" aria-label="Нет">—</span>
+  {%- endif -%}
+{%- endmacro %}
+
+
+{# Карточка-счётчик дашборда. href опционален (кликабельная плашка ведёт в список).
+   tone задаёт акцент (accent|muted|warn). #}
+{% macro stat_card(label, value, href='', tone='', hint='') %}
+  {%- if href %}
+  <a class="stat stat--link{% if tone %} stat--{{ tone }}{% endif %}" href="{{ href }}">
+    <span class="stat__value">{{ value }}</span>
+    <span class="stat__label">{{ label }}</span>
+    {%- if hint %}<span class="stat__hint">{{ hint }}</span>{% endif %}
+  </a>
+  {%- else %}
+  <div class="stat{% if tone %} stat--{{ tone }}{% endif %}">
+    <span class="stat__value">{{ value }}</span>
+    <span class="stat__label">{{ label }}</span>
+    {%- if hint %}<span class="stat__hint">{{ hint }}</span>{% endif %}
+  </div>
+  {%- endif %}
+{%- endmacro %}
+
+
+{# Пагинация offset. base_qs — строка query-параметров без page (уже urlencoded, без ведущего ?). #}
+{% macro pager(page, per_page, total, base_qs='') %}
+  {%- set pages = ((total + per_page - 1) // per_page) if per_page else 1 -%}
+  {%- set pages = pages if pages > 0 else 1 -%}
+  {%- if pages > 1 %}
+  {%- set sep = '&' if base_qs else '' -%}
+  <nav class="pager" aria-label="Постраничная навигация">
+    {%- if page > 1 %}
+    <a class="pager__btn" href="?{{ base_qs }}{{ sep }}page={{ page - 1 }}" rel="prev">← Назад</a>
+    {%- else %}
+    <span class="pager__btn pager__btn--off" aria-disabled="true">← Назад</span>
+    {%- endif %}
+    <span class="pager__status">Стр. {{ page }} из {{ pages }}</span>
+    {%- if page < pages %}
+    <a class="pager__btn" href="?{{ base_qs }}{{ sep }}page={{ page + 1 }}" rel="next">Вперёд →</a>
+    {%- else %}
+    <span class="pager__btn pager__btn--off" aria-disabled="true">Вперёд →</span>
+    {%- endif %}
+  </nav>
+  {%- endif %}
+{%- endmacro %}
+
+
+{# Флеш-уведомление. kind: ok|error|info. role=alert для ошибок (доступность). #}
+{% macro flash(message, kind='info') %}
+  {%- if message %}
+  <div class="flash flash--{{ kind }}"{% if kind == 'error' %} role="alert"{% else %} role="status"{% endif %}>
+    {{ message }}
+  </div>
+  {%- endif %}
+{%- endmacro %}

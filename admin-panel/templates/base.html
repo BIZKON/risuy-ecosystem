@@ -1,0 +1,41 @@
+{# Базовый шаблон админ-панели лидов. Server-rendered, без внешних CDN/шрифтов/JS.
+   Все страницы с ПДн закрыты сессией; индексация запрещена. #}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Внутренняя панель с ПДн — нигде не индексируется. #}
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>{% block title %}Лиды{% endblock %} · Школа Лесова</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  {% block chrome %}
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/">Лиды<span class="brand__sub">Школа Лесова</span></a>
+      <nav class="topnav" aria-label="Основная навигация">
+        <a href="/"{% if active == 'dashboard' %} aria-current="page"{% endif %}>Дашборд</a>
+        <a href="/leads"{% if active == 'leads' %} aria-current="page"{% endif %}>Лиды</a>
+      </nav>
+      {% if csrf_token %}
+      <form class="logout" method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn--ghost btn--sm">Выйти</button>
+      </form>
+      {% endif %}
+    </div>
+  </header>
+  {% endblock %}
+
+  <main class="main" id="content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <p>Внутренняя панель · доступ только для оператора · данные ПДн под защитой 152-ФЗ</p>
+  </footer>
+</body>
+</html>

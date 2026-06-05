@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}Ошибка {{ status_code }}{% endblock %}
+{% block body_class %}page-error{% endblock %}
+
+{# Generic-страница ошибки (§3.12): без traceback/SQL/значений/DSN — только код и
+   дружелюбный текст. Сессии может не быть — верхнюю панель не показываем. #}
+{% block chrome %}{% endblock %}
+
+{% block content %}
+<section class="error">
+  <div class="error__card">
+    <p class="error__code">{{ status_code }}</p>
+    <h1 class="error__title">{{ message }}</h1>
+    <p class="error__actions">
+      <a class="btn btn--secondary" href="/">На дашборд</a>
+      <a class="btn btn--ghost" href="/leads">К списку лидов</a>
+    </p>
+  </div>
+</section>
+{% endblock %}

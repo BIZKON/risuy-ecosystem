@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, source_badge, messenger_badge, phone_masked, phone_full, bool_mark, flash %}
+
+{% block title %}Лид · {{ lead.name|e if lead.name else 'без имени' }}{% endblock %}
+{% block body_class %}page-lead{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Хлебные крошки">
+  <a href="/leads">← К списку</a>
+</nav>
+
+<div class="page-head">
+  <h1 class="page-head__title">{{ lead.name|e if lead.name else 'Лид без имени' }}</h1>
+  <div class="page-head__meta">
+    {{ status_badge(lead.status) }}
+    {{ source_badge(lead.source) }}
+    {{ messenger_badge(lead.messenger) }}
+  </div>
+</div>
+
+{% if saved %}{{ flash('Изменения сохранены.', 'ok') }}{% endif %}
+{% if erased %}{{ flash('Запрос на удаление принят. Обезличивание — в течение 30 дней.', 'ok') }}{% endif %}
+
+{% if lead.erase_requested_at %}
+<div class="alert-strip alert-strip--static" role="status">
+  <span class="alert-strip__txt">
+    Поступил запрос на удаление ({{ lead.erase_requested_at.strftime('%d.%m.%Y') }}). Обезличивание — в течение 30 дней.
+  </span>
+</div>
+{% endif %}
+
+<div class="cols">
+
+  {# ── Левая колонка: контакт и ПДн. Read-only, кроме reveal. ── #}
+  <section class="card" aria-label="Контакт">
+    <h2 class="card__title">Контакт</h2>
+    <dl class="kv">
+
+      <dt>Телефон</dt>
+      <dd>
+        {% if revealed %}
+          {# revealed несёт полный номер строкой (бэкенд, §3.8). Не редирект, не GET. #}
+          {{ phone_full(revealed) }}
+          <span class="hint hint--inline">Раскрыт. Открытие записано в журнал.</span>
+        {% else %}
+          {{ phone_masked(lead.phone_masked) }}
+          {% if lead.has_phone %}
+          {# Reveal — отдельный POST: аудит, затем 200 с полным номером (§3.8). #}
+          <form class="inline-form" method="post" action="/leads/{{ lead.id }}/reveal">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn--ghost btn--sm" type="submit">Показать полностью</button>
+          </form>
+          {% endif %}
+        {% endif %}
+      </dd>
+
+      <dt>Мессенджер</dt>
+      <dd>{{ messenger_badge(lead.messenger) }}</dd>
+
+      <dt>Согласие 152-ФЗ</dt>
+      <dd>{{ bool_mark(lead.consent) }} <span class="hint hint--inline">даётся в боте</span></dd>
+
+      <dt>Подписан на канал</dt>
+      <dd>{{ bool_mark(lead.subscribed) }}</dd>
+
+      <dt>TG user id</dt>
+      <dd class="mono">{{ lead.tg_user_id if lead.tg_user_id is not none else '—' }}</dd>
+
+      <dt>MAX user id</dt>
+      <dd class="mono">{{ lead.max_user_id if lead.max_user_id is not none else '—' }}</dd>
+
+      <dt><span class="hint">Хеш телефона</span></dt>
+      <dd>
+        <details class="reveal-svc">
+          <summary>служебное</summary>
+          <code class="mono mono--break">{{ lead.phone_hash|e if lead.phone_hash else '—' }}</code>
+        </details>
+      </dd>
+    </dl>
+  </section>
+
+  {# ── Правая колонка: единственная write-поверхность + таймлайн + 152-ФЗ. ── #}
+  <div class="col-right">
+
+    {# Форма правки — ровно 2 поля: статус и заметки. #}
+    <section class="card" aria-label="Управление">
+      <h2 class="card__title">Управление</h2>
+      <form class="edit" method="post" action="/leads/{{ lead.id }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <label class="field">
+          <span class="field__label">Статус</span>
+          <select class="field__input" name="status">
+            {% for s in statuses %}
+            <option value="{{ s|e }}" {% if lead.status == s %}selected{% endif %}>
+              {%- if s == 'new' %}Новый
+              {%- elif s == 'guide_sent' %}Гайд выдан
+              {%- elif s == 'nurturing' %}Прогрев
+              {%- elif s == 'converted' %}Купили
+              {%- elif s == 'lost' %}Потеряны
+              {%- else %}{{ s|e }}{% endif -%}
+            </option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Заметки <span class="field__hint">до {{ notes_max|default(4000, true) }} символов</span></span>
+          <textarea class="field__input field__textarea" name="notes" rows="6"
+                    maxlength="{{ notes_max|default(4000, true) }}" placeholder="Договорённости, контекст, итоги касаний…">{{ lead.notes|e if lead.notes else '' }}</textarea>
+        </label>
+
+        <div class="form-actions">
+          <button class="btn btn--primary" type="submit">Сохранить</button>
+        </div>
+      </form>
+    </section>
+
+    {# Таймлайн воронки — read-only, ведётся ботом. Видно, на каком касании застрял лид. #}
+    <section class="card" aria-label="Таймлайн">
+      <h2 class="card__title">Таймлайн</h2>
+      <ol class="timeline">
+        <li class="timeline__item{% if lead.created_at %} is-done{% endif %}">
+          <span class="timeline__label">Создан</span>
+          <span class="timeline__when">{{ lead.created_at.strftime('%d.%m.%Y %H:%M') if lead.created_at else '—' }}</span>
+        </li>
+        <li class="timeline__item{% if lead.guide_sent_at %} is-done{% endif %}">
+          <span class="timeline__label">Гайд выдан</span>
+          <span class="timeline__when">{{ lead.guide_sent_at.strftime('%d.%m.%Y %H:%M') if lead.guide_sent_at else '—' }}</span>
+        </li>
+        <li class="timeline__item{% if lead.follow_up_1_at %} is-done{% endif %}">
+          <span class="timeline__label">Касание 1</span>
+          <span class="timeline__when">{{ lead.follow_up_1_at.strftime('%d.%m.%Y %H:%M') if lead.follow_up_1_at else '—' }}</span>
+        </li>
+        <li class="timeline__item{% if lead.follow_up_2_at %} is-done{% endif %}">
+          <span class="timeline__label">Касание 2</span>
+          <span class="timeline__when">{{ lead.follow_up_2_at.strftime('%d.%m.%Y %H:%M') if lead.follow_up_2_at else '—' }}</span>
+        </li>
+        <li class="timeline__item{% if lead.follow_up_3_at %} is-done{% endif %}">
+          <span class="timeline__label">Касание 3</span>
+          <span class="timeline__when">{{ lead.follow_up_3_at.strftime('%d.%m.%Y %H:%M') if lead.follow_up_3_at else '—' }}</span>
+        </li>
+        <li class="timeline__item{% if lead.updated_at %} is-done{% endif %}">
+          <span class="timeline__label">Обновлён</span>
+          <span class="timeline__when">{{ lead.updated_at.strftime('%d.%m.%Y %H:%M') if lead.updated_at else '—' }}</span>
+        </li>
+      </ol>
+    </section>
+
+    {# Опрос (jsonb) — read-only, Phase 3. Показываем только если есть данные. #}
+    {% if lead.survey %}
+    <section class="card" aria-label="Опрос">
+      <h2 class="card__title">Опрос</h2>
+      <pre class="json">{{ lead.survey }}</pre>
+    </section>
+    {% endif %}
+
+    {# 152-ФЗ: принять отзыв согласия / запрос субъекта. Через POST + аудит. #}
+    <section class="card card--danger" aria-label="152-ФЗ">
+      <h2 class="card__title">Удаление по 152-ФЗ</h2>
+      {% if lead.erase_requested_at %}
+      <p class="card__note">Запрос уже принят {{ lead.erase_requested_at.strftime('%d.%m.%Y') }}. Обезличивание выполнится автоматически в течение 30 дней.</p>
+      {% else %}
+      <p class="card__note">Если поступил отзыв согласия или запрос субъекта на удаление — отметьте здесь. ПДн будут обезличены в течение 30 дней.</p>
+      <form class="inline-form" method="post" action="/leads/{{ lead.id }}/erase">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn btn--danger" type="submit">Принять отзыв согласия / запрос на удаление</button>
+      </form>
+      {% endif %}
+    </section>
+
+  </div>
+</div>
+{% endblock %}

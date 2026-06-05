@@ -1,0 +1,16 @@
+# Зависимости админ-панели — ПИНЫ (§4.3 плана). Без версий каждый rebuild тянул бы
+# latest с PyPI (supply-chain). Здесь — точные ==; для воспроизводимости с хешами
+# в проде сгенерировать lock:
+#
+#   pip install pip-tools
+#   pip-compile --generate-hashes --allow-unsafe requirements.txt -o requirements.lock.txt
+#   # и ставить в Dockerfile:  pip install --require-hashes -r requirements.lock.txt
+#
+# python-multipart обязателен: без него FastAPI не парсит HTML-формы (Form(...)).
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+jinja2==3.1.5
+asyncpg==0.30.0
+argon2-cffi==23.1.0
+itsdangerous==2.2.0
+python-multipart==0.0.20

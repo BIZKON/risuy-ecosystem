@@ -1,0 +1,33 @@
+# Контекст сборки панели — только исходники. Секреты/мусор не уходят в образ.
+# (Корневая сборка панели на Timeweb использует /Dockerfile и КОРНЕВОЙ контекст;
+#  этот .dockerignore действует при сборке из папки admin-panel/.)
+
+# Секреты — НИКОГДА в образ
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python-мусор
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Документация (в рантайме не нужна)
+README.md
+
+# Артефакты pip-compile (нужен только .txt с пинами)
+requirements.in

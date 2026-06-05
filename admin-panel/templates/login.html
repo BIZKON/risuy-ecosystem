@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Вход{% endblock %}
+{% block body_class %}page-login{% endblock %}
+
+{# На странице входа сессии ещё нет — верхнюю панель с навигацией и «Выйти» не показываем. #}
+{% block chrome %}{% endblock %}
+
+{% block content %}
+<section class="auth">
+  <div class="auth__card">
+    <h1 class="auth__title">Панель лидов</h1>
+    <p class="auth__sub">Школа Лесова · внутренний доступ</p>
+
+    {{ flash(error, 'error') }}
+
+    <form class="auth__form" method="post" action="/login" autocomplete="off" novalidate>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {# Куда вернуть после входа (заполняется сервером, deny-by-default → '/'). #}
+      <input type="hidden" name="next" value="{{ next|default('/', true) }}">
+
+      <label class="field">
+        <span class="field__label">Логин</span>
+        <input class="field__input" type="text" name="username" autocomplete="username"
+               autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Пароль</span>
+        <input class="field__input" type="password" name="password"
+               autocomplete="current-password" required>
+      </label>
+
+      <button class="btn btn--primary btn--block" type="submit">Войти</button>
+    </form>
+
+    <p class="auth__note">Доступ только для оператора ПДн. Все входы фиксируются в журнале.</p>
+  </div>
+</section>
+{% endblock %}

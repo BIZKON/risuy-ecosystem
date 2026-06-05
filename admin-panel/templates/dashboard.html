@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat_card, source_badge %}
+
+{% block title %}Дашборд{% endblock %}
+{% block body_class %}page-dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Воронка</h1>
+  <p class="page-head__hint">Статус — текущее состояние лида, не история. «Достиг этапа» оценивается по порядку статусов — допущение внутренней панели.</p>
+</div>
+
+{% if counts and counts.get('total', 0) > 0 %}
+
+{# Плашка «К удалению» — заметная, выводится только если есть запросы на обезличивание. #}
+{% if counts.get('erase_pending', 0) > 0 %}
+<a class="alert-strip" href="/leads?erase=1">
+  <span class="alert-strip__num">{{ counts.get('erase_pending', 0) }}</span>
+  <span class="alert-strip__txt">К удалению — поступил отзыв согласия или запрос субъекта. Обезличить ≤30 дней.</span>
+  <span class="alert-strip__go">Открыть →</span>
+</a>
+{% endif %}
+
+{# Этапы воронки в порядке жизненного цикла. Каждая плашка ведёт в отфильтрованный список. #}
+<section class="section" aria-label="Этапы воронки">
+  <h2 class="section__title">Этапы</h2>
+  <div class="stats stats--funnel">
+    {{ stat_card('Всего',      counts.get('total', 0),      '/leads') }}
+    {{ stat_card('Новые',      counts.get('new', 0),        '/leads?status=new',        'accent') }}
+    {{ stat_card('Гайд выдан', counts.get('guide_sent', 0), '/leads?status=guide_sent') }}
+    {{ stat_card('Прогрев',    counts.get('nurturing', 0),  '/leads?status=nurturing') }}
+    {{ stat_card('Купили',     counts.get('converted', 0),  '/leads?status=converted',  'accent') }}
+    {{ stat_card('Потеряны',   counts.get('lost', 0),       '/leads?status=lost',       'muted') }}
+  </div>
+</section>
+
+{# Вспомогательные метрики. Конверсия считается на сервере и кладётся в counts.conversion_pct. #}
+<section class="section" aria-label="Сводка">
+  <h2 class="section__title">Сводка</h2>
+  <div class="stats stats--aux">
+    {{ stat_card('Дали согласие', counts.get('consent_yes', 0),    '/leads?consent=1') }}
+    {{ stat_card('Подписаны',     counts.get('subscribed_yes', 0)) }}
+    {{ stat_card('Новых за 7 дней', counts.get('new_7d', 0)) }}
+    {{ stat_card('Конверсия', ((conversion if conversion is defined else 0)|string ~ '%'), '', '', 'купили / всего') }}
+  </div>
+</section>
+
+{# Распределение по источникам площадок. #}
+<section class="section" aria-label="По источникам">
+  <h2 class="section__title">По источникам</h2>
+  {% if by_source %}
+  <table class="table table--compact">
+    <thead>
+      <tr>
+        <th scope="col">Источник</th>
+        <th scope="col" class="num">Лидов</th>
+        <th scope="col" class="num">Доля</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in by_source %}
+      <tr>
+        <td>
+          <a href="/leads?source={{ row.source|e }}">{{ source_badge(row.source) }}</a>
+        </td>
+        <td class="num">{{ row.cnt }}</td>
+        <td class="num muted">
+          {%- if counts.get('total', 0) > 0 -%}
+            {{ ((row.cnt * 100) // counts.get('total', 1)) }}%
+          {%- else -%}—{%- endif -%}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty empty--inline">Источники пока не размечены.</p>
+  {% endif %}
+</section>
+
+{% else %}
+<div class="empty">
+  <p class="empty__title">Пока нет ни одного лида</p>
+  <p class="empty__text">Как только бот зарегистрирует первого человека, здесь появится воронка.</p>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, source_badge, messenger_badge, phone_masked, bool_mark, pager, flash %}
+
+{% block title %}Лиды{% endblock %}
+{% block body_class %}page-leads{% endblock %}
+
+{# Признак активного поиска/фильтра — для empty-state и кнопки сброса. #}
+{% set has_search = filters.get('qname') or filters.get('qid') %}
+{% set has_any_filter = has_search or filters.get('status') or filters.get('source') or filters.get('messenger') or filters.get('consent') or filters.get('erase') %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Лиды</h1>
+  <p class="page-head__hint">Телефоны замаскированы. Полный номер — только на карточке лида, под журналом доступа.</p>
+</div>
+
+{# Свободный поиск (имя/телефон) — ТОЛЬКО POST: сервер хеширует телефон и редиректит
+   на чистый URL без цифр в query-string (§3.10). Никаких ПДн в GET. #}
+<form class="search" method="post" action="/leads/search" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {# Текущие не-ПДн фильтры переносим в поиск, чтобы он их не сбросил. #}
+  {% if filters.get('status') %}<input type="hidden" name="status" value="{{ filters.get('status') }}">{% endif %}
+  {% if filters.get('source') %}<input type="hidden" name="source" value="{{ filters.get('source') }}">{% endif %}
+  {% if filters.get('messenger') %}<input type="hidden" name="messenger" value="{{ filters.get('messenger') }}">{% endif %}
+  {% if filters.get('consent') %}<input type="hidden" name="consent" value="{{ filters.get('consent') }}">{% endif %}
+  {% if filters.get('sort') %}<input type="hidden" name="sort" value="{{ filters.get('sort') }}">{% endif %}
+  <label class="field field--inline">
+    <span class="field__label vh">Поиск по имени или телефону</span>
+    {# Имя круг-триппим (qname); телефон в value НЕ возвращаем — он стал opaque qid без цифр. #}
+    <input class="field__input" type="search" name="q" value="{{ filters.get('qname', '') }}"
+           placeholder="Имя или телефон" inputmode="text" enterkeyhint="search">
+  </label>
+  <button class="btn btn--primary" type="submit">Найти</button>
+  {% if has_search %}
+  <a class="btn btn--ghost" href="/leads">Сбросить поиск</a>
+  {% endif %}
+</form>
+
+{% if filters.get('qid') %}
+<p class="search-note">Активен поиск по телефону (номер скрыт). <a href="/leads">Сбросить</a></p>
+{% endif %}
+
+{# Не-ПДн фильтры — GET-форма, значения переживают F5 и переиспользуются в экспорте/пагинации. #}
+<form class="filters" method="get" action="/leads">
+  <div class="filters__row">
+    <label class="field field--inline">
+      <span class="field__label">Статус</span>
+      <select class="field__input" name="status">
+        <option value="">Все</option>
+        <option value="new"        {% if filters.get('status') == 'new' %}selected{% endif %}>Новые</option>
+        <option value="guide_sent" {% if filters.get('status') == 'guide_sent' %}selected{% endif %}>Гайд выдан</option>
+        <option value="nurturing"  {% if filters.get('status') == 'nurturing' %}selected{% endif %}>Прогрев</option>
+        <option value="converted"  {% if filters.get('status') == 'converted' %}selected{% endif %}>Купили</option>
+        <option value="lost"       {% if filters.get('status') == 'lost' %}selected{% endif %}>Потеряны</option>
+      </select>
+    </label>
+
+    <label class="field field--inline">
+      <span class="field__label">Источник</span>
+      <select class="field__input" name="source">
+        <option value="">Все</option>
+        <option value="reels"   {% if filters.get('source') == 'reels' %}selected{% endif %}>Reels</option>
+        <option value="dzen"    {% if filters.get('source') == 'dzen' %}selected{% endif %}>Дзен</option>
+        <option value="youtube" {% if filters.get('source') == 'youtube' %}selected{% endif %}>YouTube</option>
+        <option value="vk"      {% if filters.get('source') == 'vk' %}selected{% endif %}>VK</option>
+        <option value="max"     {% if filters.get('source') == 'max' %}selected{% endif %}>MAX</option>
+        <option value="other"   {% if filters.get('source') == 'other' %}selected{% endif %}>Другое</option>
+      </select>
+    </label>
+
+    <label class="field field--inline">
+      <span class="field__label">Мессенджер</span>
+      <select class="field__input" name="messenger">
+        <option value="">Все</option>
+        <option value="tg"  {% if filters.get('messenger') == 'tg' %}selected{% endif %}>Telegram</option>
+        <option value="max" {% if filters.get('messenger') == 'max' %}selected{% endif %}>MAX</option>
+      </select>
+    </label>
+
+    <label class="field field--inline">
+      <span class="field__label">Согласие</span>
+      <select class="field__input" name="consent">
+        <option value="">Любое</option>
+        <option value="1" {% if filters.get('consent') == '1' %}selected{% endif %}>Есть</option>
+        <option value="0" {% if filters.get('consent') == '0' %}selected{% endif %}>Нет</option>
+      </select>
+    </label>
+
+    <label class="field field--inline">
+      <span class="field__label">Сортировка</span>
+      <select class="field__input" name="sort">
+        <option value="created_desc" {% if filters.get('sort', 'created_desc') == 'created_desc' %}selected{% endif %}>Сначала новые</option>
+        <option value="updated_desc" {% if filters.get('sort') == 'updated_desc' %}selected{% endif %}>По изменению</option>
+      </select>
+    </label>
+
+    {# Сохраняем активный поиск (opaque qid без цифр / имя) при смене фильтров. #}
+    {% if filters.get('qid') %}<input type="hidden" name="qid" value="{{ filters.get('qid') }}">{% endif %}
+    {% if filters.get('qname') %}<input type="hidden" name="qname" value="{{ filters.get('qname') }}">{% endif %}
+    {% if filters.get('erase') %}<input type="hidden" name="erase" value="1">{% endif %}
+
+    <button class="btn btn--secondary" type="submit">Применить</button>
+    <a class="btn btn--ghost" href="/leads">Сбросить</a>
+  </div>
+</form>
+
+{# Итог выборки + экспорт. Экспорт — POST (CSRF + аудит до стрима, §3.11).
+   Скрытые поля несут текущий фильтр, чтобы экспорт совпал с видимой выборкой. #}
+{% macro export_filter_fields(filters) %}
+  {%- for k in ['status', 'source', 'messenger', 'consent', 'qid', 'qname', 'erase'] %}
+    {%- if filters.get(k) %}<input type="hidden" name="{{ k }}" value="{{ filters.get(k) }}">{% endif %}
+  {%- endfor %}
+{%- endmacro %}
+
+<div class="toolbar">
+  <p class="toolbar__count">Найдено: <strong>{{ total }}</strong></p>
+  <div class="toolbar__actions">
+    <form class="inline-form" method="post" action="/export.csv">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ export_filter_fields(filters) }}
+      <button class="btn btn--ghost btn--sm" type="submit" title="CSV с замаскированными телефонами">Экспорт CSV</button>
+    </form>
+    {# Полные телефоны — отдельное gated-действие с серверным подтверждением и
+       отдельным аудитом (§3.11). Подтверждение — на сервере, НЕ inline-JS (CSP). #}
+    <form class="inline-form" method="post" action="/export-full.csv">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ export_filter_fields(filters) }}
+      <button class="btn btn--danger-ghost btn--sm" type="submit" title="CSV с полными телефонами — отдельный аудит">Экспорт (полные тел.)</button>
+    </form>
+  </div>
+</div>
+
+{% if rows %}
+<div class="table-wrap">
+  <table class="table table--zebra">
+    <thead>
+      <tr>
+        <th scope="col">Создан</th>
+        <th scope="col">Имя</th>
+        <th scope="col">Телефон</th>
+        <th scope="col">Мессенджер</th>
+        <th scope="col">Источник</th>
+        <th scope="col">Статус</th>
+        <th scope="col">Согласие</th>
+        <th scope="col" class="col-action"><span class="vh">Действие</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for lead in rows %}
+      <tr{% if lead.erase_requested_at %} class="row--erase" title="Поступил запрос на удаление"{% endif %}>
+        <td class="nowrap muted">{{ lead.created_at.strftime('%d.%m.%Y') if lead.created_at else '—' }}</td>
+        <td>{{ lead.name|e if lead.name else '—' }}</td>
+        <td class="nowrap">{{ phone_masked(lead.phone_masked) }}</td>
+        <td>{{ messenger_badge(lead.messenger) }}</td>
+        <td>{{ source_badge(lead.source) }}</td>
+        <td>{{ status_badge(lead.status) }}</td>
+        <td class="center">{{ bool_mark(lead.consent) }}</td>
+        <td class="col-action"><a class="link-open" href="/leads/{{ lead.id }}">Открыть →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{{ pager(page, per_page, total, base_qs|default('', true)) }}
+
+{% else %}
+<div class="empty">
+  {% if has_any_filter %}
+  <p class="empty__title">Ничего не найдено</p>
+  <p class="empty__text">По текущим фильтрам лидов нет. <a href="/leads">Сбросить фильтры</a>.</p>
+  {% else %}
+  <p class="empty__title">Пока нет ни одного лида</p>
+  <p class="empty__text">Список заполнится, как только бот зарегистрирует первого человека.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
