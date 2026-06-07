@@ -1,4 +1,5 @@
 """Конфигурация Telegram-бота. Всё из переменных окружения — секреты не в коде."""
+import logging
 import os
 
 
@@ -74,6 +75,59 @@ CB_FAIL_RATIO = float(os.environ.get("CB_FAIL_RATIO", "0.30"))   # доля fail
 # рассылки/продукты не материализуются (текстовые/ссылочные работают).
 OPS_CHAT_ID_raw = os.environ.get("OPS_CHAT_ID", "")
 OPS_CHAT_ID = int(OPS_CHAT_ID_raw) if OPS_CHAT_ID_raw.lstrip("-").isdigit() else (OPS_CHAT_ID_raw or None)
+
+
+# ── ГРАНИЦА РАССЫЛОК: канал гейта НИКОГДА не получает контент рассылок ─────────
+# Канал (@lesov_art_school) бот использует ТОЛЬКО для проверки подписки нового
+# человека — это даёт нативный рост канала. Любые рассылки (текст/ссылка/файл/
+# продукт) идут ИСКЛЮЧИТЕЛЬНО в личные чаты лидов:
+#   • адресаты материализуются строго `select … from leads` (db._AUDIENCE_WHERE) —
+#     канал в leads не лежит, личный tg_user_id > 0, id канала = -100… → коллизия
+#     адресата невозможна структурно;
+#   • единственная точка, где бот шлёт контент в НЕ-лид-чат, — первичная заливка
+#     файла в OPS_CHAT_ID ради переиспользуемого file_id. Если оператор по ошибке
+#     укажет туда канал гейта, файл засветился бы в канале. Запрещаем инвариантом:
+#     при совпадении OPS_CHAT_ID с каналом (по числовому id ИЛИ @username) —
+#     файловую заливку ОТКЛЮЧАЕМ (OPS_CHAT_ID=None) и громко логируем. Текстовые/
+#     ссылочные рассылки при этом продолжают работать. OPS_CHAT_ID может быть
+#     личным чатом оператора с ботом ИЛИ приватной группой — но не каналом гейта.
+def _channel_aliases(channel_id, channel_url) -> set:
+    """Все идентификаторы канала гейта: числовой id и @username (нижний регистр)."""
+    aliases: set = set()
+    if isinstance(channel_id, int):
+        aliases.add(channel_id)
+    elif isinstance(channel_id, str) and channel_id:
+        aliases.add(channel_id.lstrip("@").lower())
+    if channel_url and "t.me/" in channel_url:
+        uname = channel_url.rstrip("/").rsplit("/", 1)[-1].lstrip("@").lower()
+        if uname:
+            aliases.add(uname)
+    return aliases
+
+
+def is_gate_channel(chat, channel_id=None, channel_url=None) -> bool:
+    """True, если chat указывает на канал гейта (по числовому id или @username).
+
+    Граница рассылок: канал гейта не может быть адресатом/служебным чатом рассылок.
+    channel_id/channel_url по умолчанию берутся из модуля (передаются явно в тестах).
+    """
+    if chat is None:
+        return False
+    cid = CHANNEL_ID if channel_id is None else channel_id
+    curl = CHANNEL_URL if channel_url is None else channel_url
+    aliases = _channel_aliases(cid, curl)
+    if isinstance(chat, int):
+        return chat in aliases
+    return chat.lstrip("@").lower() in aliases
+
+
+if OPS_CHAT_ID is not None and is_gate_channel(OPS_CHAT_ID):
+    logging.getLogger(__name__).error(
+        "OPS_CHAT_ID совпадает с каналом гейта — файловая заливка ОТКЛЮЧЕНА: "
+        "рассылки не должны светиться в канале (он только для проверки подписки). "
+        "Укажи ЛИЧНЫЙ chat_id оператора с ботом или ПРИВАТНУЮ группу."
+    )
+    OPS_CHAT_ID = None
 
 # ── Каталог продуктов (оферов) ────────────────────────────────────────────────
 # Лимит файла продукта = жёсткий потолок Telegram Bot API на отправку (50 МБ).
