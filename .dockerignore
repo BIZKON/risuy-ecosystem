@@ -34,7 +34,13 @@
 **/requirements.in
 
 # ── Не нужно в рантайме бота/панели ───────────────────────────────────────────
-landing/
+# ⚠️ landing/ ЗДЕСЬ ИСКЛЮЧАТЬ НЕЛЬЗЯ. Timeweb static-nobuild (app risuy-landing,
+#    index_dir=/landing) применяет ЭТОТ ЖЕ корневой .dockerignore при выгрузке
+#    файлов сайта — исключение landing/ вырезает index.html/*.html → Caddy отдаёт
+#    404 на ВСЕ страницы (включая privacy.html, на который смотрит PRIVACY_URL).
+#    В образ бота/панели landing/ всё равно не попадает: корневой Dockerfile делает
+#    точечные COPY bot-telegram/ и admin-panel/ (без COPY . .), так что держать
+#    landing/ в контексте безопасно — в финальный образ он не COPY'ится.
 db/
 README.md
 **/README.md
