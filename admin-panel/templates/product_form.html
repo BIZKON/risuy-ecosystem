@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% set is_edit = product is not none %}
+
+{% block title %}{% if is_edit %}Продукт{% else %}Новый продукт{% endif %}{% endblock %}
+{% block body_class %}page-product-form{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Хлебные крошки">
+  <a href="/products">← К продуктам</a>
+</nav>
+
+<div class="page-head">
+  <h1 class="page-head__title">{% if is_edit %}{{ product.name|e }}{% else %}Новый продукт{% endif %}</h1>
+  <p class="page-head__hint">Офер каталога: название, вид, цена, описание, внешняя ссылка оплаты/материала и/или файл. Переиспользуется в любом числе рассылок.</p>
+</div>
+
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+<div class="alert-strip alert-strip--static" role="note">
+  <span class="alert-strip__txt">
+    Нужно хотя бы одно: файл <strong>и/или</strong> ссылка. Цена и описание показываются в рассылке;
+    оплата — внешняя, по ссылке (нативного эквайринга нет). Файл валидируется по содержимому
+    (расширение + тип), исполняемые отклоняются, лимит {{ max_file_mb }} МБ.
+  </span>
+</div>
+
+{# multipart: загрузка файла. Один POST /products (создать ИЛИ обновить по hidden product_id).
+   accept= — подсказка браузеру; финальная проверка (magic-byte) на сервере. #}
+<form class="composer" method="post" action="/products" enctype="multipart/form-data" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% if is_edit %}<input type="hidden" name="product_id" value="{{ product.id }}">{% endif %}
+
+  <div class="cols">
+    <section class="card" aria-label="Офер">
+      <h2 class="card__title">Офер</h2>
+
+      <label class="field">
+        <span class="field__label">Название <span class="field__hint">показывается в рассылке</span></span>
+        <input class="field__input" type="text" name="name" maxlength="{{ name_max }}" required
+               value="{{ product.name|e if is_edit else '' }}"
+               placeholder="Напр.: Гайд «7 ошибок в рисовании»">
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span class="field__label">Вид</span>
+          <select class="field__input" name="kind" required>
+            {% for k in kinds %}
+            <option value="{{ k|e }}"{% if is_edit and product.kind == k %} selected{% endif %}>{{ kind_labels.get(k, k) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Цена <span class="field__hint">опц.</span></span>
+          <input class="field__input" type="text" name="price" inputmode="decimal"
+                 value="{{ product.price if (is_edit and product.price is not none) else '' }}"
+                 placeholder="напр. 1990">
+        </label>
+
+        <label class="field">
+          <span class="field__label">Валюта</span>
+          <select class="field__input" name="currency">
+            {% for cur in currencies %}
+            <option value="{{ cur|e }}"{% if (is_edit and product.currency == cur) or (not is_edit and cur == 'RUB') %} selected{% endif %}>{{ currency_labels.get(cur, cur) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <p class="hint hint--block">Цена опциональна (у лид-магнита её обычно нет). Если задана — показывается рядом с названием в рассылке.</p>
+
+      <label class="field">
+        <span class="field__label">Описание / подпись <span class="field__hint">опц., до {{ caption_max }} симв.</span></span>
+        <textarea class="field__input field__textarea" name="caption" rows="4"
+                  placeholder="Короткое описание офера. Идёт в рассылку и/или как подпись к файлу.">{{ product.caption|e if (is_edit and product.caption) else '' }}</textarea>
+      </label>
+    </section>
+
+    <div class="col-right">
+      <section class="card" aria-label="Материал">
+        <h2 class="card__title">Материал доступа</h2>
+
+        <label class="field">
+          <span class="field__label">Внешняя ссылка <span class="field__hint">опц., http/https — оплата/материал</span></span>
+          <input class="field__input" type="url" name="link" maxlength="2048" inputmode="url"
+                 value="{{ product.link|e if (is_edit and product.link) else '' }}"
+                 placeholder="https://getcourse.ru/pay/...">
+        </label>
+        <p class="hint hint--block">Кнопка/ссылка ведёт на внешнюю оплату или материал. Трекинг перехода (/r) строится поверх неё, как у рассылок.</p>
+
+        {% if is_edit and product.has_file %}
+        <div class="estimate">
+          <span class="estimate__label">Прикреплён файл</span>
+          <span class="file-name mono">{{ product.file_name|e if product.file_name else 'файл' }}</span>
+          {% if product.file_size %}<span class="estimate__hint">{{ (product.file_size / 1024 / 1024)|round(2) }} МБ{% if product.file_ready %} · уже залит в Telegram{% else %} · ожидает заливки ботом{% endif %}</span>{% endif %}
+          <label class="field field--check field--check-spaced">
+            <input type="checkbox" name="clear_file" value="1">
+            <span>Удалить файл <span class="field__hint">(оставить только ссылку)</span></span>
+          </label>
+        </div>
+        {% endif %}
+
+        <label class="field">
+          <span class="field__label">{% if is_edit and product.has_file %}Заменить файл{% else %}Файл{% endif %}
+            <span class="field__hint">опц., до {{ max_file_mb }} МБ: картинка или документ</span></span>
+          <input class="field__input field__file" type="file" name="file" accept="{{ accept_attr }}">
+        </label>
+        <p class="hint hint--block">Картинки (jpg, png, webp, gif) уйдут как фото; pdf, doc(x), xls(x), ppt(x), zip, mp4, mp3, txt — как документ. Файл бот заливает один раз и переиспользует во всех рассылках.{% if is_edit and product.file_ready %} <strong>Этот файл уже залит в Telegram</strong> — для замены надёжнее завести новый офер (старый file_id у бота останется).{% endif %}</p>
+      </section>
+
+      {% if is_edit %}
+      <section class="card" aria-label="Статус">
+        <h2 class="card__title">Статус</h2>
+        <label class="field">
+          <select class="field__input" name="status">
+            <option value="active"{% if product.status == 'active' %} selected{% endif %}>Активен (доступен для рассылок)</option>
+            <option value="archived"{% if product.status == 'archived' %} selected{% endif %}>В архиве (скрыт из выбора)</option>
+          </select>
+        </label>
+      </section>
+      {% else %}
+      <input type="hidden" name="status" value="active">
+      {% endif %}
+
+      <div class="form-actions">
+        <a class="btn btn--ghost" href="/products">Отмена</a>
+        <button class="btn btn--primary" type="submit">{% if is_edit %}Сохранить{% else %}Создать продукт{% endif %}</button>
+      </div>
+    </div>
+  </div>
+</form>
+{% endblock %}

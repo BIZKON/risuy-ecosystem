@@ -62,6 +62,69 @@ def deliver(guide_url: str) -> str:
     )
 
 
+# ── Подпись офера-продукта (общая для рассылок и выдачи воронки) ──────────────
+# Чистые форматтеры, без БД/Telegram. Используются worker.py (доставка офера в
+# рассылке) и handlers.py (выдача лид-магнита в воронке) — единый формат подписи,
+# чтобы офер выглядел одинаково везде. plain-текст (parse_mode не используем, §5.11);
+# длину под лимит caption/текста режет messaging-слой при отправке.
+def format_price(price, currency: str | None) -> str:
+    """Человекочитаемая цена офера: '1 990 ₽' / '1 990.50 USD'. price — Decimal|None.
+
+    Целое — без копеек; дробное — с двумя знаками. Рубли символом ₽; прочие валюты —
+    кодом. Разряд тысяч узким пробелом. None/пусто → '' (цена не показывается).
+    """
+    if price is None:
+        return ""
+    cur = (currency or "RUB").upper()
+    if price == price.to_integral_value():
+        num = f"{int(price):,}".replace(",", " ")
+    else:
+        num = f"{price:,.2f}".replace(",", " ")
+    return f"{num} ₽" if cur == "RUB" else f"{num} {cur}"
+
+
+def product_caption(product: dict) -> str:
+    """Подпись офера: caption (описание) → название с ценой. Название показываем всегда,
+    цену — только если задана. Пустые части опускаем. Ссылку добавляет вызывающий код."""
+    parts: list[str] = []
+    cap = (product.get("caption") or "").strip()
+    if cap:
+        parts.append(cap)
+    name = (product.get("name") or "").strip()
+    price_str = format_price(product.get("price"), product.get("currency"))
+    if name and price_str:
+        parts.append(f"{name} — {price_str}")
+    elif name:
+        parts.append(name)
+    elif price_str:
+        parts.append(price_str)
+    return "\n\n".join(parts)
+
+
+# Выдача воронки продуктом-лид-магнитом из каталога (вместо GUIDE_URL-заглушки, если
+# активный офер настроен в app_settings). Тёплая обёртка вокруг подписи офера; если
+# офер не настроен/не готов — остаётся текущая выдача deliver(GUIDE_URL) без изменений.
+DELIVER_PRODUCT_HEAD = "Готово! 🎉 Лови свой подарок:"
+DELIVER_PRODUCT_TAIL = (
+    "Открывай и занимайся в удовольствие. И обязательно поделись, что получилось 🌷"
+)
+
+
+def deliver_product(product: dict, link: str | None) -> str:
+    """Текст/подпись выдачи лид-магнита в воронке: тёплая шапка + подпись офера + (опц.)
+    ссылка + тёплый хвост. Если у офера есть файл — это идёт caption'ом к файлу; если
+    только ссылка — обычным текстом. Ссылку даём «сырой» (в воронке нет per-recipient
+    трекинга /r, он привязан к рассылке)."""
+    body = product_caption(product)
+    chunks = [DELIVER_PRODUCT_HEAD]
+    if body:
+        chunks.append(body)
+    if link:
+        chunks.append(link)
+    chunks.append(DELIVER_PRODUCT_TAIL)
+    return "\n\n".join(chunks)
+
+
 # Прогрев — три касания после выдачи гайда.
 FOLLOW_UP_1 = (
     "Как первые шаги? 🌷 Если что-то непонятно с подарком — напиши нам: lesovschool@yandex.ru."

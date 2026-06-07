@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pager, flash %}
+
+{% block title %}Продукты{% endblock %}
+{% block body_class %}page-products{% endblock %}
+
+{# Бейдж вида офера (lead_magnet|tripwire|main). Цвет — через data-атрибут (styles.css). #}
+{% macro kind_badge(kind) %}
+  <span class="badge badge--kind" data-kind="{{ kind|e }}">{{ kind_labels.get(kind, kind|e) }}</span>
+{%- endmacro %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Продукты</h1>
+  <p class="page-head__hint">Каталог оферов (лид-магниты, трипваеры, основные). Заводится один раз и переиспользуется в рассылках. Оплата — внешняя, по ссылке через трекинг.</p>
+</div>
+
+{% if saved %}{{ flash('Продукт сохранён.', 'ok') }}{% endif %}
+{% if archived %}{{ flash('Продукт перемещён в архив.', 'ok') }}{% endif %}
+{% if lm_flash %}{{ flash('Выдача воронки обновлена.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Выдача воронки лид-магнитом (вместо GUIDE_URL-заглушки). Панель пишет настройку,
+   бот её читает и выдаёт офер после прохождения воронки. Кандидаты — активные лид-
+   магниты, у которых есть файл и/или ссылка. Снять = вернуть выдачу на GUIDE_URL. ── #}
+<section class="card card--lead-magnet" aria-label="Выдача воронки">
+  <h2 class="card__title">Выдача воронки</h2>
+  {% if active_lead_magnet %}
+  <p class="card__note">
+    Сейчас воронка выдаёт лид-магнит-офер:
+    <strong>{{ active_lead_magnet.name|e }}</strong>
+    {%- if active_lead_magnet.has_file %} <span class="pill pill--ok">файл{% if not active_lead_magnet.file_ready %} ⏳{% endif %}</span>{% endif %}
+    {%- if active_lead_magnet.has_link %} <span class="pill">ссылка</span>{% endif %}
+    {%- if active_lead_magnet.status != 'active' %} <span class="pill pill--muted">офер в архиве — воронка вернётся на ссылку-заглушку</span>{% endif %}
+    {%- if active_lead_magnet.has_file and not active_lead_magnet.file_ready %}
+    <br><span class="muted">Файл ещё не залит ботом — до заливки воронка временно отдаёт ссылку-заглушку.</span>{% endif %}
+  </p>
+  {% else %}
+  <p class="card__note muted">Воронка выдаёт ссылку-заглушку (GUIDE_URL). Можно вместо неё выдавать лид-магнит-офер из каталога.</p>
+  {% endif %}
+
+  {% if lead_magnet_candidates %}
+  <form class="inline-form" method="post" action="/products/set-lead-magnet" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Выдавать в воронке</span>
+      <select class="field__input" name="product_id">
+        <option value="">— ссылка-заглушка (GUIDE_URL) —</option>
+        {% for c in lead_magnet_candidates %}
+        <option value="{{ c.id }}"{% if active_lead_magnet and active_lead_magnet.id == c.id %} selected{% endif %}>{{ c.name|e }}{% if c.has_file %} · файл{% endif %}{% if c.has_link %} · ссылка{% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="form-actions">
+      <button class="btn btn--secondary btn--sm" type="submit">Сохранить выдачу</button>
+    </div>
+  </form>
+  <p class="hint hint--block">В списке — активные лид-магниты с файлом и/или ссылкой. Создать ещё — <a href="/products/new">Новый продукт</a> (вид «Лид-магнит»).</p>
+  {% else %}
+  <p class="hint hint--block">Нет активных лид-магнитов с файлом или ссылкой. <a href="/products/new">Создайте лид-магнит</a>, чтобы выдавать его в воронке.</p>
+  {% endif %}
+</section>
+
+<div class="toolbar">
+  <p class="toolbar__count">Всего продуктов: <strong>{{ products|length }}</strong></p>
+  <div class="toolbar__actions">
+    <a class="btn btn--primary btn--sm" href="/products/new">Новый продукт</a>
+  </div>
+</div>
+
+{% if products %}
+<div class="table-wrap">
+  <table class="table table--zebra">
+    <thead>
+      <tr>
+        <th scope="col">Название</th>
+        <th scope="col">Вид</th>
+        <th scope="col" class="num">Цена</th>
+        <th scope="col">Материал</th>
+        <th scope="col">Статус</th>
+        <th scope="col" class="col-action"><span class="vh">Действие</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in products %}
+      <tr{% if p.status == 'archived' %} class="row--muted"{% endif %}>
+        <td>{{ p.name|e }}</td>
+        <td>{{ kind_badge(p.kind) }}</td>
+        <td class="num">{% if p.price_display %}<span class="mono">{{ p.price_display }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="material-cell">
+          {%- if p.has_file %}
+            <span class="pill pill--ok" title="{{ p.file_name|e if p.file_name else 'файл' }}">файл{% if not p.file_ready %} ⏳{% endif %}</span>
+          {%- endif %}
+          {%- if p.has_link %}<span class="pill">ссылка</span>{% endif %}
+          {%- if not p.has_file and not p.has_link %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {%- if p.status == 'active' -%}
+            <span class="pill pill--ok">активен</span>
+          {%- else -%}
+            <span class="pill pill--muted">архив</span>
+          {%- endif -%}
+        </td>
+        <td class="col-action nowrap">
+          <a class="link-open" href="/products/{{ p.id }}">Открыть →</a>
+          {%- if p.status == 'active' %}
+          <form class="inline-form inline-form--tight" method="post" action="/products/{{ p.id }}/archive">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn--danger-ghost btn--sm" type="submit" title="Скрыть из выбора рассылок (строка сохранится)">В архив</button>
+          </form>
+          {%- endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <p class="empty__title">Продуктов пока нет</p>
+  <p class="empty__text">Создайте первый офер — <a href="/products/new">Новый продукт</a>. Лид-магнит можно сделать выдачей воронки вместо ссылки-заглушки.</p>
+</div>
+{% endif %}
+{% endblock %}

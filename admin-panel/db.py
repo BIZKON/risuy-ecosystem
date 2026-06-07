@@ -39,6 +39,12 @@ _STATUS_SET = frozenset(STATUSES)
 _SOURCE_SET = frozenset(SOURCES)
 _MESSENGER_SET = frozenset(MESSENGERS)
 
+# Каталог продуктов (оферов): allow-list'ы видов/статусов/валют — defence-in-depth
+# поверх CHECK'ов схемы (products_kind_chk / products_status_chk) и валидации хендлера.
+_PRODUCT_KIND_SET = frozenset(config.PRODUCT_KINDS)
+_PRODUCT_STATUS_SET = frozenset(config.PRODUCT_STATUSES)
+_PRODUCT_CURRENCY_SET = frozenset(config.PRODUCT_CURRENCIES)
+
 # Сортировка списка: ключ из query-string → готовый ORDER BY фрагмент (без ввода).
 _SORT_SQL: dict[str, str] = {
     "created_desc": "created_at desc",
@@ -633,11 +639,13 @@ async def create_broadcast_with_audit(
     recipient_estimate: int,
     file_meta: dict[str, Any] | None,
     target_url: str | None,
+    product_id: int | None = None,
     actor: str,
     ip: str | None,
     user_agent: str | None,
 ) -> int:
-    """Создать черновик рассылки + опц. файл + опц. трекинг-токен. Аудит broadcast_create.
+    """Создать черновик рассылки + опц. файл + опц. трекинг-токен + опц. привязку офера.
+    Аудит broadcast_create.
 
     ОДНА транзакция: insert broadcasts(status='draft') → опц. insert broadcast_files(bytes)
     → опц. insert link_tokens(token, target_url, broadcast_id) → _insert_audit. Получателей
@@ -645,21 +653,31 @@ async def create_broadcast_with_audit(
 
     messenger/kind валидируются здесь как defence-in-depth (хендлер тоже проверит).
     audience_filter кладём как jsonb — подмножество фильтров, не сырой SQL.
+    product_id (опц.): привязка офера из каталога. Пишем ТОЛЬКО если офер существует и
+    status='active' — иначе тихо null (хендлер мусор уже отфильтровал, здесь финальный
+    барьер «не связать архивный/несуществующий»). broadcasts.product_id есть on delete set null.
     """
     if messenger not in _BROADCAST_MESSENGER_SET:
         raise ValueError(f"Недопустимый мессенджер рассылки: {messenger!r}")
     audience_json = json.dumps(audience, ensure_ascii=False, default=_json_default)
     async with pool.acquire() as c:
         async with c.transaction():
+            # Привязка офера: подтверждаем active в той же транзакции; иначе null.
+            product_ref: int | None = None
+            if product_id is not None:
+                ok = await c.fetchval(
+                    "select 1 from products where id = $1 and status = 'active'", product_id
+                )
+                product_ref = product_id if ok else None
             bid = await c.fetchval(
                 """
                 insert into broadcasts
                     (title, messenger, kind, body_template, audience_filter,
-                     status, recipient_count, created_by)
-                values ($1, $2, $3, $4, $5::jsonb, 'draft', null, $6)
+                     status, recipient_count, created_by, product_id)
+                values ($1, $2, $3, $4, $5::jsonb, 'draft', null, $6, $7)
                 returning id
                 """,
-                title, messenger, kind, body_template, audience_json, actor,
+                title, messenger, kind, body_template, audience_json, actor, product_ref,
             )
             bid = int(bid)
             if file_meta is not None:
@@ -694,6 +712,7 @@ async def create_broadcast_with_audit(
                     "recipient_estimate": int(recipient_estimate),
                     "has_file": file_meta is not None,
                     "has_link": bool(target_url),
+                    "has_product": product_ref is not None,
                 },
             )
             return bid
@@ -741,7 +760,7 @@ async def get_broadcast(broadcast_id: int) -> asyncpg.Record | None:
     q = """
         select id, title, messenger, kind, body_template, audience_filter,
                status, recipient_count, created_by, created_at,
-               started_at, finished_at, totals
+               started_at, finished_at, totals, product_id
         from broadcasts
         where id = $1
     """
@@ -983,3 +1002,460 @@ async def cancel_broadcast_with_audit(
                 detail={"broadcast_id": broadcast_id, "from_status": exists["status"]},
             )
             return "canceled"
+
+
+# =========================================================================== #
+# Блок ПРОДУКТЫ (каталог оферов): CRUD + список для селектора композера + привязка
+# офера к рассылке. Объекты — db/schema_products.sql, гранты — db/panel_role.sql.
+#
+# Инвариант (panel_rw, без BOT_TOKEN):
+#   • Панель пишет name/kind/price/currency/caption/link/file(+name/mime)/status и
+#     created_by — это ровно столбцы из `grant insert/update … on products`. Колонку
+#     file_tg_id панель НЕ пишет (её проставляет БОТ после первой заливки в OPS_CHAT_ID);
+#     отсутствие file_tg_id в наших SQL — НЕ забывчивость, а соблюдение column-level гранта.
+#   • Байты файла кладём в products.file; бот зальёт в Telegram и обнулит bytes.
+#   • «Файл И/ИЛИ ссылка, но хотя бы одно» проверяет ХЕНДЛЕР (UX-сообщение), не CHECK.
+#   • Архивация — status='archived' (delete на products панели не выдан, строки живут).
+#   • Все мутации — В ОДНОЙ транзакции с аудитом (product_create|product_update|
+#     product_archive), detail без ПДн (это контент-офер, ПДн субъектов не несёт).
+# =========================================================================== #
+
+async def list_products(*, include_archived: bool = True) -> list[asyncpg.Record]:
+    """Список оферов для раздела «Продукты» (карточки). НЕ селектит сырые байты file —
+    только наличие файла (file is not null OR file_tg_id is not null) и метаданные.
+
+    include_archived=True показывает и архивные (с бейджем). Сортировка: активные
+    раньше архивных, внутри — свежие сверху (products_created_idx).
+    """
+    where = "" if include_archived else "where status = 'active'"
+    q = f"""
+        select
+            id, name, kind, price, currency, caption, link,
+            (file is not null or file_tg_id is not null) as has_file,
+            file_tg_id is not null as file_ready,
+            file_name, file_mime, status, created_by, created_at, updated_at
+        from products
+        {where}
+        order by (status = 'active') desc, created_at desc
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q)
+
+
+async def get_product(product_id: int) -> asyncpg.Record | None:
+    """Карточка/конструктор офера. НЕ селектит сырые байты file (могут быть мегабайты) —
+    только наличие/готовность файла + метаданные. id типизирован int в хендлере.
+    """
+    q = """
+        select
+            id, name, kind, price, currency, caption, link,
+            (file is not null or file_tg_id is not null) as has_file,
+            file is not null as has_bytes,
+            file_tg_id is not null as file_ready,
+            length(file) as file_size,
+            file_name, file_mime, status, created_by, created_at, updated_at
+        from products
+        where id = $1
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q, product_id)
+
+
+async def list_products_for_select() -> list[asyncpg.Record]:
+    """Активные оферы для селектора в композере рассылки. Лёгкая выборка (без байт).
+
+    Только active (архивные нельзя привязать к новой рассылке). Метаданные для
+    предпросмотра выбранного офера прямо в форме (название/вид/цена/файл/ссылка).
+    """
+    q = """
+        select
+            id, name, kind, price, currency, caption, link,
+            (file is not null or file_tg_id is not null) as has_file,
+            file_name, file_mime
+        from products
+        where status = 'active'
+        order by kind, created_at desc
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q)
+
+
+def _validate_product_fields(
+    *, kind: str, currency: str, status: str
+) -> None:
+    """Defence-in-depth: вид/валюта/статус против allow-list ДО SQL (CHECK тоже ловит)."""
+    if kind not in _PRODUCT_KIND_SET:
+        raise ValueError(f"Недопустимый вид продукта: {kind!r}")
+    if currency not in _PRODUCT_CURRENCY_SET:
+        raise ValueError(f"Недопустимая валюта: {currency!r}")
+    if status not in _PRODUCT_STATUS_SET:
+        raise ValueError(f"Недопустимый статус продукта: {status!r}")
+
+
+def _product_audit_detail(
+    *, product_id: int, kind: str, status: str,
+    has_price: bool, has_link: bool, file_action: str,
+) -> dict:
+    """detail аудита продукта БЕЗ ПДн/байт: только факты (вид/статус/наличие полей)."""
+    return {
+        "product_id": product_id,
+        "kind": kind,
+        "status": status,
+        "has_price": has_price,
+        "has_link": has_link,
+        "file": file_action,  # 'kept' | 'replaced' | 'cleared' | 'none' | 'added'
+    }
+
+
+async def create_product_with_audit(
+    *,
+    name: str,
+    kind: str,
+    price,                       # Decimal | None
+    currency: str,
+    caption: str | None,
+    link: str | None,
+    file_meta: dict | None,     # {"bytes","filename","mime"} | None
+    status: str,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> int:
+    """Создать офер + опц. байты файла. Аудит product_create в той же транзакции.
+
+    file_tg_id НЕ трогаем (его проставит бот). price — numeric(12,2) или NULL.
+    Возвращает products.id. Хотя бы одно из (file|link) гарантирует ХЕНДЛЕР.
+    """
+    _validate_product_fields(kind=kind, currency=currency, status=status)
+    fb = file_meta or {}
+    file_bytes = fb.get("bytes")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            pid = await c.fetchval(
+                """
+                insert into products
+                    (name, kind, price, currency, caption, link,
+                     file, file_name, file_mime, status, created_by)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                returning id
+                """,
+                name, kind, price, currency, caption, link,
+                file_bytes, fb.get("filename"), fb.get("mime"), status, actor,
+            )
+            pid = int(pid)
+            await _insert_audit(
+                c, actor=actor, action="product_create", ip=ip, user_agent=user_agent,
+                detail=_product_audit_detail(
+                    product_id=pid, kind=kind, status=status,
+                    has_price=price is not None, has_link=bool(link),
+                    file_action="added" if file_bytes else "none",
+                ),
+            )
+            return pid
+
+
+async def update_product_with_audit(
+    product_id: int,
+    *,
+    name: str,
+    kind: str,
+    price,                       # Decimal | None
+    currency: str,
+    caption: str | None,
+    link: str | None,
+    file_meta: dict | None,     # {"bytes","filename","mime"} | None — новый файл (заменить)
+    clear_file: bool,           # True → снять текущий файл (и bytes, и сбросить метаданные)
+    status: str,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> asyncpg.Record | None:
+    """Обновить офер. Аудит product_update в той же транзакции. None, если офер не найден.
+
+    Семантика файла (панель НЕ пишет file_tg_id — это колонка бота):
+      • file_meta задан → ЗАМЕНА: пишем новые file/file_name/file_mime. (file_tg_id у
+        бота протух бы — но его сброс делает БОТ под owner-ролью; панель его не трогает.
+        Поэтому замена файла из панели рассчитана на оферы БЕЗ ещё-готового file_tg_id;
+        для уже залитых правьте через архив+новый офер — см. UX-подсказку в форме.)
+      • clear_file=True и нет нового файла → снимаем bytes и метаданные (file=null,
+        file_name=null, file_mime=null). file_tg_id (если бот успел) НЕ трогаем грантом.
+      • иначе → файл не меняем (правка только текстовых полей/цены/ссылки/статуса).
+    «Хотя бы одно из (file|link)» проверяет ХЕНДЛЕР с учётом текущего состояния офера.
+    """
+    _validate_product_fields(kind=kind, currency=currency, status=status)
+    fb = file_meta or {}
+    new_bytes = fb.get("bytes")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            old = await c.fetchrow(
+                "select id, status from products where id = $1 for update", product_id
+            )
+            if old is None:
+                return None
+            if new_bytes:
+                file_action = "replaced"
+                # Новый файл → file_tg_id протух; его сброс делает БОТ (column-level грант),
+                # но счётчик попыток заливки СБРАСЫВАЕМ в 0 здесь: новый файл заслуживает
+                # свежий бюджет, иначе исчерпанный старым битым файлом upload_attempts
+                # навсегда исключил бы новый годный файл из очереди заливки.
+                row = await c.fetchrow(
+                    """
+                    update products set
+                        name = $2, kind = $3, price = $4, currency = $5,
+                        caption = $6, link = $7, status = $8,
+                        file = $9, file_name = $10, file_mime = $11,
+                        upload_attempts = 0, upload_error = null
+                    where id = $1
+                    returning id, name, kind, status, updated_at
+                    """,
+                    product_id, name, kind, price, currency, caption, link, status,
+                    new_bytes, fb.get("filename"), fb.get("mime"),
+                )
+            elif clear_file:
+                file_action = "cleared"
+                # Файл снят → очереди заливки больше нет; счётчик попыток обнуляем для чистоты.
+                row = await c.fetchrow(
+                    """
+                    update products set
+                        name = $2, kind = $3, price = $4, currency = $5,
+                        caption = $6, link = $7, status = $8,
+                        file = null, file_name = null, file_mime = null,
+                        upload_attempts = 0, upload_error = null
+                    where id = $1
+                    returning id, name, kind, status, updated_at
+                    """,
+                    product_id, name, kind, price, currency, caption, link, status,
+                )
+            else:
+                file_action = "kept"
+                row = await c.fetchrow(
+                    """
+                    update products set
+                        name = $2, kind = $3, price = $4, currency = $5,
+                        caption = $6, link = $7, status = $8
+                    where id = $1
+                    returning id, name, kind, status, updated_at
+                    """,
+                    product_id, name, kind, price, currency, caption, link, status,
+                )
+            await _insert_audit(
+                c, actor=actor, action="product_update", ip=ip, user_agent=user_agent,
+                detail=_product_audit_detail(
+                    product_id=product_id, kind=kind, status=status,
+                    has_price=price is not None, has_link=bool(link),
+                    file_action=file_action,
+                ),
+            )
+            return row
+
+
+async def archive_product_with_audit(
+    product_id: int,
+    *,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str | None:
+    """Архивировать офер: status='active'→'archived'. Аудит product_archive.
+
+    Условный UPDATE … where status='active' атомарно отсекает повтор/гонку. Возвращает
+    "archived" | "conflict" (был уже archived) | None (404). delete не используем — офер
+    остаётся (ссылки/история рассылок не рвутся), просто скрыт из выбора композера.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            exists = await c.fetchrow(
+                "select status from products where id = $1 for update", product_id
+            )
+            if exists is None:
+                return None
+            row = await c.fetchrow(
+                """
+                update products set status = 'archived'
+                where id = $1 and status = 'active'
+                returning id
+                """,
+                product_id,
+            )
+            if row is None:
+                return "conflict"
+            await _insert_audit(
+                c, actor=actor, action="product_archive", ip=ip, user_agent=user_agent,
+                detail={"product_id": product_id, "from_status": exists["status"]},
+            )
+            return "archived"
+
+
+async def set_broadcast_product_with_audit(
+    broadcast_id: int,
+    product_id: int | None,
+    *,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str | None:
+    """Привязать/отвязать офер к УЖЕ существующему черновику: UPDATE broadcasts.product_id.
+
+    Используется маршрутом /broadcasts/{id}/product (сменить/снять офер на ещё не
+    запущенной рассылке). Только status='draft' — после queued состав сообщения
+    зафиксирован. product_id=None отвязывает. Если задан — проверяем, что офер
+    существует и active (нельзя привязать архивный/несуществующий). Возвращает:
+      "set" | "conflict" (рассылка не draft) | "bad_product" (офер не active/нет) |
+      None (рассылки нет, 404). Аудит broadcast_product_set. Грант — update(product_id).
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            b = await c.fetchrow(
+                "select status from broadcasts where id = $1 for update", broadcast_id
+            )
+            if b is None:
+                return None
+            if b["status"] != "draft":
+                return "conflict"
+            if product_id is not None:
+                ok = await c.fetchval(
+                    "select 1 from products where id = $1 and status = 'active'", product_id
+                )
+                if not ok:
+                    return "bad_product"
+            await c.execute(
+                "update broadcasts set product_id = $2 where id = $1",
+                broadcast_id, product_id,
+            )
+            await _insert_audit(
+                c, actor=actor, action="broadcast_product_set", ip=ip, user_agent=user_agent,
+                detail={"broadcast_id": broadcast_id, "product_id": product_id},
+            )
+            return "set"
+
+
+# =========================================================================== #
+# Блок APP_SETTINGS: singleton-настройки панели (KV). Грант — select/insert/update
+# на app_settings (panel_role.sql). Сейчас единственный ключ — активный лид-магнит-
+# офер воронки (ЗАМЕНА GUIDE_URL-заглушки): панель ПИШЕТ, бот ЧИТАЕТ
+# (bot-telegram/db.py::get_active_lead_magnet_product). Запись симметрична чтению
+# бота: валидируем kind='lead_magnet' и status='active' ДО upsert, иначе бот-сторона
+# всё равно отвергнет значение и воронка молча уйдёт на GUIDE_URL.
+# =========================================================================== #
+
+# Ключ singleton-настройки «активный лид-магнит-офер воронки». ДОЛЖЕН совпадать с
+# ключом, который читает бот (bot-telegram/db.py::get_active_lead_magnet_product).
+LEAD_MAGNET_SETTING_KEY = "active_lead_magnet_product_id"
+
+
+async def get_app_setting(key: str) -> str | None:
+    """Значение singleton-настройки по ключу (или None). value — text (KV-универсальность).
+
+    Зеркалит bot-telegram/db.py::get_app_setting — но под panel_rw (тот же грант select).
+    """
+    async with pool.acquire() as c:
+        return await c.fetchval("select value from app_settings where key = $1", key)
+
+
+async def get_active_lead_magnet() -> asyncpg.Record | None:
+    """Текущий активный лид-магнит-офер воронки для индикации в UI (или None).
+
+    Читает app_settings[LEAD_MAGNET_SETTING_KEY], приводит к id и возвращает строку
+    продукта (id/name/kind/status/наличие файла/ссылки), чтобы products.html показал,
+    какой офер сейчас выдаётся воронкой. Невалидное/устаревшее значение (пусто/мусор/
+    продукт удалён) → None (UI покажет «не назначен»). НЕ чистит мусорное значение —
+    только читает (бот-сторона и так трактует промах как фолбэк на GUIDE_URL).
+    """
+    raw = await get_app_setting(LEAD_MAGNET_SETTING_KEY)
+    if not raw:
+        return None
+    try:
+        product_id = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            """
+            select id, name, kind, status,
+                   (file is not null or file_tg_id is not null) as has_file,
+                   file_tg_id is not null as file_ready, link
+            from products
+            where id = $1
+            """,
+            product_id,
+        )
+
+
+async def set_active_lead_magnet_with_audit(
+    product_id: int | None,
+    *,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str:
+    """Назначить/снять активный лид-магнит-офер воронки (upsert app_settings + аудит).
+
+    product_id=None → снять (удаляем строку настройки → бот фолбэчит на GUIDE_URL).
+    Иначе валидируем СИММЕТРИЧНО боту: офер существует, kind='lead_magnet', status=
+    'active' и у него есть чем выдавать (file/file_tg_id ИЛИ link) — иначе бот всё равно
+    вернёт фолбэк, поэтому не даём назначить «пустой»/не-тот офер (понятная ошибка в UI).
+    Возвращает: "set" | "cleared" | "bad_product" (не лид-магнит/не active/нечем выдавать/
+    нет такого). Запись и аудит — в ОДНОЙ транзакции (паттерн остальных мутаций).
+    Грант: select/insert/update on app_settings (panel_role.sql) — delete тоже покрыт?
+    НЕТ: delete на app_settings панели НЕ выдан, поэтому «снять» = upsert пустого value
+    (бот трактует пустое значение как отсутствие настройки → фолбэк), строку не удаляем.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            if product_id is None:
+                # «Снять»: пишем пустое value (delete на app_settings не грантован панели).
+                # get_active_lead_magnet_product у бота на пустом value возвращает None → GUIDE_URL.
+                await c.execute(
+                    """
+                    insert into app_settings (key, value) values ($1, '')
+                    on conflict (key) do update set value = excluded.value
+                    """,
+                    LEAD_MAGNET_SETTING_KEY,
+                )
+                await _insert_audit(
+                    c, actor=actor, action="lead_magnet_set", ip=ip, user_agent=user_agent,
+                    detail={"product_id": None, "cleared": True},
+                )
+                return "cleared"
+            # Назначение: подтверждаем lead_magnet+active+есть-чем-выдавать в той же транзакции.
+            ok = await c.fetchrow(
+                """
+                select (file is not null or file_tg_id is not null) as has_file, link
+                from products
+                where id = $1 and kind = 'lead_magnet' and status = 'active'
+                """,
+                product_id,
+            )
+            if ok is None:
+                return "bad_product"
+            if not ok["has_file"] and not (ok["link"] or "").strip():
+                # Ни файла, ни ссылки — выдавать нечем, бот вернёт фолбэк → не назначаем.
+                return "bad_product"
+            await c.execute(
+                """
+                insert into app_settings (key, value) values ($1, $2)
+                on conflict (key) do update set value = excluded.value
+                """,
+                LEAD_MAGNET_SETTING_KEY, str(product_id),
+            )
+            await _insert_audit(
+                c, actor=actor, action="lead_magnet_set", ip=ip, user_agent=user_agent,
+                detail={"product_id": product_id, "cleared": False},
+            )
+            return "set"
+
+
+async def list_lead_magnet_products() -> list[asyncpg.Record]:
+    """Активные лид-магнит-оферы, ГОДНЫЕ в выдачу воронки (есть файл ИЛИ ссылка) — для
+    селектора «Выдавать в воронке» на /products. Узкая выборка (без байт)."""
+    q = """
+        select id, name,
+               (file is not null or file_tg_id is not null) as has_file,
+               file_tg_id is not null as file_ready, link
+        from products
+        where kind = 'lead_magnet' and status = 'active'
+          and (file is not null or file_tg_id is not null or link is not null)
+        order by created_at desc
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q)

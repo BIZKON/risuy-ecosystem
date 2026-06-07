@@ -20,6 +20,7 @@
       <nav class="topnav" aria-label="Основная навигация">
         <a href="/"{% if active == 'dashboard' %} aria-current="page"{% endif %}>Дашборд</a>
         <a href="/leads"{% if active == 'leads' %} aria-current="page"{% endif %}>Лиды</a>
+        <a href="/products"{% if active == 'products' %} aria-current="page"{% endif %}>Продукты</a>
         <a href="/broadcasts"{% if active == 'broadcasts' %} aria-current="page"{% endif %}>Рассылки</a>
       </nav>
       {% if csrf_token %}

@@ -107,6 +107,41 @@
         <p class="hint hint--block">Бот всё равно отправит только тем, у кого есть согласие и Telegram-адрес и кто не отозвал согласие — даже если фильтр шире.</p>
       </section>
 
+      {# ── Прикрепить продукт из каталога (опц.). Привязка в broadcasts.product_id. ── #}
+      <section class="card" aria-label="Продукт">
+        <h2 class="card__title">Продукт <span class="card__title-num">опц.</span></h2>
+        {% if products %}
+        <label class="field">
+          <span class="field__label">Офер из каталога <span class="field__hint">показ названия/цены в рассылке</span></span>
+          <select class="field__input" name="product_id">
+            <option value="">— без продукта —</option>
+            {% for p in products %}
+            <option value="{{ p.id }}">{{ p.name|e }} · {{ product_kind_labels.get(p.kind, p.kind) }}{% if p.price_display %} · {{ p.price_display }}{% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {# Справочник активных оферов (предпросмотр без JS): название, вид, цена, материал. #}
+        <details class="reveal-svc">
+          <summary>Что в каталоге ({{ products|length }})</summary>
+          {% for p in products %}
+          <div class="product-preview">
+            <span class="product-preview__name">{{ p.name|e }}</span>
+            <span class="product-preview__row">
+              <span>{{ product_kind_labels.get(p.kind, p.kind) }}</span>
+              {% if p.price_display %}<span class="mono">{{ p.price_display }}</span>{% endif %}
+              {% if p.has_file %}<span class="pill pill--ok" title="{{ p.file_name|e if p.file_name else 'файл' }}">файл</span>{% endif %}
+              {% if p.has_link %}<span class="pill">ссылка</span>{% endif %}
+            </span>
+            {% if p.caption %}<span class="product-preview__row">{{ p.caption|e }}</span>{% endif %}
+          </div>
+          {% endfor %}
+        </details>
+        <p class="hint hint--block">Привязка фиксирует, какой офер продвигает рассылка. Сам текст и трекинг-ссылку задавайте слева. Нет нужного — <a href="/products/new">создайте продукт</a>.</p>
+        {% else %}
+        <p class="card__note muted">В каталоге пока нет активных продуктов. <a href="/products/new">Создать продукт</a> — и он появится здесь для привязки.</p>
+        {% endif %}
+      </section>
+
       <div class="form-actions">
         <a class="btn btn--ghost" href="/broadcasts">Отмена</a>
         <button class="btn btn--primary" type="submit">Создать черновик</button>

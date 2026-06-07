@@ -712,6 +712,39 @@ select.field__input {
 .reveal-svc--wide summary { font-size: 13px; }
 .send-form .field { margin-bottom: 12px; }
 
+/* ── Каталог продуктов (оферов) ── */
+/* Бейдж вида офера — спокойные акценты по типу (lead_magnet/tripwire/main). */
+.badge--kind { background: var(--surface-2); color: var(--ink-soft); border-color: var(--line); font-weight: 550; }
+.badge--kind[data-kind="lead_magnet"] { background: var(--accent-soft); color: var(--accent); border-color: #cfddf8; }
+.badge--kind[data-kind="tripwire"]    { background: var(--warn-soft);   color: var(--warn);   border-color: #ecd6b3; }
+.badge--kind[data-kind="main"]        { background: var(--ok-soft);     color: var(--ok);     border-color: #c2e0cb; }
+
+/* Архивная строка таблицы — приглушена. */
+.row--muted td { color: var(--ink-faint); }
+.row--muted td:first-child { box-shadow: inset 3px 0 0 var(--line); }
+
+/* Ячейка «материал» (файл/ссылка-пиллы) — пиллы в ряд с переносом. */
+.material-cell { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* Имя файла в карточке офера. */
+.file-name { display: block; margin-top: 4px; word-break: break-all; color: var(--ink); }
+
+/* Несколько полей в строку (вид/цена/валюта) — переносятся на узком экране. */
+.field-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.field-row .field { flex: 1; min-width: 130px; margin-bottom: 14px; }
+
+/* Чекбокс с отступом сверху (внутри блока прикреплённого файла). */
+.field--check-spaced { margin-top: 10px; }
+
+/* Плотная inline-форма (кнопка «В архив» рядом со ссылкой «Открыть»). */
+.inline-form--tight { display: inline-block; margin-left: 10px; }
+
+/* Предпросмотр выбранного офера в композере рассылки. */
+.product-preview { margin-top: 12px; padding: 12px 14px; background: var(--surface-2);
+                   border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.product-preview__name { font-weight: 600; }
+.product-preview__row { font-size: 12.5px; color: var(--ink-soft); margin-top: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
+
 /* ── Адаптив ── */
 @media (max-width: 860px) {
   .cols { grid-template-columns: 1fr; }

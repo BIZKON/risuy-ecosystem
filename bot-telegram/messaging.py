@@ -332,53 +332,100 @@ async def send_video_note(
     return sent
 
 
+async def send_by_kind(
+    bot: Bot, tg_user_id: int, kind: str, *, file_id: str, caption: str | None,
+    source: str, reply_markup: Any | None = None, log: bool = True,
+) -> Message | None:
+    """Медиа-отправка с готовым file_id через общий bucket + лог + ПРИОРИТЕТ источника.
+
+    Интерактивный аналог raw_send_* для воронки/Лии: тот же приоритет в бакете, что у
+    send_text (PRIO_INTERACTIVE для funnel/liya/system), и зеркалирование в messages
+    (raw_send_by_kind лога не делает — он для фонового воркера, который логирует сам с
+    lead_id). Нужен для выдачи продукта-лид-магнита в воронке (фото/документ + caption).
+    Под капотом — один raw_send_by_kind с нужным prio (без двойного rate-limit). caption
+    капится до 1024 внутри raw_send_by_kind. log=False — без зеркала в тред.
+    """
+    sent: Message = await raw_send_by_kind(
+        bot, tg_user_id, kind, file_id=file_id, caption=caption,
+        reply_markup=reply_markup, prio=_prio_for_source(source),
+    )
+    if log:
+        await db.log_message(
+            tg_user_id=tg_user_id,
+            direction="out",
+            kind=kind,
+            text=(caption[:CAPTION_LIMIT] if caption else None),
+            file_id=file_id,
+            source=source,
+            tg_message_id=getattr(sent, "message_id", None),
+        )
+    return sent
+
+
+# ── Тип отправки по MIME (картинка → photo, иначе document) ──────────────────
+# Единственное правило вывода kind из mime на стороне БОТА. Для рассылок kind считает
+# и хранит панель (broadcasts.kind, admin-panel/app.py::_kind_for_mime); для ПРОДУКТОВ
+# каталога файл лежит с file_mime, а kind в БД не хранится — бот выводит его этой же
+# функцией (схема schema_products.sql: «Тип отправки код выводит из file_mime тем же
+# правилом, что и рассылки»). ПОБАЙТОВО совпадает с панельным _kind_for_mime:
+# image/* → photo, всё прочее (pdf/doc/xls/zip/mp4/…) → document. gif с mime image/gif
+# уйдёт как photo (как и в рассылках) — Telegram сам отрисует анимацию.
+def kind_for_mime(mime: str | None) -> str:
+    return "photo" if (mime or "").lower().startswith("image/") else "document"
+
+
 # ── Низкоуровневые отправки для воркера рассылок (по kind, с rate-limit) ──────
 # Лог в messages воркер делает сам (нужен lead_id), поэтому здесь log не трогаем —
 # эти функции только проводят вызов через bucket+429.
 # reply_markup опционален: воркёр рассылок прикрепляет футер «Отписаться» (§5.8); для
 # точечных ответов оператора (outbox 1:1) markup не передаётся — это не маркетинг.
 async def raw_send_text(bot: Bot, chat_id: int, text: str,
-                        *, reply_markup: Any | None = None) -> Message:
+                        *, reply_markup: Any | None = None,
+                        prio: int = PRIO_BACKGROUND) -> Message:
     return await _rate_limited_call(
-        lambda: bot.send_message(chat_id, text[:TEXT_LIMIT], reply_markup=reply_markup)
+        lambda: bot.send_message(chat_id, text[:TEXT_LIMIT], reply_markup=reply_markup),
+        prio=prio,
     )
 
 
 async def raw_send_by_kind(bot: Bot, chat_id: int, kind: str, *, file_id: str | None,
-                           caption: str | None, reply_markup: Any | None = None) -> Message:
+                           caption: str | None, reply_markup: Any | None = None,
+                           prio: int = PRIO_BACKGROUND) -> Message:
     """Отправка по типу для рассылки/outbox с готовым file_id. caption капится до 1024.
 
     parse_mode НЕ задаём — всё plain (§5.11). Для неизвестного kind при наличии file_id
     шлём документом; иначе — текстом caption. reply_markup (опц.) прикрепляется ко всем
     типам — все send_*-методы Bot API его принимают (футер «Отписаться» в рассылке, §5.8).
+    prio — приоритет в бакете: дефолт PRIO_BACKGROUND (рассылка/outbox), но воронка/Лия
+    зовут с PRIO_INTERACTIVE через send_by_kind (живой человек ждёт выдачу).
     """
     cap = caption[:CAPTION_LIMIT] if caption else None
     if kind == "text" or not file_id:
-        return await raw_send_text(bot, chat_id, caption or "", reply_markup=reply_markup)
+        return await raw_send_text(bot, chat_id, caption or "", reply_markup=reply_markup, prio=prio)
     if kind == "photo":
         return await _rate_limited_call(
-            lambda: bot.send_photo(chat_id, file_id, caption=cap, reply_markup=reply_markup))
+            lambda: bot.send_photo(chat_id, file_id, caption=cap, reply_markup=reply_markup), prio=prio)
     if kind == "video":
         return await _rate_limited_call(
-            lambda: bot.send_video(chat_id, file_id, caption=cap, reply_markup=reply_markup))
+            lambda: bot.send_video(chat_id, file_id, caption=cap, reply_markup=reply_markup), prio=prio)
     if kind == "voice":
         return await _rate_limited_call(
-            lambda: bot.send_voice(chat_id, file_id, caption=cap, reply_markup=reply_markup))
+            lambda: bot.send_voice(chat_id, file_id, caption=cap, reply_markup=reply_markup), prio=prio)
     if kind == "video_note":
         return await _rate_limited_call(
-            lambda: bot.send_video_note(chat_id, file_id, reply_markup=reply_markup))
+            lambda: bot.send_video_note(chat_id, file_id, reply_markup=reply_markup), prio=prio)
     if kind == "audio":
         return await _rate_limited_call(
-            lambda: bot.send_audio(chat_id, file_id, caption=cap, reply_markup=reply_markup))
+            lambda: bot.send_audio(chat_id, file_id, caption=cap, reply_markup=reply_markup), prio=prio)
     if kind == "animation":
         return await _rate_limited_call(
-            lambda: bot.send_animation(chat_id, file_id, caption=cap, reply_markup=reply_markup))
+            lambda: bot.send_animation(chat_id, file_id, caption=cap, reply_markup=reply_markup), prio=prio)
     if kind == "sticker":
         return await _rate_limited_call(
-            lambda: bot.send_sticker(chat_id, file_id, reply_markup=reply_markup))
+            lambda: bot.send_sticker(chat_id, file_id, reply_markup=reply_markup), prio=prio)
     # document / other
     return await _rate_limited_call(
-        lambda: bot.send_document(chat_id, file_id, caption=cap, reply_markup=reply_markup))
+        lambda: bot.send_document(chat_id, file_id, caption=cap, reply_markup=reply_markup), prio=prio)
 
 
 async def upload_file_to_chat(bot: Bot, chat_id: int, kind: str, *, content: bytes,

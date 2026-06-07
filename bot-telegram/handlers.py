@@ -247,6 +247,50 @@ async def _deliver(user_id: int, message: Message, state: FSMContext, bot: Bot):
             )
         except Exception as e:
             logger.warning("Не удалось отправить видео-кружок: %s", e)
+    # Опц. выдача лид-магнита продуктом из каталога ВМЕСТО GUIDE_URL-заглушки (решение
+    # владельца): если в app_settings задан active_lead_magnet_product_id и офер готов —
+    # отдаём его (фото/документ + подпись + ссылка). Любой промах → фолбэк на GUIDE_URL
+    # без изменений. Логику ГЕЙТА это не трогает: сюда уже попали после успешной проверки
+    # подписки; меняется только КОНТЕНТ финальной выдачи.
+    if await _deliver_lead_magnet_product(user_id, bot):
+        return
     await messaging.send_text(
         bot, user_id, texts.deliver(config.GUIDE_URL), source="funnel", reply_markup=_guide_kb()
     )
+
+
+async def _deliver_lead_magnet_product(user_id: int, bot: Bot) -> bool:
+    """Пытается выдать продукт-лид-магнит из каталога. True — выдан (звонящий не шлёт
+    GUIDE_URL), False — офер не настроен/не готов/ошибка → звонящий делает фолбэк.
+
+    Продукт берётся из app_settings (валидируется в db.get_active_lead_magnet_product:
+    kind='lead_magnet', status='active', есть file_tg_id ИЛИ link). Файл идёт через
+    interactive send_by_kind (фото/документ по file_mime) с подписью texts.deliver_product;
+    если файла нет, но есть ссылка — обычным текстом. Ссылку даём «сырой» (per-recipient
+    трекинг /r — атрибут рассылки, не воронки). Ошибка изолируется → фолбэк на GUIDE_URL.
+    """
+    try:
+        product = await db.get_active_lead_magnet_product()
+    except Exception as e:  # noqa: BLE001 — чтение настройки не должно ломать выдачу
+        logger.warning("Не удалось прочитать активный лид-магнит-офер: %s", e)
+        return False
+    if product is None:
+        return False  # офер не настроен/не готов → фолбэк на GUIDE_URL
+
+    file_tg_id = product.get("file_tg_id")
+    link = (product.get("link") or "").strip() or None
+    caption = texts.deliver_product(product, link)
+    try:
+        if file_tg_id:
+            kind = messaging.kind_for_mime(product.get("file_mime"))
+            await messaging.send_by_kind(
+                bot, user_id, kind, file_id=file_tg_id, caption=caption, source="funnel"
+            )
+        else:
+            # Файла нет — выдаём текстом (у офера точно есть link, иначе db вернул None).
+            await messaging.send_text(bot, user_id, caption, source="funnel")
+    except Exception as e:  # noqa: BLE001 — сбой выдачи офера → фолбэк на GUIDE_URL
+        logger.warning("Не удалось выдать лид-магнит-офер #%s: %s — фолбэк на GUIDE_URL",
+                       product.get("id"), e)
+        return False
+    return True

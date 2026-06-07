@@ -103,6 +103,77 @@ UPLOAD_MIME_ALLOW = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
+# ── Каталог продуктов (оферов) — раздел «Продукты» (schema_products.sql) ──────
+# Лимит размера файла офера. Бот заливает file→file_tg_id в OPS_CHAT_ID и шлёт во
+# все рассылки; жёсткий потолок Telegram-бота — 50 МБ (и фото, и документ). Это
+# СОБСТВЕННЫЙ лимит для POST /products (не путать с MAX_UPLOAD_BYTES рассылки): офер
+# хранится переиспользуемо и может быть тяжелее разового файла рассылки. per-path
+# body-guard и streaming-cap хендлера используют именно это значение.
+MAX_PRODUCT_FILE_MB = _opt_int("MAX_PRODUCT_FILE_MB", 50)        # потолок файла офера, МБ (≤50 у бота)
+MAX_PRODUCT_FILE_BYTES = MAX_PRODUCT_FILE_MB * 1024 * 1024
+
+# Виды офера — синхронны CHECK products_kind_chk в db/schema_products.sql. Порядок =
+# порядок в select конструктора (lead_magnet первым: с него начинается воронка).
+PRODUCT_KINDS = ("lead_magnet", "tripwire", "main")
+PRODUCT_KIND_LABELS = {
+    "lead_magnet": "Лид-магнит",
+    "tripwire": "Трипваер",
+    "main": "Основной продукт",
+}
+# Статусы офера — синхронны CHECK products_status_chk. archived скрывает из выбора.
+PRODUCT_STATUSES = ("active", "archived")
+PRODUCT_STATUS_LABELS = {"active": "Активен", "archived": "В архиве"}
+
+# Валюты для показа рядом с ценой (RUB по умолчанию в схеме). Узкий allow-list —
+# валюта идёт в текст рассылки/карточку, не в эквайринг (оплата внешняя через /r).
+PRODUCT_CURRENCIES = ("RUB", "USD", "EUR")
+PRODUCT_CURRENCY_LABELS = {"RUB": "₽ (RUB)", "USD": "$ (USD)", "EUR": "€ (EUR)"}
+PRODUCT_CURRENCY_SIGNS = {"RUB": "₽", "USD": "$", "EUR": "€"}
+
+# Длина подписи/описания офера. caption идёт В РАССЫЛКУ и/или как подпись к файлу;
+# когда офер с файлом — реальный потолок Telegram-подписи это CAPTION_MAX_LEN (1024),
+# но текст офера может уходить и отдельным сообщением, поэтому держим до MSG_MAX_LEN,
+# а «файл → ≤1024» проверяет уже воркёр/композер при сборке сообщения.
+PRODUCT_NAME_MAX_LEN = 200
+PRODUCT_CAPTION_MAX_LEN = _opt_int("PRODUCT_CAPTION_MAX_LEN", 4096)
+
+# Allow-list форматов файла ОФЕРА (шире, чем у разовой рассылки): картинки → photo,
+# документы/архивы/медиа → document. Ключ — нормализованное расширение (без точки),
+# значение — допустимые MIME (lower, без параметров). Браузеры присылают разные MIME
+# на один тип (особенно office/zip), поэтому MIME сверяем множеством, а финально тип
+# подтверждаем magic-byte'ами (security.sniff_product_file). Исполняемые/скриптовые
+# расширения СЮДА НЕ входят — всё, чего нет в таблице, отвергается (deny-by-default).
+#   ⚠️ Держать синхронно с таблицей сигнатур security._PRODUCT_SIGNATURES.
+PRODUCT_FILE_TYPES: dict[str, dict] = {
+    # — Картинки → отправляются как photo —
+    "jpg":  {"send": "photo", "mimes": ("image/jpeg",)},
+    "jpeg": {"send": "photo", "mimes": ("image/jpeg",)},
+    "png":  {"send": "photo", "mimes": ("image/png",)},
+    "webp": {"send": "photo", "mimes": ("image/webp",)},
+    "gif":  {"send": "photo", "mimes": ("image/gif",)},
+    # — Документы / таблицы / презентации → document —
+    "pdf":  {"send": "document", "mimes": ("application/pdf",)},
+    "doc":  {"send": "document", "mimes": ("application/msword",)},
+    "docx": {"send": "document", "mimes": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/zip", "application/octet-stream")},
+    "xls":  {"send": "document", "mimes": ("application/vnd.ms-excel",)},
+    "xlsx": {"send": "document", "mimes": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/zip", "application/octet-stream")},
+    "ppt":  {"send": "document", "mimes": ("application/vnd.ms-powerpoint",)},
+    "pptx": {"send": "document", "mimes": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/zip", "application/octet-stream")},
+    "zip":  {"send": "document", "mimes": ("application/zip", "application/octet-stream")},
+    "txt":  {"send": "document", "mimes": ("text/plain", "application/octet-stream")},
+    # — Популярное медиа → document (как и в рассылках: единый file_id) —
+    "mp4":  {"send": "document", "mimes": ("video/mp4", "application/mp4")},
+    "mp3":  {"send": "document", "mimes": ("audio/mpeg", "audio/mp3")},
+}
+# Удобный плоский набор допустимых расширений (для accept= в форме и быстрых проверок).
+PRODUCT_FILE_EXTS = tuple(PRODUCT_FILE_TYPES.keys())
+
 # Hard-cap на размер аудитории рассылки (§7.1): сверх — требуем точный confirm_count эхом.
 MAX_BROADCAST_RECIPIENTS = _opt_int("MAX_BROADCAST_RECIPIENTS", 5000)
 # Анти-флуд черновиков рассылок (§6.5): не больше N создаётся за окно (счётчик в БД).

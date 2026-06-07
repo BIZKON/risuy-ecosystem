@@ -24,6 +24,17 @@ $$;
 do $$ begin execute format('grant connect on database %I to panel_rw', current_database()); end $$;
 grant usage   on schema   public            to panel_rw;
 
+-- ⚠️ КРИТИЧНО: сброс ШИРОКИХ табличных грантов ПЕРЕД точечными.
+-- panel_rw создан через Timeweb DBaaS admins API → это «управляемый» пользователь, и
+-- реконсиляция Timeweb периодически выдаёт ему table-level arwd (insert/select/update/
+-- delete) на ВСЕ таблицы (грант идёт от gen_user). Без этого revoke панель де-факто
+-- может UPDATE/DELETE messages/leads(phone!)/broadcast_recipients/link_clicks/products.file_tg_id
+-- в обход column-level грантов ниже — least-privilege ломается молча. Этот revoke + точечные
+-- гранты ниже восстанавливают least-privilege на КАЖДОМ применении файла (идемпотентно).
+-- ПРИМЕЧАНИЕ: между деплоями реконсиляция может снова выдать широкий грант — поэтому
+-- настоящая граница — приложение (панель не делает этих операций) + перевыдача этого файла.
+revoke all on all tables in schema public from panel_rw;
+
 -- ── leads: read-всю строку, write — только status/notes/erase_requested_at ───
 -- SELECT нужен на всю строку (включая phone): reveal и полный экспорт читают phone
 -- легитимно по действию оператора с аудитом. Контроль приватности — на уровне
@@ -101,14 +112,52 @@ grant select, insert on link_tokens to panel_rw;
 -- Клики: только SELECT для аналитики. Пишет обработчик /r/<token> в БОТЕ (owner).
 grant select on link_clicks to panel_rw;
 
+-- ── Каталог продуктов (оферов) — объекты в db/schema_products.sql, применять ПОСЛЕ него ──
+-- (Матрица «кто что пишет» для каталога — продолжение канона §2 плана:)
+--   products              SELECT, INSERT, UPDATE — панель заводит/правит/архивирует офер
+--                         и кладёт байты файла; КОЛОНКУ file_tg_id панель НЕ пишет —
+--                         её проставляет БОТ (owner) после первой заливки файла в OPS_CHAT_ID.
+--   broadcasts.product_id UPDATE(product_id) — панель привязывает офер к рассылке (поверх
+--                         уже выданного выше `grant update on broadcasts`).
+--   app_settings          SELECT, INSERT, UPDATE — singleton-настройки панели (бот ЧИТАЕТ).
+--
+-- products: SELECT на всю строку. INSERT/UPDATE — на КОЛОНКАХ, КРОМЕ file_tg_id
+-- (его пишет бот, см. §2). Column-level грант — тот же приём, что `grant update
+-- (status, notes, erase_requested_at) on leads` выше. id/created_at/updated_at в список
+-- INSERT не включаем: id даёт sequence (default), created_at/updated_at — default+триггер;
+-- их явная запись панели не нужна. updated_at бампается trg_products_updated_at — не трогаем.
+grant select on products to panel_rw;
+grant insert (name, kind, price, currency, caption, link, file, file_name, file_mime, status, created_by)
+    on products to panel_rw;
+-- upload_attempts/upload_error в UPDATE: панель СБРАСЫВАЕТ счётчик попыток заливки в 0
+-- при ЗАМЕНЕ/снятии файла офера (новый файл заслуживает свежий бюджет попыток; иначе
+-- исчерпанный старым битым файлом счётчик навсегда исключил бы новый годный файл из
+-- очереди заливки). Это операционная retry-стейт-колонка, не доказательство заливки:
+-- file_tg_id по-прежнему пишет ТОЛЬКО бот (column-level грант его НЕ включает).
+grant update (name, kind, price, currency, caption, link, file, file_name, file_mime, status,
+              upload_attempts, upload_error)
+    on products to panel_rw;
+-- НЕТ delete на products (архивируем через status='archived', строки не удаляем).
+-- file_tg_id (и обнуление file после заливки) пишет БОТ под owner-ролью — не грантуется панели.
+
+-- broadcasts.product_id: точечный UPDATE одной колонки поверх общего update on broadcasts.
+-- (Общий `grant update on broadcasts` выше уже покрывает все колонки, включая product_id;
+-- дублирующий column-grant безвреден и фиксирует намерение явно — привязка офера к рассылке.)
+grant update (product_id) on broadcasts to panel_rw;
+
+-- app_settings: singleton-настройки (active_lead_magnet_product_id и т.п.). Панель пишет
+-- (upsert ключа), БОТ ЧИТАЕТ при выдаче воронки. updated_at — триггер, key/value пишет панель.
+grant select, insert, update on app_settings to panel_rw;
+
 -- bigserial-PK с INSERT от панели → USAGE на их sequence (иначе INSERT упадёт).
 -- ВАЖНО: выдаём ПОСЛЕ массового `revoke all on all sequences … from panel_rw` выше,
 -- по образцу admin_audit_id_seq — иначе revoke снимет эти гранты.
 grant usage on sequence outbox_id_seq          to panel_rw;
 grant usage on sequence broadcasts_id_seq      to panel_rw;
 grant usage on sequence broadcast_files_id_seq to panel_rw;
+grant usage on sequence products_id_seq        to panel_rw;  -- INSERT нового офера панелью
 -- messages / broadcast_recipients / link_clicks (bigserial) — туда пишет БОТ (owner),
--- панели их sequence НЕ нужен. link_tokens.token — text PK, sequence нет.
+-- панели их sequence НЕ нужен. link_tokens.token / app_settings.key — text PK, sequence нет.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ВЫДАЧА ПАРОЛЯ РОЛИ (НЕ в git, НЕ в этом файле, НЕ в shell-истории):

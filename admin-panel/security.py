@@ -220,3 +220,148 @@ async def read_upload_capped(upload, *, max_bytes: int, chunk: int = 64 * 1024) 
         if len(buf) > max_bytes:
             return None
     return bytes(buf)
+
+
+# --------------------------------------------------------------------------- #
+# Валидация файла ОФЕРА по magic-byte (каталог продуктов). НЕ доверяем имени и
+# заявленному MIME — проверяем СОДЕРЖИМОЕ по сигнатуре, затем сверяем расширение и
+# MIME с allow-list'ом из config (тройной контроль: ext ∧ mime ∧ magic). Это режет
+# подмену исполняемого/скрипта под видом .pdf/.png и «голый octet-stream».
+#
+# Чистая Python-проверка по префиксу байтов — БЕЗ libmagic/python-magic (их нет в
+# slim-образе, новые зависимости не добавляем). Покрывает заявленные форматы; чего
+# нет в таблице — отвергается (deny-by-default). Office/zip-семейство (docx/xlsx/
+# pptx/zip) делит сигнатуру PK\x03\x04 — для них достаточно «это ZIP-контейнер» +
+# расширение из allow-list (различать ooxml по mimetype внутри архива здесь избыточно
+# и хрупко; расширение уже в allow-list, а отправляется всё как document).
+# --------------------------------------------------------------------------- #
+
+# Явный отказ опасным/исполняемым/скриптовым сигнатурам — даже если кто-то добавит
+# такое расширение в allow-list по ошибке, magic-проверка не даст это пронести.
+_DANGEROUS_SIGNATURES: tuple[bytes, ...] = (
+    b"MZ",            # PE/DOS (.exe/.dll/.scr)
+    b"\x7fELF",       # ELF (Linux-бинарь)
+    b"\xca\xfe\xba\xbe",  # Mach-O fat / Java class
+    b"\xfe\xed\xfa\xce",  # Mach-O 32
+    b"\xfe\xed\xfa\xcf",  # Mach-O 64
+    b"#!",            # шебанг скрипта (#!/bin/sh, #!/usr/bin/env ...)
+    b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",  # OLE2 (legacy doc/xls/ppt) — НЕ принимаем как exe-носитель
+)
+
+# Карта «сигнатура → набор расширений, которым она соответствует». Проверка:
+#   1) содержимое матчит ОДНУ из сигнатур;
+#   2) заявленное расширение входит в множество допустимых для этой сигнатуры;
+#   3) расширение есть в config.PRODUCT_FILE_TYPES и MIME — в его mimes.
+# Для txt сигнатуры нет (произвольный текст) → отдельная эвристика «печатаемый текст».
+_IMG_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "gif"})
+_ZIP_OOXML_EXTS = frozenset({"zip", "docx", "xlsx", "pptx"})
+_OLE_EXTS = frozenset({"doc", "xls", "ppt"})
+
+# (offset, magic-bytes, допустимые расширения). Первый матч выигрывает.
+_PRODUCT_SIGNATURES: tuple[tuple[int, bytes, frozenset[str]], ...] = (
+    (0, b"\xff\xd8\xff", frozenset({"jpg", "jpeg"})),                 # JPEG
+    (0, b"\x89PNG\r\n\x1a\n", frozenset({"png"})),                    # PNG
+    (0, b"GIF87a", frozenset({"gif"})),                              # GIF
+    (0, b"GIF89a", frozenset({"gif"})),
+    # WEBP: 'RIFF' .... 'WEBP' (проверяем оба маркера в sniff'е отдельно из-за дыры в 4 байта)
+    (0, b"%PDF-", frozenset({"pdf"})),                               # PDF
+    (0, b"PK\x03\x04", _ZIP_OOXML_EXTS),                            # ZIP / OOXML (docx/xlsx/pptx)
+    (0, b"PK\x05\x06", _ZIP_OOXML_EXTS),                            # пустой ZIP
+    (0, b"PK\x07\x08", _ZIP_OOXML_EXTS),                            # spanned ZIP
+    (0, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", _OLE_EXTS),             # OLE2 legacy doc/xls/ppt
+    (0, b"ID3", frozenset({"mp3"})),                                # MP3 с ID3-тегом
+    (0, b"\xff\xfb", frozenset({"mp3"})),                           # MP3 frame (MPEG-1 L3)
+    (0, b"\xff\xf3", frozenset({"mp3"})),
+    (0, b"\xff\xf2", frozenset({"mp3"})),
+    # MP4/ISO-BMFF: на offset 4 идёт 'ftyp' (проверяем в sniff'е отдельно).
+)
+
+
+def normalize_ext(filename: str | None) -> str:
+    """Расширение из имени файла → нижний регистр без точки ('' если нет)."""
+    if not filename or "." not in filename:
+        return ""
+    return filename.rsplit(".", 1)[-1].strip().lower()
+
+
+def _looks_like_text(data: bytes) -> bool:
+    """Грубая эвристика «это печатаемый текст» для .txt: нет NUL, мало control-байт.
+
+    Декодируем как UTF-8 (наиболее частый случай) с запасом cp1251 — если не вышло,
+    проверяем долю непечатаемых в первом килобайте. NUL-байт → точно не текст.
+    """
+    if not data:
+        return True  # пустой .txt допустим (валидатор размера отдельно)
+    sample = data[:4096]
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        pass
+    # Доля «странных» control-байт (кроме \t\n\r) в выборке.
+    allowed_ctrl = {0x09, 0x0A, 0x0D}
+    bad = sum(1 for b in sample if b < 0x20 and b not in allowed_ctrl)
+    return bad / len(sample) < 0.10
+
+
+def sniff_product_file(
+    data: bytes, *, filename: str | None, claimed_mime: str | None
+) -> dict | None:
+    """Подтвердить файл офера по СОДЕРЖИМОМУ. Возвращает dict или None (отказ).
+
+    На вход — уже прочитанные байты (см. read_upload_capped), имя и заявленный MIME.
+    Тройной контроль (ext ∧ mime ∧ magic), затем отказ опасным сигнатурам. Возврат:
+      {"ext", "mime", "send"} — нормализованное расширение, MIME для хранения
+      (берём канон из allow-list, НЕ доверяем браузерному), способ отправки photo|document.
+    None — формат не из allow-list / содержимое не совпало с расширением / опасное.
+
+    config импортируется внутри (модуль security не должен тянуть тяжёлые справочники
+    на верхнем уровне; config уже импортирован процессом — это просто доступ к атрибуту).
+    """
+    ext = normalize_ext(filename)
+    spec = config.PRODUCT_FILE_TYPES.get(ext)
+    if spec is None:
+        return None  # расширение не в allow-list
+
+    mime = (claimed_mime or "").split(";")[0].strip().lower()
+    # MIME сверяем с allow-list расширения. Пустой/неизвестный браузерный MIME
+    # допускаем ТОЛЬКО если octet-stream разрешён для этого ext (zip/office/txt/mp*),
+    # т.к. финально тип подтвердят magic-byte'ы. Иначе — отказ.
+    allowed_mimes = spec["mimes"]
+    if mime and mime not in allowed_mimes:
+        return None
+    if not mime and "application/octet-stream" not in allowed_mimes:
+        return None
+
+    # Опасные сигнатуры — жёсткий отказ ДО позитивных проверок (кроме OLE2, который
+    # легитимен для doc/xls/ppt: его пропускаем к позитивной ветке ниже).
+    head = data[:16]
+    if not (ext in _OLE_EXTS):
+        for sig in _DANGEROUS_SIGNATURES:
+            if head.startswith(sig):
+                return None
+
+    if not _content_matches_ext(data, ext):
+        return None
+
+    return {"ext": ext, "mime": allowed_mimes[0], "send": spec["send"]}
+
+
+def _content_matches_ext(data: bytes, ext: str) -> bool:
+    """Magic-byte: содержимое соответствует заявленному расширению (из allow-list)."""
+    # txt: сигнатуры нет — эвристика печатаемого текста.
+    if ext == "txt":
+        return _looks_like_text(data)
+    # webp: RIFF....WEBP (маркер на offset 8).
+    if ext == "webp":
+        return len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP"
+    # mp4: 'ftyp' box на offset 4 (....ftyp).
+    if ext == "mp4":
+        return len(data) >= 12 and data[4:8] == b"ftyp"
+    # Остальное — по таблице префиксных сигнатур.
+    for offset, sig, exts in _PRODUCT_SIGNATURES:
+        if ext in exts and data[offset:offset + len(sig)] == sig:
+            return True
+    return False

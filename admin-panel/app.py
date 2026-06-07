@@ -20,6 +20,7 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from math import ceil
 from urllib.parse import urlencode
 
@@ -78,7 +79,13 @@ app.add_middleware(security.SecurityHeadersMiddleware)
 app.add_middleware(
     security.BodySizeLimitMiddleware,
     max_bytes=config.MAX_BODY_BYTES,
-    per_path_limits={"/broadcasts": config.MAX_UPLOAD_BYTES},
+    # Точечные больши́е лимиты только для путей с загрузкой файла (план §6.5):
+    # POST /broadcasts (разовый файл рассылки) и POST /products (файл офера каталога,
+    # потолок 50 МБ = лимит Telegram-бота). Остальные маршруты держат строгий 64 KB.
+    per_path_limits={
+        "/broadcasts": config.MAX_UPLOAD_BYTES,
+        "/products": config.MAX_PRODUCT_FILE_BYTES,
+    },
 )
 
 templates = Jinja2Templates(directory="templates")
@@ -791,6 +798,362 @@ def _yn(v) -> str:
 
 
 # =========================================================================== #
+# ПРОДУКТЫ (каталог оферов). Переиспользуемый раздел: офер заводится ОДИН раз и
+# привязывается к любому числу рассылок (broadcasts.product_id). Конструктор:
+# name + kind + price/currency + caption + link + опц. файл (валидируется по
+# расширению+MIME+magic-byte, ≤ MAX_PRODUCT_FILE_MB).
+#
+# Инвариант (panel_rw, без BOT_TOKEN): панель кладёт байты файла в products.file и
+# метаданные; в Telegram заливает (file→file_tg_id в OPS_CHAT_ID) и переиспользует
+# file_id — БОТ. Колонку file_tg_id панель не пишет (column-level грант).
+# =========================================================================== #
+
+def _product_kind_send(send_kind: str) -> str:
+    """photo|document для офера → нормализуем способ отправки (как и у рассылок:
+    image/* → photo, всё прочее → document; канон из security.sniff_product_file)."""
+    return "photo" if send_kind == "photo" else "document"
+
+
+def _fmt_price(price, currency: str) -> str:
+    """Цена → строка для UI: «1 990 ₽» / «1 990,50 ₽». Пусто/None → '' (цена опц.).
+
+    Разделитель тысяч — узкий пробел, дробная часть только если ненулевая (через запятую,
+    как принято в RU). Знак валюты из config (RUB→₽). Чисто презентация, без БД/локали.
+    """
+    if price is None:
+        return ""
+    sign = config.PRODUCT_CURRENCY_SIGNS.get(currency, currency)
+    d = Decimal(price)
+    whole = int(d)
+    cents = int((d - whole) * 100)
+    int_str = f"{whole:,}".replace(",", " ")  # узкий неразрывный пробел между разрядами
+    body = int_str if cents == 0 else f"{int_str},{cents:02d}"
+    return f"{body} {sign}"
+
+
+def _parse_price(raw: str) -> tuple[Decimal | None, bool]:
+    """Строка цены из формы → (Decimal | None, ok). Пусто → (None, True) — цена опц.
+
+    Принимаем запятую как десятичный разделитель и пробелы-разделители тысяч. Отрицательную
+    и нечисловую отвергаем (ok=False). numeric(12,2): до 10 цифр до точки, 2 после.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None, True
+    s = s.replace(" ", "").replace(" ", "").replace(",", ".")
+    try:
+        val = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None, False
+    if val < 0:
+        return None, False
+    val = val.quantize(Decimal("0.01"))
+    # numeric(12,2): целая часть ≤ 10 цифр (12 - 2). Иначе БД бы отвергла — режем заранее.
+    if val >= Decimal("10000000000"):
+        return None, False
+    return val, True
+
+
+async def _read_product_file(request: Request, upload) -> tuple[dict | None, str | None]:
+    """Прочитать и провалидировать файл офера. Возвращает (file_meta | None, err_code | None).
+
+    file_meta = {"bytes","filename","mime","send"} при валидном непустом файле; (None, None)
+    если файла нет/пустой; (None, err) при отказе. Валидация: размер ≤ лимита (streaming-cap),
+    расширение+MIME+magic-byte (security.sniff_product_file), отказ исполняемым/опасным.
+    """
+    if upload is None or not (upload.filename or ""):
+        return None, None
+    data = await security.read_upload_capped(upload, max_bytes=config.MAX_PRODUCT_FILE_BYTES)
+    if data is None:
+        return None, "file_too_big"
+    if not data:
+        return None, None  # пустой файл — трактуем как «без файла»
+    sniffed = security.sniff_product_file(
+        data, filename=upload.filename, claimed_mime=upload.content_type
+    )
+    if sniffed is None:
+        return None, "bad_file"
+    return {
+        "bytes": data,
+        "filename": (upload.filename or "file")[:255],
+        "mime": sniffed["mime"],
+        "send": _product_kind_send(sniffed["send"]),
+    }, None
+
+
+# ---- /products — список-каталог ------------------------------------------- #
+@app.get("/products", response_class=HTMLResponse)
+async def products_list(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    archived: int = 0,
+    lm: int = 0,
+    err: str | None = None,
+):
+    rows = await db.list_products(include_archived=True)
+    products = [_present_product_row(r) for r in rows]
+    # Выдача воронки лид-магнитом (вместо GUIDE_URL): текущий активный офер + кандидаты
+    # для селектора. Бот читает app_settings; панель — единственный писатель этого ключа.
+    active_lm_rec = await db.get_active_lead_magnet()
+    active_lm = _present_lead_magnet(active_lm_rec) if active_lm_rec is not None else None
+    lm_candidates = [
+        {"id": r["id"], "name": r["name"], "has_file": r["has_file"],
+         "file_ready": r["file_ready"], "has_link": bool(r["link"])}
+        for r in await db.list_lead_magnet_products()
+    ]
+    return templates.TemplateResponse(
+        request,
+        "products.html",
+        {
+            "products": products,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "products",
+            "saved": bool(saved),
+            "archived": bool(archived),
+            "lm_flash": bool(lm),
+            "err": _product_list_err_text(err),
+            "kind_labels": config.PRODUCT_KIND_LABELS,
+            "active_lead_magnet": active_lm,
+            "lead_magnet_candidates": lm_candidates,
+        },
+    )
+
+
+def _present_lead_magnet(r) -> dict:
+    """Текущий активный лид-магнит-офер воронки для индикации на /products."""
+    return {
+        "id": r["id"], "name": r["name"], "status": r["status"],
+        "has_file": r["has_file"], "file_ready": r["file_ready"],
+        "has_link": bool(r["link"]),
+    }
+
+
+def _product_list_err_text(err: str | None) -> str | None:
+    return {
+        "bad_lead_magnet": "Этот офер нельзя сделать выдачей воронки: нужен вид "
+                           "«Лид-магнит», статус «Активен» и хотя бы файл или ссылка.",
+    }.get(err or "")
+
+
+def _present_product_row(r) -> dict:
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "kind": r["kind"],
+        "price_display": _fmt_price(r["price"], r["currency"]),
+        "has_file": r["has_file"],
+        "file_ready": r["file_ready"],
+        "has_link": bool(r["link"]),
+        "file_name": r["file_name"],
+        "status": r["status"],
+        "created_at": r["created_at"],
+    }
+
+
+# ---- /products/new — конструктор (GET, пустой) ---------------------------- #
+@app.get("/products/new", response_class=HTMLResponse)
+async def product_new_form(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    err: str | None = None,
+):
+    return templates.TemplateResponse(
+        request,
+        "product_form.html",
+        _product_form_context(request, session, product=None, err=err),
+    )
+
+
+# ---- /products/{id} — конструктор (GET, правка) --------------------------- #
+@app.get("/products/{product_id}", response_class=HTMLResponse)
+async def product_edit_form(
+    request: Request,
+    product_id: int,
+    session: auth.Session = Depends(require_session),
+    err: str | None = None,
+):
+    rec = await db.get_product(product_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Продукт не найден")
+    return templates.TemplateResponse(
+        request,
+        "product_form.html",
+        _product_form_context(request, session, product=dict(rec), err=err),
+    )
+
+
+def _product_form_context(request, session, *, product: dict | None, err: str | None) -> dict:
+    return {
+        "product": product,                       # None для нового
+        "csrf_token": session.csrf_token,
+        "session": session,
+        "active": "products",
+        "err": _product_err_text(err),
+        "kinds": config.PRODUCT_KINDS,
+        "kind_labels": config.PRODUCT_KIND_LABELS,
+        "currencies": config.PRODUCT_CURRENCIES,
+        "currency_labels": config.PRODUCT_CURRENCY_LABELS,
+        "name_max": config.PRODUCT_NAME_MAX_LEN,
+        "caption_max": config.PRODUCT_CAPTION_MAX_LEN,
+        "max_file_mb": config.MAX_PRODUCT_FILE_MB,
+        "file_exts": config.PRODUCT_FILE_EXTS,
+        "accept_attr": _product_accept_attr(),
+    }
+
+
+def _product_accept_attr() -> str:
+    """Значение accept= для <input type=file>: список расширений с точкой (.pdf,.png,…)."""
+    return ",".join("." + e for e in config.PRODUCT_FILE_EXTS)
+
+
+def _product_err_text(err: str | None) -> str | None:
+    return {
+        "empty_name": "Название продукта обязательно.",
+        "bad_kind": "Выберите вид продукта.",
+        "bad_currency": "Недопустимая валюта.",
+        "bad_price": "Цена указана неверно (число ≥ 0, до 2 знаков после запятой).",
+        "bad_link": "Ссылка недопустима (нужен http/https).",
+        "bad_file": "Тип файла не поддерживается или содержимое не совпадает с расширением.",
+        "file_too_big": "Файл превышает лимит загрузки.",
+        "need_file_or_link": "Добавьте файл и/или ссылку — нужно хотя бы одно.",
+        "not_found": "Продукт не найден.",
+    }.get(err or "")
+
+
+# ---- /products — создать/обновить (POST, multipart) ----------------------- #
+@app.post("/products")
+async def product_save(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    product_id: str = Form(""),       # пусто → создание; иначе → обновление
+    name: str = Form(""),
+    kind: str = Form(""),
+    price: str = Form(""),
+    currency: str = Form("RUB"),
+    caption: str = Form(""),
+    link: str = Form(""),
+    clear_file: str = Form(""),       # '1' → снять текущий файл (только при обновлении)
+    status: str = Form("active"),
+    csrf_token: str = Form(""),
+    file: UploadFile | None = File(None),
+):
+    await _enforce_csrf(request, session, csrf_token)
+
+    # id целевого офера (для обновления). Нечисловой/пустой → создание.
+    pid: int | None = None
+    if (product_id or "").strip().isdigit():
+        pid = int(product_id.strip())
+
+    def _back(err: str) -> RedirectResponse:
+        target = f"/products/{pid}" if pid is not None else "/products/new"
+        return RedirectResponse(url=f"{target}?err={err}", status_code=303)
+
+    name_val = (name or "").strip()[: config.PRODUCT_NAME_MAX_LEN]
+    if not name_val:
+        return _back("empty_name")
+    if kind not in db._PRODUCT_KIND_SET:
+        return _back("bad_kind")
+    if currency not in db._PRODUCT_CURRENCY_SET:
+        return _back("bad_currency")
+    # status из формы: только active|archived (defence-in-depth; archived доступен и из формы).
+    status_val = status if status in config.PRODUCT_STATUSES else "active"
+
+    price_val, price_ok = _parse_price(price)
+    if not price_ok:
+        return _back("bad_price")
+
+    caption_val = (caption or "").strip()[: config.PRODUCT_CAPTION_MAX_LEN] or None
+
+    # Ссылка офера: тот же allow-list схем, что у трекинга рассылки (/r строится поверх).
+    link_val: str | None = None
+    if (link or "").strip():
+        link_val = security.validate_target_url(link, schemes=config.LINK_URL_SCHEMES)
+        if link_val is None:
+            return _back("bad_link")
+
+    # Файл: читаем+валидируем (расширение+MIME+magic-byte, размер). Пустой → нет файла.
+    file_meta, file_err = await _read_product_file(request, file)
+    if file_err:
+        return _back(file_err)
+    clear = (clear_file or "").strip() == "1" and file_meta is None
+
+    # Инвариант «файл И/ИЛИ ссылка, но хотя бы одно». Для обновления учитываем уже
+    # имеющийся файл офера, который оператор не снимает и не заменяет.
+    will_have_file = file_meta is not None
+    if pid is not None and not will_have_file and not clear:
+        existing = await db.get_product(pid)
+        if existing is None:
+            return _back("not_found")
+        will_have_file = bool(existing["has_file"])
+    if not will_have_file and not link_val:
+        return _back("need_file_or_link")
+
+    if pid is None:
+        await db.create_product_with_audit(
+            name=name_val, kind=kind, price=price_val, currency=currency,
+            caption=caption_val, link=link_val, file_meta=file_meta,
+            status=status_val, actor=session.actor,
+            ip=_ip(request), user_agent=_ua(request),
+        )
+        return RedirectResponse(url="/products?saved=1", status_code=303)
+
+    row = await db.update_product_with_audit(
+        pid, name=name_val, kind=kind, price=price_val, currency=currency,
+        caption=caption_val, link=link_val, file_meta=file_meta, clear_file=clear,
+        status=status_val, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if row is None:
+        raise StarletteHTTPException(status_code=404, detail="Продукт не найден")
+    return RedirectResponse(url="/products?saved=1", status_code=303)
+
+
+# ---- /products/{id}/archive — архивировать (обычный CSRF) ----------------- #
+@app.post("/products/{product_id}/archive")
+async def product_archive(
+    request: Request,
+    product_id: int,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    result = await db.archive_product_with_audit(
+        product_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result is None:
+        raise StarletteHTTPException(status_code=404, detail="Продукт не найден")
+    # conflict (уже в архиве) трактуем мягко — всё равно ведём в список с флешем.
+    return RedirectResponse(url="/products?archived=1", status_code=303)
+
+
+# ---- /products/set-lead-magnet — назначить/снять выдачу воронки (CSRF) ----- #
+# Лид-магнит-офер ЗАМЕНЯЕТ GUIDE_URL-заглушку в выдаче воронки (решение владельца).
+# Панель — единственный писатель app_settings['active_lead_magnet_product_id']; бот
+# его читает (get_active_lead_magnet_product) и валидирует повторно. Обычное действие
+# (не отправка): CSRF, без step-up. product_id пустой → снять (фолбэк на GUIDE_URL).
+# Путь без {id}, чтобы один POST покрывал и назначение, и снятие.
+@app.post("/products/set-lead-magnet")
+async def product_set_lead_magnet(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    product_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    pid: int | None = None
+    if (product_id or "").strip().isdigit():
+        pid = int(product_id.strip())
+    result = await db.set_active_lead_magnet_with_audit(
+        pid, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result == "bad_product":
+        return RedirectResponse(url="/products?err=bad_lead_magnet", status_code=303)
+    return RedirectResponse(url="/products?lm=1", status_code=303)
+
+
+# =========================================================================== #
 # РАССЫЛКИ (план §5,§6,§7). Композер + CRUD заявки + аналитика.
 #
 # Инвариант: панель НЕ шлёт в Telegram. «Запуск» = перевод broadcasts.status в
@@ -871,6 +1234,9 @@ async def broadcast_new_form(
     default_audience = {"messenger": "tg", "source": None, "status": None,
                         "exclude_unsubscribed": True}
     estimate = await db.count_broadcast_audience(default_audience)
+    # Каталог активных оферов для селектора «прикрепить продукт» (опц.).
+    product_rows = await db.list_products_for_select()
+    products = [_present_product_option(r) for r in product_rows]
     return templates.TemplateResponse(
         request,
         "broadcast_new.html",
@@ -885,8 +1251,25 @@ async def broadcast_new_form(
             "msg_max": config.MSG_MAX_LEN, "caption_max": config.CAPTION_MAX_LEN,
             "max_recipients": config.MAX_BROADCAST_RECIPIENTS,
             "max_upload_mb": config.MAX_UPLOAD_BYTES // (1024 * 1024),
+            "products": products,
+            "product_kind_labels": config.PRODUCT_KIND_LABELS,
+            "currency_signs": config.PRODUCT_CURRENCY_SIGNS,
         },
     )
+
+
+def _present_product_option(r) -> dict:
+    """Опция офера для селектора композера + данные для предпросмотра (без байт)."""
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "kind": r["kind"],
+        "price_display": _fmt_price(r["price"], r["currency"]),
+        "caption": r["caption"],
+        "has_link": bool(r["link"]),
+        "has_file": r["has_file"],
+        "file_name": r["file_name"],
+    }
 
 
 def _broadcast_err_text(err: str | None) -> str | None:
@@ -948,27 +1331,43 @@ async def broadcast_create(
         if "{link}" not in body:
             body = body + "\n{link}"
 
-    # Файл: allow-list mime + streaming-cap (не доверяем Content-Length, §6.5).
+    # Файл рассылки: ту же контентную проверку, что и у продуктов (расширение+MIME+
+    # magic-byte + отказ исполняемым, security.sniff_product_file) — НЕ доверяем
+    # заявленному браузером content_type (он спуфится: HTML/SVG/EXE под image/png).
+    # Читаем потоком с потолком ДО sniff (sniff требует уже прочитанные байты, §6.5),
+    # затем kind (photo/document) выводим из ПОДТВЕРЖДЁННОГО magic-byte send, а не из
+    # клиентского MIME. Доп. сужение: подтверждённый канон-MIME обязан быть и в
+    # UPLOAD_MIME_ALLOW — у разовой рассылки набор форматов уже, чем у каталога оферов.
     file_meta: dict | None = None
     kind = "text"
     if has_file:
-        mime = (file.content_type or "").split(";")[0].strip().lower()
-        if mime not in config.UPLOAD_MIME_ALLOW:
-            return _broadcast_new_redirect("bad_file")
         data = await security.read_upload_capped(file, max_bytes=config.MAX_UPLOAD_BYTES)
         if data is None:
             return _broadcast_new_redirect("file_too_big")
         if data:
-            file_meta = {"filename": (file.filename or "file")[:255], "mime": mime,
-                         "bytes": data}
-            kind = _kind_for_mime(mime)
+            sniff = security.sniff_product_file(
+                data, filename=file.filename, claimed_mime=file.content_type
+            )
+            if sniff is None or sniff["mime"] not in config.UPLOAD_MIME_ALLOW:
+                return _broadcast_new_redirect("bad_file")
+            file_meta = {"filename": (file.filename or "file")[:255],
+                         "mime": sniff["mime"], "bytes": data}
+            kind = sniff["send"]  # photo|document — из подтверждённого magic-byte, не из заявленного MIME
         # пустой файл (0 байт) — игнорируем, остаётся text
+
+    # Опц. привязка офера из каталога (broadcasts.product_id). Невалидный/несуществующий/
+    # архивный id молча игнорируем (рассылка всё равно создаётся) — db-слой ещё раз
+    # проверит «active» в той же транзакции и не свяжет мусор.
+    product_id_val: int | None = None
+    pid_raw = (form.get("product_id") or "").strip()
+    if pid_raw.isdigit():
+        product_id_val = int(pid_raw)
 
     estimate = await db.count_broadcast_audience(audience)
     bid = await db.create_broadcast_with_audit(
         title=title_val, messenger=audience["messenger"], kind=kind,
         body_template=body, audience=audience, recipient_estimate=estimate,
-        file_meta=file_meta, target_url=link_url,
+        file_meta=file_meta, target_url=link_url, product_id=product_id_val,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url=f"/broadcasts/{bid}", status_code=303)
@@ -994,12 +1393,6 @@ def _has_raw_link_or_markup(body: str) -> bool:
     return False
 
 
-def _kind_for_mime(mime: str) -> str:
-    if mime.startswith("image/"):
-        return "photo"
-    return "document"
-
-
 # ---- /broadcasts/{id} — аналитика (4 честных метрики, §6.1) --------------- #
 @app.get("/broadcasts/{broadcast_id}", response_class=HTMLResponse)
 async def broadcast_detail(
@@ -1009,6 +1402,7 @@ async def broadcast_detail(
     queued: int = 0,
     canceled: int = 0,
     resumed: int = 0,
+    product: int = 0,
     err: str | None = None,
 ):
     rec = await db.get_broadcast(broadcast_id)
@@ -1019,6 +1413,22 @@ async def broadcast_detail(
     await db.audit(actor=session.actor, action="broadcast_view",
                    ip=_ip(request), user_agent=_ua(request),
                    detail={"broadcast_id": broadcast_id})
+
+    # Прикреплённый офер (если есть) + активные оферы для смены на черновике.
+    bound_product = None
+    if rec["product_id"] is not None:
+        prec = await db.get_product(rec["product_id"])
+        if prec is not None:
+            bound_product = {
+                "id": prec["id"], "name": prec["name"], "kind": prec["kind"],
+                "price_display": _fmt_price(prec["price"], prec["currency"]),
+                "has_file": prec["has_file"], "has_link": bool(prec["link"]),
+                "status": prec["status"],
+            }
+    product_options = []
+    if rec["status"] == "draft":
+        product_options = [_present_product_option(r)
+                           for r in await db.list_products_for_select()]
 
     stats = await db.broadcast_recipient_stats(broadcast_id)
     link = await db.broadcast_link(broadcast_id)
@@ -1048,7 +1458,7 @@ async def broadcast_detail(
             "link_url": link["target_url"] if link else None,
             "recipients": recip_rows,
             "queued": bool(queued), "canceled": bool(canceled),
-            "resumed": bool(resumed),
+            "resumed": bool(resumed), "product_flash": bool(product),
             "err": _broadcast_send_err_text(err),
             "csrf_token": session.csrf_token,
             "session": session,
@@ -1056,6 +1466,9 @@ async def broadcast_detail(
             "status_labels": config.STATUS_LABELS,
             "broadcast_status_labels": BROADCAST_STATUS_LABELS,
             "max_recipients": config.MAX_BROADCAST_RECIPIENTS,
+            "bound_product": bound_product,
+            "product_options": product_options,
+            "product_kind_labels": config.PRODUCT_KIND_LABELS,
         },
     )
 
@@ -1068,6 +1481,7 @@ def _broadcast_send_err_text(err: str | None) -> str | None:
         "cap_mismatch": "Введённое число не совпадает с числом получателей.",
         "conflict": "Рассылка уже запущена или отменена.",
         "empty": "В аудитории нет ни одного получателя.",
+        "bad_product": "Выбранный продукт недоступен (архивирован или удалён).",
     }.get(err or "")
 
 
@@ -1179,6 +1593,34 @@ async def broadcast_cancel(
     if result == "conflict":
         return _broadcast_detail_redirect(broadcast_id, "conflict")
     return RedirectResponse(url=f"/broadcasts/{broadcast_id}?canceled=1", status_code=303)
+
+
+# ---- /broadcasts/{id}/product — привязать/сменить/снять офер на черновике ----- #
+# Обычное действие (не отправка): CSRF, без step-up. Только для draft (после queued
+# состав сообщения зафиксирован). product_id='' → отвязать. db-слой ещё раз проверяет
+# draft + active-офер в одной транзакции (defence-in-depth).
+@app.post("/broadcasts/{broadcast_id}/product")
+async def broadcast_set_product(
+    request: Request,
+    broadcast_id: int,
+    session: auth.Session = Depends(require_session),
+    product_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    pid: int | None = None
+    if (product_id or "").strip().isdigit():
+        pid = int(product_id.strip())
+    result = await db.set_broadcast_product_with_audit(
+        broadcast_id, pid, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+    if result == "conflict":
+        return _broadcast_detail_redirect(broadcast_id, "conflict")
+    if result == "bad_product":
+        return _broadcast_detail_redirect(broadcast_id, "bad_product")
+    return RedirectResponse(url=f"/broadcasts/{broadcast_id}?product=1", status_code=303)
 
 
 def _broadcast_detail_redirect(broadcast_id: int, err: str) -> RedirectResponse:

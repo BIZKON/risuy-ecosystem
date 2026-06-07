@@ -24,6 +24,7 @@
 {% if queued %}{{ flash('Рассылка поставлена в очередь — бот начнёт отправку.', 'ok') }}{% endif %}
 {% if canceled %}{{ flash('Рассылка отменена.', 'ok') }}{% endif %}
 {% if resumed %}{{ flash('Рассылка возобновлена — бот дошлёт оставшихся получателей.', 'ok') }}{% endif %}
+{% if product_flash %}{{ flash('Продукт обновлён.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 
 {# ── Честные метрики (план §6.1): НЕТ «открытий» — Telegram их боту не отдаёт. ── #}
@@ -73,6 +74,46 @@
         <span class="msg-preview__label">Текст:</span>
         <pre class="msg-preview__body">{{ b.body_template|e }}</pre>
       </div>
+    </section>
+
+    {# ── Прикреплённый продукт (офер). Сменить/снять можно только на черновике. ── #}
+    <section class="card" aria-label="Продукт">
+      <h2 class="card__title">Продукт</h2>
+      {% if bound_product %}
+      <div class="product-preview">
+        <span class="product-preview__name">{{ bound_product.name|e }}</span>
+        <span class="product-preview__row">
+          <span>{{ product_kind_labels.get(bound_product.kind, bound_product.kind) }}</span>
+          {% if bound_product.price_display %}<span class="mono">{{ bound_product.price_display }}</span>{% endif %}
+          {% if bound_product.has_file %}<span class="pill pill--ok">файл</span>{% endif %}
+          {% if bound_product.has_link %}<span class="pill">ссылка</span>{% endif %}
+          {% if bound_product.status != 'active' %}<span class="pill pill--muted">архив</span>{% endif %}
+        </span>
+        <span class="product-preview__row"><a href="/products/{{ bound_product.id }}">Открыть продукт →</a></span>
+      </div>
+      {% else %}
+      <p class="card__note muted">Продукт не прикреплён.</p>
+      {% endif %}
+
+      {% if b.status == 'draft' %}
+      <form class="inline-form" method="post" action="/broadcasts/{{ b.id }}/product" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span class="field__label">{% if bound_product %}Сменить продукт{% else %}Прикрепить продукт{% endif %}</span>
+          <select class="field__input" name="product_id">
+            <option value="">— без продукта —</option>
+            {% for p in product_options %}
+            <option value="{{ p.id }}"{% if bound_product and bound_product.id == p.id %} selected{% endif %}>{{ p.name|e }} · {{ product_kind_labels.get(p.kind, p.kind) }}{% if p.price_display %} · {{ p.price_display }}{% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="form-actions">
+          <button class="btn btn--secondary btn--sm" type="submit">Сохранить продукт</button>
+        </div>
+      </form>
+      {% elif bound_product %}
+      <p class="hint hint--block">Рассылка уже запущена — состав сообщения зафиксирован, продукт не меняется.</p>
+      {% endif %}
     </section>
 
     {# ── Запуск: мощное действие. Подтверждение + step-up пароль + cap. ── #}

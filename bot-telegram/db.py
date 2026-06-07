@@ -302,7 +302,7 @@ async def claim_broadcast_to_send() -> dict | None:
         async with c.transaction():
             row = await c.fetchrow(
                 """
-                select id, title, messenger, kind, body_template, recipient_count
+                select id, title, messenger, kind, body_template, recipient_count, product_id
                 from broadcasts
                 where status = 'queued' and recipient_count is not null
                 order by id
@@ -530,6 +530,151 @@ async def set_broadcast_file_id(file_row_id: int, tg_file_id: str) -> None:
             "update broadcast_files set tg_file_id = $2, bytes = null where id = $1",
             file_row_id, tg_file_id,
         )
+
+
+# ── КАТАЛОГ ПРОДУКТОВ (оферов): заливка файла + выдача в рассылке/воронке ──────
+# Объекты — db/schema_products.sql (products + broadcasts.product_id + app_settings).
+# Инвариант границы доступа (тот же, что у broadcast_files): ПАНЕЛЬ под panel_rw кладёт
+# офер и байты файла (products.file), но КОЛОНКУ file_tg_id и обнуление байтов пишет
+# БОТ под owner-ролью после первой заливки в OPS_CHAT_ID. file_id переиспускается во
+# всех рассылках/выдачах. Эти функции — read-офера + заливочный воркер + чтение
+# singleton-настроек воронки; «кому слать» и материализацию они НЕ трогают.
+
+async def get_product(product_id: int) -> dict | None:
+    """Полный офер по id (для выдачи в рассылке/воронке). None если нет строки.
+
+    file (bytea) НЕ селектим — он нужен только заливочному воркеру (см.
+    list_products_pending_upload). Здесь — поля доставки: name/kind/price/currency/
+    caption/link + file_tg_id/file_name/file_mime (по ним выводим тип отправки).
+    """
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            """
+            select id, name, kind, price, currency, caption, link,
+                   file_tg_id, file_name, file_mime, status
+            from products
+            where id = $1
+            """,
+            product_id,
+        )
+    return dict(row) if row else None
+
+
+async def get_broadcast_product(broadcast_id: int) -> dict | None:
+    """Офер, привязанный к рассылке (broadcasts.product_id → products), или None.
+
+    Вызывает воркёр рассылок один раз на рассылку, если product_id задан. Архивные
+    оферы (status='archived') тоже отдаём — рассылку мог запустить оператор, когда
+    офер был активен; гейтит выбор активности панель при привязке, не доставка.
+    """
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            """
+            select p.id, p.name, p.kind, p.price, p.currency, p.caption, p.link,
+                   p.file_tg_id, p.file_name, p.file_mime, p.status,
+                   p.file is not null as has_file_bytes, p.upload_attempts
+            from broadcasts b
+            join products p on p.id = b.product_id
+            where b.id = $1
+            """,
+            broadcast_id,
+        )
+    return dict(row) if row else None
+
+
+async def list_products_pending_upload(limit: int, max_attempts: int) -> list[dict]:
+    """Очередь заливки: продукты с байтами файла, но ещё без file_tg_id (§ schema).
+
+    Покрыто частичным индексом products_pending_upload_idx. Кэп попыток (upload_attempts
+    < max_attempts) накладываем здесь, а не в индексе — литерал-лимит захардкодил бы env.
+    Битый/отвергаемый Telegram файл после N неудач выпадает из очереди (не зацикливает
+    воркёр, не засоряет OPS_CHAT_ID). Возвращает байты для заливки в OPS_CHAT_ID; после
+    успеха воркёр зовёт set_product_file_id (проставит file_tg_id + обнулит file). Логику
+    «кому слать» не затрагивает — это про офер-файл.
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select id, name, file, file_name, file_mime, upload_attempts
+            from products
+            where file is not null and file_tg_id is null
+              and upload_attempts < $2
+            order by id
+            limit $1
+            """,
+            limit, max_attempts,
+        )
+    return [dict(r) for r in rows]
+
+
+async def bump_product_upload_attempt(product_id: int, error: str) -> None:
+    """Инкремент products.upload_attempts + запись последней ошибки заливки (диагностика).
+
+    Вызывается воркёром при неудачной заливке файла офера. По достижении лимита
+    (см. list_products_pending_upload) офер перестаёт переселектироваться. Симметрично
+    release_outbox/release_recipient, но без возврата в очередь — статус задаёт сам
+    предикат очереди (file есть, file_tg_id null, attempts < лимит)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update products set upload_attempts = upload_attempts + 1, upload_error = $2 "
+            "where id = $1",
+            product_id, error[:500],
+        )
+
+
+async def set_product_file_id(product_id: int, tg_file_id: str) -> None:
+    """Проставить products.file_tg_id и ОБНУЛИТЬ file (bytea) — однократность заливки
+    и гигиена места, симметрично set_broadcast_file_id. Пишет БОТ (owner-роль).
+    upload_error чистим (заливка удалась)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update products set file_tg_id = $2, file = null, upload_error = null where id = $1",
+            product_id, tg_file_id,
+        )
+
+
+# ── app_settings: singleton-настройки панели (бот ЧИТАЕТ) ─────────────────────
+async def get_app_setting(key: str) -> str | None:
+    """Значение singleton-настройки по ключу (или None). value — text (KV-универсальность)."""
+    async with pool.acquire() as c:
+        return await c.fetchval("select value from app_settings where key = $1", key)
+
+
+async def get_active_lead_magnet_product() -> dict | None:
+    """Офер-лид-магнит для ЗАМЕНЫ GUIDE_URL-заглушки в выдаче воронки, или None (фолбэк).
+
+    Читает app_settings['active_lead_magnet_product_id'] (пишет панель), валидирует:
+    значение приводится к bigint, продукт существует, kind='lead_magnet', status='active'
+    и у него есть чем выдавать (file_tg_id ИЛИ link). Любой промах (пусто/мусор/архив/
+    не лид-магнит/пустой офер) → None: handlers.py падает на текущую выдачу GUIDE_URL
+    без изменений (env остаётся источником истины по умолчанию, решение владельца).
+    Файл без file_tg_id (бот ещё не залил) → пока трактуем как «не готов» и тоже фолбэк,
+    чтобы воронка не зависала на заливке; дозальётся воркером и подхватится со след. раза.
+    """
+    raw = await get_app_setting("active_lead_magnet_product_id")
+    if not raw:
+        return None
+    try:
+        product_id = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            """
+            select id, name, kind, price, currency, caption, link,
+                   file_tg_id, file_name, file_mime, status
+            from products
+            where id = $1 and kind = 'lead_magnet' and status = 'active'
+            """,
+            product_id,
+        )
+    if row is None:
+        return None
+    prod = dict(row)
+    # Выдавать нечем (файл ещё не залит И ссылки нет) → фолбэк на GUIDE_URL.
+    if not prod.get("file_tg_id") and not prod.get("link"):
+        return None
+    return prod
 
 
 # ── Трекинг /r/<token>: чтение токена + лог клика (пишет БОТ) ─────────────────
