@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramForbiddenError
 
 import config
 import db
+import messaging
 import texts
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,12 @@ async def run(bot: Bot, interval: int = 60) -> None:
 
 async def _tick(bot: Bot) -> None:
     for n, col, delay, text in _FOLLOW_UPS:
+        # get_due_followups уже отфильтровал unsubscribed_at/bot_paused (§4) — на паузе/
+        # после отписки лид сюда не попадёт, касание НЕ помечается отправленным (resume бесплатный).
         for tg_user_id in await db.get_due_followups(col, delay):
             try:
-                await bot.send_message(tg_user_id, text)
+                # Через общий token-bucket + единый 429-ретрай + зеркало в тред (source='nurture').
+                await messaging.send_text(bot, tg_user_id, text, source="nurture")
             except TelegramForbiddenError:
                 logger.info("Пользователь %s заблокировал бота — пропускаем касание %s", tg_user_id, n)
             except Exception as e:

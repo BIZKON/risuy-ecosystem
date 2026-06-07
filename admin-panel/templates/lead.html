@@ -1,8 +1,13 @@
 {% extends "base.html" %}
 {% from "_macros.html" import status_badge, source_badge, messenger_badge, phone_masked, phone_full, bool_mark, flash %}
+{% from "_thread.html" import thread_list %}
 
 {% block title %}Лид · {{ lead.name|e if lead.name else 'без имени' }}{% endblock %}
 {% block body_class %}page-lead{% endblock %}
+
+{# Авто-обновление треда без JS (CSP запрещает inline-script): перезагрузка карточки
+   раз в N секунд. Якорь #thread удерживает позицию на переписке после рефреша. #}
+{% block head_extra %}<meta http-equiv="refresh" content="{{ refresh_sec|default(15, true) }}; url=#thread">{% endblock %}
 
 {% block content %}
 <nav class="crumbs" aria-label="Хлебные крошки">
@@ -15,11 +20,21 @@
     {{ status_badge(lead.status) }}
     {{ source_badge(lead.source) }}
     {{ messenger_badge(lead.messenger) }}
+    {% if lead.bot_paused %}
+    <span class="badge badge--paused" title="Оператор взял ручное управление — бот не авто-отвечает">🔴 На ручном</span>
+    {% else %}
+    <span class="badge badge--auto" title="Бот авто-отвечает (Лия + прогрев)">🤖 Авто</span>
+    {% endif %}
+    {% if lead.unsubscribed_at %}
+    <span class="badge badge--unsub" title="Клиент отписался от рассылок и касаний">Отписан</span>
+    {% endif %}
   </div>
 </div>
 
 {% if saved %}{{ flash('Изменения сохранены.', 'ok') }}{% endif %}
 {% if erased %}{{ flash('Запрос на удаление принят. Обезличивание — в течение 30 дней.', 'ok') }}{% endif %}
+{% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
+{% if paused_flash %}{{ flash('Режим бота переключён.', 'ok') }}{% endif %}
 
 {% if lead.erase_requested_at %}
 <div class="alert-strip alert-strip--static" role="status">
@@ -79,8 +94,58 @@
     </dl>
   </section>
 
-  {# ── Правая колонка: единственная write-поверхность + таймлайн + 152-ФЗ. ── #}
+  {# ── Правая колонка: переписка + write-поверхность + таймлайн + 152-ФЗ. ── #}
   <div class="col-right">
+
+    {# ── Переписка: тред + перехват + ручной ответ. text|e (autoescape). ── #}
+    <section class="card" id="thread" aria-label="Переписка">
+      <div class="card__head-row">
+        <h2 class="card__title">Переписка</h2>
+        <div class="card__head-actions">
+          {# Перехват: бот перестаёт авто-отвечать (Лия+прогрев), оператор пишет руками.
+             Воронка выдачи гайда НЕ глушится. UPDATE leads.bot_paused + аудит. #}
+          {% if lead.bot_paused %}
+          <form class="inline-form" method="post" action="/leads/{{ lead.id }}/bot-resume">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn--secondary btn--sm" type="submit"
+                    title="Вернуть боту авто-ответы">🤖 Вернуть авто</button>
+          </form>
+          {% else %}
+          <form class="inline-form" method="post" action="/leads/{{ lead.id }}/bot-pause">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn--danger-ghost btn--sm" type="submit"
+                    title="Взять ручное управление — бот замолчит, отвечаете вы">🔴 На ручное</button>
+          </form>
+          {% endif %}
+          <a class="btn btn--ghost btn--sm" href="/leads/{{ lead.id }}#thread" title="Обновить переписку">Обновить</a>
+        </div>
+      </div>
+
+      {% if not lead.bot_paused %}
+      <p class="hint hint--block">Бот в режиме «Авто»: он сам отвечает (Лия + прогрев). Ваш ответ уйдёт <b>в дополнение</b> к боту — чтобы вести диалог только руками, нажмите «На ручное».</p>
+      {% endif %}
+
+      {{ thread_list(thread) }}
+
+      {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот. #}
+      {% if lead.tg_user_id is not none %}
+      <form class="reply" method="post" action="/leads/{{ lead.id }}/reply">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span class="field__label vh">Ответ клиенту</span>
+          <textarea class="field__input field__textarea" name="text" rows="3"
+                    maxlength="{{ msg_max|default(4096, true) }}"
+                    placeholder="Написать клиенту в Telegram…" required></textarea>
+        </label>
+        <div class="form-actions form-actions--reply">
+          <span class="hint">Отправит бот. Без форматирования и ссылок.</span>
+          <button class="btn btn--primary btn--sm" type="submit">Отправить</button>
+        </div>
+      </form>
+      {% else %}
+      <p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>
+      {% endif %}
+    </section>
 
     {# Форма правки — ровно 2 поля: статус и заметки. #}
     <section class="card" aria-label="Управление">

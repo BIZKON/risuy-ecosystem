@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Новая рассылка{% endblock %}
+{% block body_class %}page-broadcast-new{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Хлебные крошки">
+  <a href="/broadcasts">← К рассылкам</a>
+</nav>
+
+<div class="page-head">
+  <h1 class="page-head__title">Новая рассылка</h1>
+  <p class="page-head__hint">Создаётся как черновик. Отправка — отдельным подтверждением на странице рассылки.</p>
+</div>
+
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+<div class="alert-strip alert-strip--static" role="note">
+  <span class="alert-strip__txt">
+    Содержание — в рамках согласия «о занятиях и материалах Школы». Прямая реклама третьих лиц
+    требует отдельного согласия и маркировки «реклама» (ОРД). Футер отписки добавляется автоматически.
+  </span>
+</div>
+
+{# multipart: есть загрузка файла. Один POST /broadcasts. CSRF + audience_submitted-маркер
+   (чтобы чекбокс «исключить отписанных» корректно читался как снятый, а не дефолт). #}
+<form class="composer" method="post" action="/broadcasts" enctype="multipart/form-data" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="audience_submitted" value="1">
+
+  <div class="cols">
+    <section class="card" aria-label="Сообщение">
+      <h2 class="card__title">Сообщение</h2>
+
+      <label class="field">
+        <span class="field__label">Заголовок <span class="field__hint">служебный, в сообщение не идёт</span></span>
+        <input class="field__input" type="text" name="title" maxlength="200"
+               placeholder="Напр.: Анонс вебинара 15-го">
+      </label>
+
+      <label class="field">
+        <span class="field__label">Текст
+          <span class="field__hint">до {{ msg_max }} симв. (с файлом — {{ caption_max }}). Без ссылок/разметки.</span>
+        </span>
+        <textarea class="field__input field__textarea field__textarea--lg" name="body_template" rows="8"
+                  placeholder="Текст рассылки. Где должна быть трекинг-ссылка — поставьте {link}." required></textarea>
+      </label>
+      <p class="hint hint--block">Плейсхолдер <code>{link}</code> заменяется на трекинг-ссылку у каждого получателя. Сырые ссылки и форматирование запрещены (отправляется как обычный текст).</p>
+
+      <label class="field">
+        <span class="field__label">Файл <span class="field__hint">опц., до {{ max_upload_mb }} МБ: картинка или документ</span></span>
+        <input class="field__input field__file" type="file" name="file"
+               accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,.doc,.docx,.xls,.xlsx">
+      </label>
+
+      <label class="field">
+        <span class="field__label">Трекинг-ссылка <span class="field__hint">опц., http/https — подставится в {link}</span></span>
+        <input class="field__input" type="url" name="target_url" maxlength="2048"
+               placeholder="https://example.com/lesson" inputmode="url">
+      </label>
+    </section>
+
+    <div class="col-right">
+      <section class="card" aria-label="Аудитория">
+        <h2 class="card__title">Аудитория</h2>
+
+        <label class="field">
+          <span class="field__label">Мессенджер</span>
+          <select class="field__input" name="messenger">
+            <option value="tg" selected>Telegram</option>
+            {# MAX — задел: канал ещё не подключён к отправке, выбор отключён. #}
+            <option value="max" disabled>MAX (скоро)</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Источник</span>
+          <select class="field__input" name="source">
+            <option value="">Все источники</option>
+            {% for s in sources %}
+            <option value="{{ s|e }}">{{ source_labels.get(s, s) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Статус воронки</span>
+          <select class="field__input" name="status">
+            <option value="">Любой статус</option>
+            {% for s in statuses %}
+            <option value="{{ s|e }}">{{ status_labels.get(s, s) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="field field--check">
+          <input type="checkbox" name="exclude_unsubscribed" value="1" checked>
+          <span>Исключить отписавшихся <span class="field__hint">(рекомендуется)</span></span>
+        </label>
+
+        <div class="estimate">
+          <span class="estimate__label">Сейчас под условия подходит:</span>
+          <span class="estimate__num">{{ estimate }}</span>
+          <span class="estimate__hint">получателей (оценка по текущей базе; точный список бот возьмёт при запуске)</span>
+        </div>
+        <p class="hint hint--block">Бот всё равно отправит только тем, у кого есть согласие и Telegram-адрес и кто не отозвал согласие — даже если фильтр шире.</p>
+      </section>
+
+      <div class="form-actions">
+        <a class="btn btn--ghost" href="/broadcasts">Отмена</a>
+        <button class="btn btn--primary" type="submit">Создать черновик</button>
+      </div>
+    </div>
+  </div>
+</form>
+{% endblock %}

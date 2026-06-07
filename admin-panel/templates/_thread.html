@@ -1,0 +1,51 @@
+{# Лента переписки лида (вход/исход). Server-rendered, без JS (CSP запрещает inline).
+   text рендерится |e (autoescape) — диалоговый ПДн не должен исполняться как HTML.
+   partial=True → отдаётся отдельным GET /leads/{id}/thread (для ручного обновления);
+   иначе встраивается в карточку лида. #}
+
+{% macro thread_list(thread) %}
+  {% if thread %}
+  <ol class="thread" aria-label="Переписка">
+    {% for m in thread %}
+    <li class="msg msg--{{ 'in' if m.direction == 'in' else 'out' }}"
+        data-source="{{ (m.source or '')|e }}">
+      <div class="msg__head">
+        <span class="msg__who">
+          {%- if m.direction == 'in' -%}Клиент
+          {%- elif m.source == 'manual' -%}Оператор
+          {%- elif m.source == 'liya' -%}Лия (AI)
+          {%- elif m.source == 'nurture' -%}Прогрев
+          {%- elif m.source == 'broadcast' -%}Рассылка
+          {%- elif m.source == 'funnel' -%}Воронка
+          {%- else -%}Бот{%- endif -%}
+        </span>
+        <span class="msg__when">{{ m.created_at.strftime('%d.%m %H:%M') if m.created_at else '' }}</span>
+      </div>
+      <div class="msg__body">
+        {%- if m.kind and m.kind != 'text' %}
+        <span class="msg__attach">
+          {%- if m.kind == 'photo' -%}🖼 фото
+          {%- elif m.kind == 'document' -%}📎 файл
+          {%- elif m.kind == 'video' -%}🎬 видео
+          {%- elif m.kind == 'video_note' -%}⭕ видео-кружок
+          {%- elif m.kind == 'voice' -%}🎤 голосовое
+          {%- elif m.kind == 'audio' -%}🎵 аудио
+          {%- elif m.kind == 'animation' -%}🎞 GIF
+          {%- elif m.kind == 'sticker' -%}🩶 стикер
+          {%- else -%}вложение{%- endif -%}
+        </span>
+        {% endif -%}
+        {%- if m.text %}<span class="msg__text">{{ m.text|e }}</span>{% endif -%}
+        {%- if not m.text and (not m.kind or m.kind == 'text') %}<span class="msg__text muted">—</span>{% endif -%}
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="thread-empty muted">Переписки пока нет. Сообщения появятся, как только клиент напишет боту.</p>
+  {% endif %}
+{% endmacro %}
+
+{% if partial %}
+{{ thread_list(thread) }}
+{% endif %}

@@ -86,9 +86,19 @@ create table if not exists admin_login_throttle (
 --   • lead_update по notes → {field:'notes', changed:true, len_old, len_new} (не текст);
 --   • status                → {field:'status', old, new} (не ПДн);
 --   • phone_revealed        → только факт (lead_id), номер НЕ кладём;
+--   • thread_view           → факт открытия треда (lead_id) — массовое чтение ПДн диалога,
+--                             пишется fail-closed ДО отдачи треда; текст сообщений НЕ кладём;
+--   • manual_reply          → {len} ручного ответа оператора (текст НЕ кладём — ПДн);
+--   • bot_paused/bot_resumed→ {lead_id}; факт перехвата «ручное управление»;
+--   • broadcast_create      → {messenger, audience(факт фильтров), recipient_estimate, links};
+--   • broadcast_send        → {broadcast_id, recipient_count}; запуск массовой отправки;
+--   • broadcast_cancel      → {broadcast_id}; отмена черновика/запланированной рассылки;
+--   • broadcast_view        → {broadcast_id}; открытие аналитики рассылки (получатели — ПДн);
 --   • actor / ip(advisory) / ua / filter-params / row_count — служебка для расследования.
 -- action ∈ login_ok|login_fail|logout|lead_view|phone_revealed|lead_update|
---          export|export_full|lead_erase_requested|lead_erased
+--          export|export_full|lead_erase_requested|lead_erased|
+--          thread_view|manual_reply|bot_paused|bot_resumed|
+--          broadcast_create|broadcast_send|broadcast_resume|broadcast_cancel|broadcast_view
 --
 -- КОНТРАКТ КОЛОНОК — единый с db.py::_insert_audit, который пишет
 --   (actor, action, lead_id, ip, user_agent, detail).

@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, phone_masked, flash %}
+
+{% block title %}Рассылка · {{ b.title|e if b.title else b.id }}{% endblock %}
+{% block body_class %}page-broadcast{% endblock %}
+
+{% macro bstatus(status) %}
+  <span class="badge badge--bstatus" data-bstatus="{{ status|e }}">{{ broadcast_status_labels.get(status, status|e) }}</span>
+{%- endmacro %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Хлебные крошки">
+  <a href="/broadcasts">← К рассылкам</a>
+</nav>
+
+<div class="page-head">
+  <h1 class="page-head__title">{{ b.title|e if b.title else 'Рассылка #' ~ b.id }}</h1>
+  <div class="page-head__meta">
+    {{ bstatus(b.status) }}
+    <span class="muted">создана {{ b.created_at.strftime('%d.%m.%Y %H:%M') if b.created_at else '—' }}</span>
+  </div>
+</div>
+
+{% if queued %}{{ flash('Рассылка поставлена в очередь — бот начнёт отправку.', 'ok') }}{% endif %}
+{% if canceled %}{{ flash('Рассылка отменена.', 'ok') }}{% endif %}
+{% if resumed %}{{ flash('Рассылка возобновлена — бот дошлёт оставшихся получателей.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Честные метрики (план §6.1): НЕТ «открытий» — Telegram их боту не отдаёт. ── #}
+<section class="section" aria-label="Аналитика">
+  <h2 class="section__title">Аналитика</h2>
+  <div class="stats stats--aux">
+    <div class="stat stat--accent">
+      <span class="stat__value">{{ stats.sent }}</span>
+      <span class="stat__label">Отправлено</span>
+      <span class="stat__hint">принято Telegram</span>
+    </div>
+    <div class="stat{% if stats.failed %} stat--warn{% endif %}">
+      <span class="stat__value">{{ stats.failed }}</span>
+      <span class="stat__label">Не доставлено</span>
+      <span class="stat__hint">в т.ч. заблокировали бота</span>
+    </div>
+    {% if has_link %}
+    <div class="stat">
+      <span class="stat__value">{{ clicks }}</span>
+      <span class="stat__label">Клики по ссылке</span>
+      <span class="stat__hint">{% if ctr is not none %}клик-рейт {{ ctr }}% от отправленных{% else %}—{% endif %}</span>
+    </div>
+    {% endif %}
+    <div class="stat stat--muted">
+      <span class="stat__value">{{ unsubs }}</span>
+      <span class="stat__label">Отписки</span>
+      <span class="stat__hint">после старта рассылки</span>
+    </div>
+  </div>
+  <p class="hint hint--block">Telegram не сообщает о прочтении сообщения. Клики считаются только при наличии трекинг-ссылки и означают переход по ней, а не гарантированное действие конкретного клиента.</p>
+  {% if stats.pending or stats.sending %}
+  <p class="hint hint--block">В работе: {{ stats.pending }} ожидают, {{ stats.sending }} отправляется. {{ stats.skipped }} пропущено (отписка/отзыв согласия между постановкой и отправкой).</p>
+  {% endif %}
+</section>
+
+<div class="cols">
+  {# ── Левая колонка: содержание + действия ── #}
+  <div class="col-left">
+    <section class="card" aria-label="Содержание">
+      <h2 class="card__title">Содержание</h2>
+      <dl class="kv">
+        <dt>Канал</dt><dd>{{ b.messenger|e }}</dd>
+        <dt>Тип</dt><dd>{{ b.kind|e }}</dd>
+        {% if has_link %}<dt>Ссылка</dt><dd class="mono mono--break">{{ link_url|e }}</dd>{% endif %}
+      </dl>
+      <div class="msg-preview">
+        <span class="msg-preview__label">Текст:</span>
+        <pre class="msg-preview__body">{{ b.body_template|e }}</pre>
+      </div>
+    </section>
+
+    {# ── Запуск: мощное действие. Подтверждение + step-up пароль + cap. ── #}
+    {% if b.status == 'draft' %}
+    <section class="card card--danger" aria-label="Запуск">
+      <h2 class="card__title">Запуск рассылки</h2>
+      <p class="card__note">Необратимое действие: бот разошлёт сообщение получателям. Проверьте текст и аудиторию.</p>
+      <form class="send-form" method="post" action="/broadcasts/{{ b.id }}/send" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="confirm" value="yes">
+
+        <label class="field">
+          <span class="field__label">Пароль оператора <span class="field__hint">подтверждение личности</span></span>
+          <input class="field__input" type="password" name="password" autocomplete="current-password" required>
+        </label>
+
+        {# Hard-cap: если получателей > лимита, требуем точное число эхом. Поле всегда
+           видно; сервер игнорирует его, если аудитория в пределах лимита. #}
+        <label class="field">
+          <span class="field__label">Если получателей больше {{ max_recipients }} — введите их точное число</span>
+          <input class="field__input" type="text" name="confirm_count" inputmode="numeric"
+                 placeholder="оставьте пустым, если аудитория небольшая">
+        </label>
+
+        <div class="form-actions">
+          <button class="btn btn--danger" type="submit">Запустить рассылку</button>
+        </div>
+      </form>
+    </section>
+    {% endif %}
+
+    {# ── Возобновление: рассылка на паузе (стоп-кран/сбой файла). Step-up, как запуск. ── #}
+    {% if b.status == 'paused' %}
+    <section class="card card--danger" aria-label="Возобновление">
+      <h2 class="card__title">Рассылка на паузе</h2>
+      <p class="card__note">Отправка приостановлена — авто-стоп-краном (много недоставленных) или из-за проблемы с файлом. Проверьте метрики и содержание. Возобновление дошлёт оставшихся получателей ({{ stats.pending }} ожидают).</p>
+      <form class="send-form" method="post" action="/broadcasts/{{ b.id }}/resume" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="confirm" value="yes">
+        <label class="field">
+          <span class="field__label">Пароль оператора <span class="field__hint">подтверждение личности</span></span>
+          <input class="field__input" type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <div class="form-actions">
+          <button class="btn btn--danger" type="submit">Возобновить отправку</button>
+        </div>
+      </form>
+    </section>
+    {% endif %}
+
+    {% if b.status in ('draft', 'queued', 'paused') %}
+    <section class="card" aria-label="Отмена">
+      <h2 class="card__title">Отмена</h2>
+      <p class="card__note">Отменить можно до начала или во время паузы. Уже отправленные сообщения вернуть нельзя.</p>
+      <form class="inline-form" method="post" action="/broadcasts/{{ b.id }}/cancel">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn btn--danger-ghost" type="submit">Отменить рассылку</button>
+      </form>
+    </section>
+    {% endif %}
+  </div>
+
+  {# ── Правая колонка: получатели (телефон маскируется, под details) ── #}
+  <div class="col-right">
+    <section class="card" aria-label="Получатели">
+      <h2 class="card__title">Получатели <span class="card__title-num">{{ stats.total }}</span></h2>
+      {% if recipients %}
+      <details class="reveal-svc reveal-svc--wide">
+        <summary>Показать список ({{ recipients|length }})</summary>
+        <div class="table-wrap">
+          <table class="table table--compact">
+            <thead>
+              <tr>
+                <th scope="col">Имя</th>
+                <th scope="col">Телефон</th>
+                <th scope="col">Статус</th>
+                {% if has_link %}<th scope="col">Клик</th>{% endif %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in recipients %}
+              <tr>
+                <td>{{ r.name|e if r.name else '—' }}</td>
+                <td class="nowrap">{{ phone_masked(r.phone_masked) }}</td>
+                <td>
+                  {%- if r.status == 'sent' -%}<span class="pill pill--ok">отправлено</span>
+                  {%- elif r.status == 'failed' -%}<span class="pill pill--bad" title="{{ r.error|e if r.error else '' }}">не дошло</span>
+                  {%- elif r.status == 'skipped' -%}<span class="pill pill--muted">пропущен</span>
+                  {%- elif r.status == 'sending' -%}<span class="pill">отправляется</span>
+                  {%- else -%}<span class="pill pill--muted">ожидает</span>{%- endif -%}
+                </td>
+                {% if has_link %}<td class="center">{% if r.clicked %}✔{% else %}—{% endif %}</td>{% endif %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {% else %}
+      <p class="card__note muted">Получатели появятся, когда бот материализует список после запуска.</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

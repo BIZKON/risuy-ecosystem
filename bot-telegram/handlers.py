@@ -16,6 +16,7 @@ from aiogram.types import (
 import ai
 import config
 import db
+import messaging
 import texts
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,11 @@ def _guide_kb() -> InlineKeyboardMarkup:
 
 @router.message(Command("start", ignore_case=True))
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
+    # Перехват (§4 плана): оператор держит ручное управление → бот молчит. Закрывает
+    # единственный обход паузы — повторный /start на тёплом лиде. Логику воронки НЕ трогаем,
+    # только не даём ей стартовать на паузе (входящее уже залогировано middleware).
+    if await db.is_bot_paused(message.from_user.id):
+        return
     source = (command.args or "other").lower()
     if source not in VALID_SOURCES:
         source = "other"
@@ -80,7 +86,30 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     name = (message.from_user.full_name or "").strip()[:100] or "друг"
     await db.set_name(message.from_user.id, name)
     await state.set_state(Funnel.consent)
-    await message.answer(texts.greeting(name), reply_markup=_consent_kb())
+    await messaging.reply_text(
+        message, texts.greeting(name), source="funnel", reply_markup=_consent_kb()
+    )
+
+
+@router.message(Command("stop", ignore_case=True))
+async def cmd_stop(message: Message):
+    """Отписка от рассылок и авто-касаний (152-ФЗ). Команда — обязательный fallback к
+    inline-кнопке «Отписаться». Не конфликтует с Лией (on_free_text отсекает '/').
+
+    Подавляет И массовые рассылки, И nurture-касания (фильтры в db). НЕ равно
+    erase_requested_at (отзыв согласия на ПДн — отдельная сущность из панели). Выданный
+    гайд и ответы Лии на прямой вопрос остаются. Состояние воронки НЕ трогаем.
+    """
+    await db.set_unsubscribed(message.from_user.id)
+    await messaging.reply_text(message, texts.UNSUBSCRIBED_OK, source="system")
+
+
+@router.callback_query(F.data == "unsub")
+async def on_unsub(cb: CallbackQuery):
+    """Inline-кнопка «Отписаться» (в футере рассылок). Идемпотентно, БЕЗ state-фильтра."""
+    await cb.answer()
+    await db.set_unsubscribed(cb.from_user.id)
+    await messaging.send_text(cb.bot, cb.from_user.id, texts.UNSUBSCRIBED_OK, source="system")
 
 
 @router.callback_query(Funnel.consent, F.data == "consent_yes")
@@ -93,14 +122,19 @@ async def on_consent(cb: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     name = (cb.from_user.full_name or "друг").strip()[:100]
-    await cb.message.answer(texts.ask_phone(name), reply_markup=_phone_kb())
+    await messaging.send_text(
+        cb.bot, cb.from_user.id, texts.ask_phone(name),
+        source="funnel", reply_markup=_phone_kb(),
+    )
 
 
 @router.message(Funnel.phone, F.contact)
 async def on_phone(message: Message, state: FSMContext, bot: Bot):
     phone = message.contact.phone_number
     await db.set_phone(message.from_user.id, phone, _phone_hash(phone))
-    await message.answer(texts.PHONE_OK, reply_markup=ReplyKeyboardRemove())
+    await messaging.reply_text(
+        message, texts.PHONE_OK, source="funnel", reply_markup=ReplyKeyboardRemove()
+    )
     await _go_to_gate(message.from_user.id, message, state, bot)
 
 
@@ -123,6 +157,30 @@ async def on_check_sub(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await cb.answer(texts.NOT_SUBSCRIBED_ALERT, show_alert=True)
 
 
+@router.callback_query(F.data == "check_sub")
+async def on_check_sub_fallback(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    """Fallback БЕЗ state-фильтра (§8 плана). Зарегистрирован ПОСЛЕ on_check_sub: при
+    state=Funnel.gate сработает основной хендлер (роутер отдаёт первому подходящему), сюда
+    падает только потеря FSM на редеплое (state=None) — лид в гейте жмёт «Я подписался».
+
+    Идемпотентно повторяет проверку подписки и выдачу (mark_guide_sent уже coalesce). На
+    паузе молчим (оператор ведёт вручную). Логику воронки/гейта не меняем — повторяем её.
+    """
+    if await db.is_bot_paused(cb.from_user.id):
+        await cb.answer()
+        return
+    if await _is_subscribed(bot, cb.from_user.id):
+        await cb.answer("Спасибо! 🌷")
+        await db.set_subscribed(cb.from_user.id, True)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await _deliver(cb.from_user.id, cb.message, state, bot)
+    else:
+        await cb.answer(texts.NOT_SUBSCRIBED_ALERT, show_alert=True)
+
+
 @router.message(StateFilter(None), F.text)
 async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     """Свободное сообщение ВНЕ воронки → отвечает AI-ассистент Лия.
@@ -133,6 +191,10 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     """
     if message.text.startswith("/"):
         return  # неизвестные команды в AI не отправляем
+    # Перехват (§4): на паузе Лия молчит — оператор отвечает руками. Входящее уже
+    # залогировано middleware; просто не запускаем авто-ответ.
+    if await db.is_bot_paused(message.from_user.id):
+        return
     try:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:
@@ -141,7 +203,11 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     answer, msg_id = await ai.ask_liya(message.text, data.get("ai_parent_id"))
     if msg_id:
         await state.update_data(ai_parent_id=msg_id)
-    await message.answer(answer)
+    # Гонка Лии (§4): ask_liya мог идти до 30с — оператор мог включить паузу за это
+    # время. Повторно проверяем ПЕРЕД отправкой; на паузе ответ не шлём.
+    if await db.is_bot_paused(message.from_user.id):
+        return
+    await messaging.send_text(bot, message.from_user.id, answer, source="liya")
 
 
 async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bot):
@@ -150,7 +216,9 @@ async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bo
         await _deliver(user_id, message, state, bot)
     else:
         await state.set_state(Funnel.gate)
-        await message.answer(texts.ASK_SUBSCRIBE, reply_markup=_gate_kb())
+        await messaging.send_text(
+            bot, user_id, texts.ASK_SUBSCRIBE, source="funnel", reply_markup=_gate_kb()
+        )
 
 
 async def _is_subscribed(bot: Bot, user_id: int) -> bool:
@@ -174,7 +242,11 @@ async def _deliver(user_id: int, message: Message, state: FSMContext, bot: Bot):
     await state.clear()
     if config.VIDEO_NOTE_FILE_ID:
         try:
-            await bot.send_video_note(message.chat.id, config.VIDEO_NOTE_FILE_ID)
+            await messaging.send_video_note(
+                bot, user_id, config.VIDEO_NOTE_FILE_ID, source="funnel"
+            )
         except Exception as e:
             logger.warning("Не удалось отправить видео-кружок: %s", e)
-    await message.answer(texts.deliver(config.GUIDE_URL), reply_markup=_guide_kb())
+    await messaging.send_text(
+        bot, user_id, texts.deliver(config.GUIDE_URL), source="funnel", reply_markup=_guide_kb()
+    )

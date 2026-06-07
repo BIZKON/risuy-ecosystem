@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% from "_macros.html" import messenger_badge, pager %}
+
+{% block title %}Рассылки{% endblock %}
+{% block body_class %}page-broadcasts{% endblock %}
+
+{% macro broadcast_status_badge(status) %}
+  <span class="badge badge--bstatus" data-bstatus="{{ status|e }}">{{ broadcast_status_labels.get(status, status|e) }}</span>
+{%- endmacro %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Рассылки</h1>
+  <p class="page-head__hint">Сообщения подписчикам бота в рамках согласия. Отправляет бот; панель ставит задачу.</p>
+</div>
+
+<div class="toolbar">
+  <p class="toolbar__count">Всего рассылок: <strong>{{ total }}</strong></p>
+  <div class="toolbar__actions">
+    <a class="btn btn--primary btn--sm" href="/broadcasts/new">Новая рассылка</a>
+  </div>
+</div>
+
+{% if rows %}
+<div class="table-wrap">
+  <table class="table table--zebra">
+    <thead>
+      <tr>
+        <th scope="col">Создана</th>
+        <th scope="col">Заголовок</th>
+        <th scope="col">Канал</th>
+        <th scope="col">Статус</th>
+        <th scope="col" class="num">Получателей</th>
+        <th scope="col" class="num">Доставлено</th>
+        <th scope="col" class="num">Не дошло</th>
+        <th scope="col" class="col-action"><span class="vh">Действие</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in rows %}
+      <tr>
+        <td class="nowrap muted">{{ b.created_at.strftime('%d.%m.%Y %H:%M') if b.created_at else '—' }}</td>
+        <td>{{ b.title|e if b.title else '— без заголовка —' }}</td>
+        <td>{{ messenger_badge(b.messenger) }}</td>
+        <td>{{ broadcast_status_badge(b.status) }}</td>
+        <td class="num">{{ b.recipient_count if b.recipient_count is not none else (b.r_total or '—') }}</td>
+        <td class="num">{{ b.r_sent }}</td>
+        <td class="num">{{ b.r_failed }}</td>
+        <td class="col-action"><a class="link-open" href="/broadcasts/{{ b.id }}">Открыть →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{{ pager(page, per_page, total, base_qs|default('', true)) }}
+
+{% else %}
+<div class="empty">
+  <p class="empty__title">Рассылок пока нет</p>
+  <p class="empty__text">Создайте первую — <a href="/broadcasts/new">Новая рассылка</a>.</p>
+</div>
+{% endif %}
+{% endblock %}

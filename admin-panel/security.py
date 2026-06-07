@@ -73,17 +73,26 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Body-size guard (§3.13): Content-Length > лимита → 413 ДО парсинга формы.
     Дёшево отбивает попытки забить память multipart-парсера. Тело без
     Content-Length (chunked) тут не ловим — для HTML-форм за LB он всегда есть.
+
+    per_path_limits — точечные исключения (план §6.5): путь загрузки файла рассылки
+    POST /broadcasts имеет СВОЙ больший лимит (MAX_UPLOAD_BYTES), не ослабляя
+    глобальный для всех остальных маршрутов. Совпадение по точному request.url.path.
+    Для chunked-без-Content-Length глобальный лимит здесь не срабатывает (как и
+    раньше) — streaming-обрыв на превышении делает сам хендлер при чтении UploadFile.
     """
 
-    def __init__(self, app, max_bytes: int) -> None:
+    def __init__(self, app, max_bytes: int,
+                 per_path_limits: dict[str, int] | None = None) -> None:
         super().__init__(app)
         self.max_bytes = max_bytes
+        self.per_path_limits = per_path_limits or {}
 
     async def dispatch(self, request: Request, call_next):
+        limit = self.per_path_limits.get(request.url.path, self.max_bytes)
         cl = request.headers.get("content-length")
         if cl is not None:
             try:
-                if int(cl) > self.max_bytes:
+                if int(cl) > limit:
                     return JSONResponse(
                         {"detail": "Тело запроса слишком большое."},
                         status_code=413,
@@ -163,3 +172,51 @@ def mask_phone(tail: str | None, has_phone: bool) -> str:
         return "—"
     tail = (tail or "").rjust(2, "·")[-2:]
     return f"+7 ··· ··-{tail}"
+
+
+# --------------------------------------------------------------------------- #
+# Валидация target_url трекинг-ссылки (план §6.3, defence-in-depth). Допускаем
+# только http/https с непустым host, без управляющих символов и пробелов. ТА ЖЕ
+# проверка дублируется в обработчике /r бота на чтении — не доверяем «панель уже
+# проверила». Возвращает нормализованный URL или None (тогда хендлер отвергает).
+# --------------------------------------------------------------------------- #
+def validate_target_url(raw: str | None, *, schemes: tuple[str, ...]) -> str | None:
+    from urllib.parse import urlparse
+
+    if not raw:
+        return None
+    url = raw.strip()
+    if not url or len(url) > 2048:
+        return None
+    # Никаких управляющих символов/пробелов/переводов строк внутри URL.
+    if any(ord(ch) < 0x20 or ch in " \t\r\n" for ch in url):
+        return None
+    if url.startswith("//"):           # protocol-relative → отвергаем
+        return None
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return None
+    if p.scheme.lower() not in schemes:
+        return None
+    if not p.netloc:                   # пустой host (напр. http:///x) → отвергаем
+        return None
+    return url
+
+
+async def read_upload_capped(upload, *, max_bytes: int, chunk: int = 64 * 1024) -> bytes | None:
+    """Прочитать UploadFile с потолком (план §6.5): streaming-обрыв на превышении.
+
+    НЕ доверяем Content-Length (для chunked его нет, заголовок можно соврать) —
+    читаем потоком, складываем размер, при превышении возвращаем None (хендлер →
+    413). Пустой файл → b"" (длина 0). Память ограничена max_bytes + один chunk.
+    """
+    buf = bytearray()
+    while True:
+        part = await upload.read(chunk)
+        if not part:
+            break
+        buf.extend(part)
+        if len(buf) > max_bytes:
+            return None
+    return bytes(buf)

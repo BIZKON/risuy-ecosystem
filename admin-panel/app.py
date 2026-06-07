@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from math import ceil
 from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -72,7 +72,14 @@ app = FastAPI(
 # Middleware-порядок: body-guard ДО всего (отбить большое тело раньше парсинга),
 # заголовки — снаружи, чтобы лечь на любой ответ, включая ошибки.
 app.add_middleware(security.SecurityHeadersMiddleware)
-app.add_middleware(security.BodySizeLimitMiddleware, max_bytes=config.MAX_BODY_BYTES)
+# Глобальный body-guard 64 KB; ТОЛЬКО путь загрузки файла рассылки имеет свой
+# больший лимит (план §6.5) — остальные маршруты не ослабляются. Streaming-обрыв
+# на превышении (для chunked) делает сам хендлер /broadcasts через read_upload_capped.
+app.add_middleware(
+    security.BodySizeLimitMiddleware,
+    max_bytes=config.MAX_BODY_BYTES,
+    per_path_limits={"/broadcasts": config.MAX_UPLOAD_BYTES},
+)
 
 templates = Jinja2Templates(directory="templates")
 # Шаблоны строго экранируют HTML (autoescape по умолчанию в Jinja2Templates).
@@ -441,6 +448,8 @@ async def lead_detail(
     session: auth.Session = Depends(require_session),
     saved: int = 0,
     erased: int = 0,
+    replied: int = 0,
+    paused: int = 0,
 ):
     rec = await db.get_lead(lead_id)
     if rec is None:
@@ -450,15 +459,47 @@ async def lead_detail(
     await db.audit(actor=session.actor, action="lead_view", lead_id=lead_id,
                    ip=_ip(request), user_agent=_ua(request))
 
+    thread = await _load_thread_audited(request, session, lead_id)
+
     return templates.TemplateResponse(
         request,
         "lead.html",
-        _lead_context(request, session, rec, revealed=None, saved=bool(saved), erased=bool(erased)),
+        _lead_context(request, session, rec, revealed=None, saved=bool(saved),
+                      erased=bool(erased), thread=thread, replied=bool(replied),
+                      paused_flash=bool(paused)),
     )
 
 
+# ---- /leads/{id}/thread — partial-обновление треда (без полной карточки) ---- #
+@app.get("/leads/{lead_id}/thread", response_class=HTMLResponse)
+async def lead_thread_partial(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+):
+    rec = await db.get_lead(lead_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+    thread = await _load_thread_audited(request, session, lead_id)
+    return templates.TemplateResponse(
+        request,
+        "_thread.html",
+        {"lead_id": lead_id, "thread": thread, "partial": True,
+         "refresh_sec": config.THREAD_REFRESH_SEC},
+    )
+
+
+async def _load_thread_audited(request, session, lead_id):
+    """Аудит thread_view fail-closed ДО чтения треда (открытие = массовое чтение ПДн
+    диалога, §3 плана; как reveal/export — если INSERT упадёт, тред не отдаём)."""
+    await db.audit(actor=session.actor, action="thread_view", lead_id=lead_id,
+                   ip=_ip(request), user_agent=_ua(request))
+    return await db.get_thread(lead_id, cap=config.THREAD_CAP)
+
+
 def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = False,
-                  erased: bool = False) -> dict:
+                  erased: bool = False, thread=None, replied: bool = False,
+                  paused_flash: bool = False) -> dict:
     lead = dict(rec)
     lead["phone_masked"] = security.mask_phone(rec["phone_tail"], rec["has_phone"])
     return {
@@ -466,6 +507,11 @@ def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = 
         "revealed": revealed,           # полный номер ТОЛЬКО при reveal-POST
         "saved": saved,
         "erased": erased,
+        "replied": replied,             # флеш «ответ поставлен в очередь»
+        "paused_flash": paused_flash,   # флеш переключения перехвата
+        "thread": thread or [],
+        "refresh_sec": config.THREAD_REFRESH_SEC,
+        "msg_max": config.MSG_MAX_LEN,
         "statuses": config.STATUSES,
         "status_labels": config.STATUS_LABELS,
         "source_labels": config.SOURCE_LABELS,
@@ -552,6 +598,70 @@ async def lead_erase(
     if row is None:
         raise StarletteHTTPException(status_code=404, detail="Лид не найден")
     return RedirectResponse(url=f"/leads/{lead_id}?erased=1", status_code=303)
+
+
+# ---- /leads/{id}/bot-pause | bot-resume — перехват (§4) ------------------- #
+@app.post("/leads/{lead_id}/bot-pause")
+async def lead_bot_pause(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    return await _set_bot_paused(request, lead_id, session, csrf_token, paused=True)
+
+
+@app.post("/leads/{lead_id}/bot-resume")
+async def lead_bot_resume(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    return await _set_bot_paused(request, lead_id, session, csrf_token, paused=False)
+
+
+async def _set_bot_paused(request, lead_id, session, csrf_token, *, paused: bool):
+    await _enforce_csrf(request, session, csrf_token)
+    # UPDATE одной колонки leads.bot_paused в транзакции с аудитом (bot_paused|bot_resumed).
+    # Telegram панель НЕ трогает: на паузе бот сам перестаёт авто-отвечать (его проверки).
+    row = await db.set_bot_paused_with_audit(
+        lead_id, paused=paused, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if row is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+    return RedirectResponse(url=f"/leads/{lead_id}?paused=1#thread", status_code=303)
+
+
+# ---- /leads/{id}/reply — ручной ответ → INSERT в outbox (НЕ Telegram, §4) -- #
+@app.post("/leads/{lead_id}/reply")
+async def lead_reply(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    text: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+
+    # Длину капим ПЕРВЫМ действием, до БД (§3.13/§5.11). plain-текст, без parse_mode.
+    text = (text or "").strip()[: config.MSG_MAX_LEN]
+    if not text:
+        raise StarletteHTTPException(status_code=400, detail="Пустой ответ")
+
+    # INSERT в outbox 'queued' + аудит manual_reply ({len}, без текста). Реально шлёт
+    # бот; адресность (tg_user_id) и erase-фильтр он re-check'ает перед отправкой.
+    outbox_id = await db.enqueue_manual_reply(
+        lead_id, text=text, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if outbox_id is None:
+        # Лид не найден ИЛИ без tg_user_id (некому слать) — не молчим, говорим оператору.
+        raise StarletteHTTPException(
+            status_code=400, detail="Лиду нельзя написать (нет Telegram-адреса)"
+        )
+    return RedirectResponse(url=f"/leads/{lead_id}?replied=1#thread", status_code=303)
 
 
 # ---- /export.csv — POST, маска, аудит ДО стрима, row-cap (§3.11) ---------- #
@@ -678,6 +788,412 @@ def _iso(dt) -> str:
 
 def _yn(v) -> str:
     return "да" if v else "нет"
+
+
+# =========================================================================== #
+# РАССЫЛКИ (план §5,§6,§7). Композер + CRUD заявки + аналитика.
+#
+# Инвариант: панель НЕ шлёт в Telegram. «Запуск» = перевод broadcasts.status в
+# 'queued' (бот подхватит, материализует получателей единым WHERE и разошлёт).
+# Запуск — мощное действие: confirm + hard-cap + step-up пароль + аудит (§7.1).
+# =========================================================================== #
+
+def _parse_audience(form) -> dict:
+    """Собрать фильтр аудитории из формы композера (подмножество, не сырой SQL).
+
+    messenger ограничен tg (max — disabled-задел). source/status — против allow-list.
+    exclude_unsubscribed — чекбокс, ВКЛ по умолчанию (приходит 'on'/отсутствует).
+    """
+    messenger = (form.get("messenger") or "tg").strip()
+    if messenger not in db.BROADCAST_MESSENGERS:
+        messenger = "tg"
+    source = (form.get("source") or "").strip() or None
+    if source is not None and source not in config.SOURCES:
+        source = None
+    status = (form.get("status") or "").strip() or None
+    if status is not None and status not in config.STATUSES:
+        status = None
+    # Чекбокс «исключить отписанных», вкл по умолчанию. Когда форма явно отправлена
+    # (hidden audience_submitted присутствует), значение чекбокса авторитетно:
+    # present → True, absent → оператор СНЯЛ галку → False. Если маркера нет
+    # (не из композера) — безопасный дефолт True.
+    if form.get("audience_submitted") is not None:
+        exclude_unsub = form.get("exclude_unsubscribed") is not None
+    else:
+        exclude_unsub = True
+    return {
+        "messenger": messenger,
+        "source": source,
+        "status": status,
+        "exclude_unsubscribed": bool(exclude_unsub),
+    }
+
+
+# ---- /broadcasts — список + сводная аналитика ----------------------------- #
+@app.get("/broadcasts", response_class=HTMLResponse)
+async def broadcasts_list(request: Request, session: auth.Session = Depends(require_session)):
+    try:
+        page = max(1, int(request.query_params.get("page", "1")))
+    except ValueError:
+        page = 1
+    per_page = config.PER_PAGE
+    offset = (page - 1) * per_page
+
+    total = await db.count_broadcasts()
+    rows = await db.list_broadcasts(limit=per_page, offset=offset)
+    pages = max(1, ceil(total / per_page)) if total else 1
+
+    return templates.TemplateResponse(
+        request,
+        "broadcasts.html",
+        {
+            "rows": [dict(r) for r in rows],
+            "page": page, "per_page": per_page, "total": total, "pages": pages,
+            "base_qs": "",
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "broadcasts",
+            "status_labels": config.STATUS_LABELS,
+            "broadcast_status_labels": BROADCAST_STATUS_LABELS,
+            "messenger_labels": config.MESSENGER_LABELS,
+        },
+    )
+
+
+# ---- /broadcasts/new — композер (GET) ------------------------------------- #
+@app.get("/broadcasts/new", response_class=HTMLResponse)
+async def broadcast_new_form(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    err: str | None = None,
+):
+    # Предпросмотр количества по дефолтной аудитории (tg + consent + не отписан).
+    default_audience = {"messenger": "tg", "source": None, "status": None,
+                        "exclude_unsubscribed": True}
+    estimate = await db.count_broadcast_audience(default_audience)
+    return templates.TemplateResponse(
+        request,
+        "broadcast_new.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "broadcasts",
+            "estimate": estimate,
+            "err": _broadcast_err_text(err),
+            "sources": config.SOURCES, "source_labels": config.SOURCE_LABELS,
+            "statuses": config.STATUSES, "status_labels": config.STATUS_LABELS,
+            "msg_max": config.MSG_MAX_LEN, "caption_max": config.CAPTION_MAX_LEN,
+            "max_recipients": config.MAX_BROADCAST_RECIPIENTS,
+            "max_upload_mb": config.MAX_UPLOAD_BYTES // (1024 * 1024),
+        },
+    )
+
+
+def _broadcast_err_text(err: str | None) -> str | None:
+    return {
+        "empty_body": "Текст рассылки обязателен.",
+        "too_long": "Текст превышает лимит Telegram.",
+        "bad_link": "Ссылка для трекинга недопустима (нужен http/https).",
+        "bad_file": "Тип файла не поддерживается.",
+        "file_too_big": "Файл превышает лимит загрузки.",
+        "rate": "Слишком много черновиков создано за час. Подождите.",
+        "raw_link_in_body": "В тексте нельзя использовать сырые ссылки/разметку — "
+                            "трекинг-ссылка подставляется через {link}.",
+    }.get(err or "")
+
+
+# ---- /broadcasts — создать черновик (POST, с файлом) ---------------------- #
+@app.post("/broadcasts")
+async def broadcast_create(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    title: str = Form(""),
+    body_template: str = Form(""),
+    target_url: str = Form(""),
+    csrf_token: str = Form(""),
+    file: UploadFile | None = File(None),
+):
+    await _enforce_csrf(request, session, csrf_token)
+
+    # Анти-флуд черновиков (§6.5).
+    if await db.count_recent_draft_broadcasts(within_hours=1) >= config.BROADCAST_DRAFT_MAX_PER_HOUR:
+        return _broadcast_new_redirect("rate")
+
+    form = await request.form()
+    audience = _parse_audience(form)
+
+    title_val = (title or "").strip()[:200] or None
+    body = (body_template or "").strip()
+    if not body:
+        return _broadcast_new_redirect("empty_body")
+
+    # parse_mode запрещён (§5.11): отвергаем сырые ссылки/markdown/html в теле —
+    # трекинг подставляется ТОЛЬКО через плейсхолдер {link}.
+    if _has_raw_link_or_markup(body):
+        return _broadcast_new_redirect("raw_link_in_body")
+
+    # Длина: с файлом текст идёт подписью (caption ≤1024), без файла — текст ≤4096.
+    has_file = file is not None and (file.filename or "")
+    max_len = config.CAPTION_MAX_LEN if has_file else config.MSG_MAX_LEN
+    if len(body) > max_len:
+        return _broadcast_new_redirect("too_long")
+
+    # Трекинг-ссылка: target_url валидируем allow-list'ом схем (дублируется в /r бота).
+    link_url: str | None = None
+    if (target_url or "").strip():
+        link_url = security.validate_target_url(target_url, schemes=config.LINK_URL_SCHEMES)
+        if link_url is None:
+            return _broadcast_new_redirect("bad_link")
+        # Если ссылка задана — в теле ОБЯЗАН быть {link} (иначе её никто не увидит).
+        if "{link}" not in body:
+            body = body + "\n{link}"
+
+    # Файл: allow-list mime + streaming-cap (не доверяем Content-Length, §6.5).
+    file_meta: dict | None = None
+    kind = "text"
+    if has_file:
+        mime = (file.content_type or "").split(";")[0].strip().lower()
+        if mime not in config.UPLOAD_MIME_ALLOW:
+            return _broadcast_new_redirect("bad_file")
+        data = await security.read_upload_capped(file, max_bytes=config.MAX_UPLOAD_BYTES)
+        if data is None:
+            return _broadcast_new_redirect("file_too_big")
+        if data:
+            file_meta = {"filename": (file.filename or "file")[:255], "mime": mime,
+                         "bytes": data}
+            kind = _kind_for_mime(mime)
+        # пустой файл (0 байт) — игнорируем, остаётся text
+
+    estimate = await db.count_broadcast_audience(audience)
+    bid = await db.create_broadcast_with_audit(
+        title=title_val, messenger=audience["messenger"], kind=kind,
+        body_template=body, audience=audience, recipient_estimate=estimate,
+        file_meta=file_meta, target_url=link_url,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url=f"/broadcasts/{bid}", status_code=303)
+
+
+def _broadcast_new_redirect(err: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/broadcasts/new?err={err}", status_code=303)
+
+
+def _has_raw_link_or_markup(body: str) -> bool:
+    """Отвергаем сырые URL/markdown/html в теле — трекинг идёт через {link} (§5.11).
+
+    Грубо: http(s):// или www. или markdown [..](..) или html-теги <a/<b/<i/<code.
+    Плейсхолдер {link} разрешён (подставляется воркером, не сырая ссылка).
+    """
+    low = body.lower()
+    if "http://" in low or "https://" in low or "www." in low or "tg://" in low:
+        return True
+    if "](" in body:                                    # markdown-ссылка [text](url)
+        return True
+    if "<a" in low or "<b>" in low or "<i>" in low or "<code" in low or "<pre" in low:
+        return True
+    return False
+
+
+def _kind_for_mime(mime: str) -> str:
+    if mime.startswith("image/"):
+        return "photo"
+    return "document"
+
+
+# ---- /broadcasts/{id} — аналитика (4 честных метрики, §6.1) --------------- #
+@app.get("/broadcasts/{broadcast_id}", response_class=HTMLResponse)
+async def broadcast_detail(
+    request: Request,
+    broadcast_id: int,
+    session: auth.Session = Depends(require_session),
+    queued: int = 0,
+    canceled: int = 0,
+    resumed: int = 0,
+    err: str | None = None,
+):
+    rec = await db.get_broadcast(broadcast_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+
+    # broadcast_view в аудит (получатели — ПДн), на каждое открытие аналитики.
+    await db.audit(actor=session.actor, action="broadcast_view",
+                   ip=_ip(request), user_agent=_ua(request),
+                   detail={"broadcast_id": broadcast_id})
+
+    stats = await db.broadcast_recipient_stats(broadcast_id)
+    link = await db.broadcast_link(broadcast_id)
+    clicks = await db.broadcast_click_count(broadcast_id) if link else 0
+    unsubs = await db.broadcast_unsub_count(broadcast_id)
+
+    recips = await db.list_broadcast_recipients(broadcast_id, limit=500, offset=0)
+    recip_rows = [{
+        "name": r["name"],
+        "phone_masked": security.mask_phone(r["phone_tail"], r["has_phone"]),
+        "tg_user_id": r["tg_user_id"],
+        "status": r["status"], "error": r["error"], "sent_at": r["sent_at"],
+        "clicked": r["clicked"],
+    } for r in recips]
+
+    sent = stats["sent"] or 0
+    ctr = round((clicks / sent) * 100, 1) if (link and sent) else None
+
+    return templates.TemplateResponse(
+        request,
+        "broadcast_detail.html",
+        {
+            "b": dict(rec),
+            "stats": dict(stats),
+            "clicks": clicks, "unsubs": unsubs, "ctr": ctr,
+            "has_link": bool(link),
+            "link_url": link["target_url"] if link else None,
+            "recipients": recip_rows,
+            "queued": bool(queued), "canceled": bool(canceled),
+            "resumed": bool(resumed),
+            "err": _broadcast_send_err_text(err),
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "broadcasts",
+            "status_labels": config.STATUS_LABELS,
+            "broadcast_status_labels": BROADCAST_STATUS_LABELS,
+            "max_recipients": config.MAX_BROADCAST_RECIPIENTS,
+        },
+    )
+
+
+def _broadcast_send_err_text(err: str | None) -> str | None:
+    return {
+        "confirm": "Запуск не подтверждён.",
+        "stepup": "Неверный пароль. Запуск отклонён.",
+        "cap": "Аудитория превышает лимит — введите точное число получателей для подтверждения.",
+        "cap_mismatch": "Введённое число не совпадает с числом получателей.",
+        "conflict": "Рассылка уже запущена или отменена.",
+        "empty": "В аудитории нет ни одного получателя.",
+    }.get(err or "")
+
+
+# ---- /broadcasts/{id}/send — ПОДТВЕРЖДЕНИЕ + cap + step-up (§7.1) ---------- #
+@app.post("/broadcasts/{broadcast_id}/send")
+async def broadcast_send(
+    request: Request,
+    broadcast_id: int,
+    session: auth.Session = Depends(require_session),
+    confirm: str = Form(""),
+    confirm_count: str = Form(""),
+    password: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+
+    rec = await db.get_broadcast(broadcast_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+
+    # 1) Явное подтверждение (паттерн export_full).
+    if confirm != "yes":
+        return _broadcast_detail_redirect(broadcast_id, "confirm")
+
+    # 2) Step-up: повторный пароль оператора (constant-time argon2). Режет угнанную
+    #    куку/открытую вкладку. Дёшево, переживает рестарт (§7.1).
+    if not auth.verify_password(password):
+        return _broadcast_detail_redirect(broadcast_id, "stepup")
+
+    # Считаем фактический размер аудитории ТЕМ ЖЕ фильтром, что бот возьмёт snapshot'ом.
+    # audience_filter приходит из jsonb СТРОКОЙ (кодек не зарегистрирован) — декодируем.
+    audience = db.decode_audience(rec["audience_filter"])
+    count = await db.count_broadcast_audience(audience)
+    if count <= 0:
+        return _broadcast_detail_redirect(broadcast_id, "empty")
+
+    # 3) Hard-cap: сверх лимита требуем точное число эхом (как «введите сумму прописью»).
+    if count > config.MAX_BROADCAST_RECIPIENTS:
+        if not (confirm_count or "").strip():
+            return _broadcast_detail_redirect(broadcast_id, "cap")
+        try:
+            if int(confirm_count.strip()) != count:
+                return _broadcast_detail_redirect(broadcast_id, "cap_mismatch")
+        except ValueError:
+            return _broadcast_detail_redirect(broadcast_id, "cap_mismatch")
+
+    # 4) Атомарный перевод draft→queued (0 строк → уже запущена). recipient_count
+    #    пишется ДО старта + в аудит broadcast_send. Бот не берёт, пока не queued+count.
+    result = await db.queue_broadcast_with_audit(
+        broadcast_id, recipient_count=count, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if result is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+    if result == "conflict":
+        return _broadcast_detail_redirect(broadcast_id, "conflict")
+    return RedirectResponse(url=f"/broadcasts/{broadcast_id}?queued=1", status_code=303)
+
+
+# ---- /broadcasts/{id}/resume — возобновить ПРИОСТАНОВЛЕННУЮ (paused→sending) - #
+# Мощное действие (заново запускает исходящие): CSRF + step-up пароль, как /send.
+# Закрывает терминальный тупик 'paused' от circuit-breaker / «файл не готов» (§5.5/§5.9):
+# без этого пути транзиентный всплеск замораживал рассылку навсегда.
+@app.post("/broadcasts/{broadcast_id}/resume")
+async def broadcast_resume(
+    request: Request,
+    broadcast_id: int,
+    session: auth.Session = Depends(require_session),
+    confirm: str = Form(""),
+    password: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+
+    rec = await db.get_broadcast(broadcast_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+
+    # Подтверждение + step-up пароль (constant-time argon2) — как при запуске.
+    if confirm != "yes":
+        return _broadcast_detail_redirect(broadcast_id, "confirm")
+    if not auth.verify_password(password):
+        return _broadcast_detail_redirect(broadcast_id, "stepup")
+
+    result = await db.resume_broadcast_with_audit(
+        broadcast_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+    if result == "conflict":
+        return _broadcast_detail_redirect(broadcast_id, "conflict")
+    return RedirectResponse(url=f"/broadcasts/{broadcast_id}?resumed=1", status_code=303)
+
+
+# ---- /broadcasts/{id}/cancel — отмена (обычный CSRF, обратимо до старта) --- #
+@app.post("/broadcasts/{broadcast_id}/cancel")
+async def broadcast_cancel(
+    request: Request,
+    broadcast_id: int,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    result = await db.cancel_broadcast_with_audit(
+        broadcast_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result is None:
+        raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена")
+    if result == "conflict":
+        return _broadcast_detail_redirect(broadcast_id, "conflict")
+    return RedirectResponse(url=f"/broadcasts/{broadcast_id}?canceled=1", status_code=303)
+
+
+def _broadcast_detail_redirect(broadcast_id: int, err: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/broadcasts/{broadcast_id}?err={err}", status_code=303)
+
+
+# Подписи статусов рассылки для UI (канон со схемой broadcasts.status).
+BROADCAST_STATUS_LABELS = {
+    "draft": "Черновик",
+    "queued": "В очереди",
+    "sending": "Отправляется",
+    "paused": "Пауза",
+    "done": "Завершена",
+    "canceled": "Отменена",
+}
 
 
 # =========================================================================== #

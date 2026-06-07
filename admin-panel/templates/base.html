@@ -9,6 +9,7 @@
   <meta name="robots" content="noindex, nofollow">
   <meta name="referrer" content="no-referrer">
   <title>{% block title %}Лиды{% endblock %} · Школа Лесова</title>
+  {% block head_extra %}{% endblock %}
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body class="{% block body_class %}{% endblock %}">
@@ -19,6 +20,7 @@
       <nav class="topnav" aria-label="Основная навигация">
         <a href="/"{% if active == 'dashboard' %} aria-current="page"{% endif %}>Дашборд</a>
         <a href="/leads"{% if active == 'leads' %} aria-current="page"{% endif %}>Лиды</a>
+        <a href="/broadcasts"{% if active == 'broadcasts' %} aria-current="page"{% endif %}>Рассылки</a>
       </nav>
       {% if csrf_token %}
       <form class="logout" method="post" action="/logout">

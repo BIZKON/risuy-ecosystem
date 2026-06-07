@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -225,7 +226,8 @@ async def get_lead(lead_id) -> asyncpg.Record | None:
                phone is not null and phone <> '' as has_phone,
                phone_hash, consent, subscribed, status,
                guide_sent_at, follow_up_1_at, follow_up_2_at, follow_up_3_at,
-               tg_user_id, max_user_id, notes, survey, erase_requested_at
+               tg_user_id, max_user_id, notes, survey, erase_requested_at,
+               bot_paused, unsubscribed_at
         from leads
         where id = $1
     """
@@ -416,3 +418,568 @@ async def stream_export_full(filters: dict[str, Any], *, row_cap: int):
         async with c.transaction():
             async for rec in c.cursor(q, *params):
                 yield rec
+
+
+# =========================================================================== #
+# РАСШИРЕНИЕ: переписка / перехват / рассылки / аналитика (план §3-§7).
+#
+# Инвариант (panel_rw, без BOT_TOKEN): панель ЧИТАЕТ messages/аналитику и ПИШЕТ
+# только в очереди (outbox / broadcasts / broadcast_files / link_tokens) и флаг
+# leads.bot_paused. Фактическую отправку, материализацию получателей и клики ведёт
+# БОТ под owner-ролью. Все мутации идут В ОДНОЙ транзакции с аудитом (паттерн
+# update_lead_with_audit). detail аудита — БЕЗ ПДн (факт/длины/счётчики).
+# =========================================================================== #
+
+# --------------------------------------------------------------------------- #
+# Блок ПЕРЕХВАТ: bot_paused. UPDATE одной колонки в транзакции с аудитом.
+# Грант: update(bot_paused) на leads. updated_at бампается триггером — не трогаем.
+# --------------------------------------------------------------------------- #
+async def set_bot_paused_with_audit(
+    lead_id,
+    *,
+    paused: bool,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> asyncpg.Record | None:
+    """Перехват/возврат: leads.bot_paused = paused. Аудит bot_paused|bot_resumed.
+
+    Возвращает строку с id/bot_paused/tg_user_id, либо None если лид не найден
+    (транзакция откатывается, аудит не пишется). По образцу update_lead_with_audit:
+    SELECT … FOR UPDATE → UPDATE → _insert_audit в общей транзакции.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            old = await c.fetchrow(
+                "select bot_paused from leads where id = $1 for update", lead_id
+            )
+            if old is None:
+                return None
+            row = await c.fetchrow(
+                """
+                update leads set bot_paused = $1
+                where id = $2
+                returning id, bot_paused, tg_user_id
+                """,
+                paused, lead_id,
+            )
+            await _insert_audit(
+                c, actor=actor,
+                action="bot_paused" if paused else "bot_resumed",
+                lead_id=lead_id, ip=ip, user_agent=user_agent,
+                detail={"lead_id": str(lead_id),
+                        "changed": bool(old["bot_paused"]) != paused},
+            )
+            return row
+
+
+# --------------------------------------------------------------------------- #
+# Блок ПЕРЕПИСКА: тред сообщений лида (читает панель; пишет БОТ). По lead_id ASC,
+# cap последними THREAD_CAP (берём «хвост» — последние N, затем разворачиваем в
+# хронологию для отрисовки). text рендерится |e (autoescape) — здесь не трогаем.
+# --------------------------------------------------------------------------- #
+async def get_thread(lead_id, *, cap: int) -> list[asyncpg.Record]:
+    """Лента переписки лида (вход/исход), последние `cap`, в хронологическом порядке.
+
+    Берём последние cap по created_at DESC (limit), затем переворачиваем в Python,
+    чтобы старые были сверху, новые снизу — без отдельного индекса по возрастанию.
+    """
+    q = """
+        select id, direction, kind, text, file_id, source, created_at, tg_message_id
+        from messages
+        where lead_id = $1
+        order by created_at desc, id desc
+        limit $2
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch(q, lead_id, cap)
+    return list(reversed(rows))
+
+
+# --------------------------------------------------------------------------- #
+# Ручной ответ оператора → INSERT в outbox ('queued'). НЕ прямой Telegram:
+# реально шлёт бот (worker-дренаж). tg_user_id денормализуем из лида (грант
+# панели — без update на phone/tg_user_id, читать можно). Аудит manual_reply
+# с {len} (без текста) в той же транзакции. Возвращает (outbox_id) или None.
+# --------------------------------------------------------------------------- #
+async def enqueue_manual_reply(
+    lead_id,
+    *,
+    text: str,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> int | None:
+    """Поставить ручной ответ в outbox. None, если лид не найден или без tg_user_id.
+
+    Адресность (есть tg_user_id) проверяем здесь; повторный re-check + erase-фильтр
+    делает бот перед отправкой (§5.10). Текст в аудит НЕ пишем — только длину.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            lead = await c.fetchrow(
+                "select tg_user_id from leads where id = $1 for update", lead_id
+            )
+            if lead is None or lead["tg_user_id"] is None:
+                return None  # нет лида/адреса → ничего не ставим (бот всё равно не отправит)
+            outbox_id = await c.fetchval(
+                """
+                insert into outbox (lead_id, tg_user_id, kind, text, status, created_by)
+                values ($1, $2, 'text', $3, 'queued', $4)
+                returning id
+                """,
+                lead_id, lead["tg_user_id"], text, actor,
+            )
+            await _insert_audit(
+                c, actor=actor, action="manual_reply", lead_id=lead_id,
+                ip=ip, user_agent=user_agent,
+                detail={"outbox_id": int(outbox_id), "len": len(text)},
+            )
+            return int(outbox_id)
+
+
+# =========================================================================== #
+# Блок РАССЫЛКИ: композер + CRUD заявки + аналитика.
+#
+# Аудитория описывается ПОДМНОЖЕСТВОМ build_filters (messenger/source/consent/
+# exclude_unsubscribed) — НЕ сырой SQL. Канон «кому можно» (consent/tg_user_id/
+# unsubscribed/erase) бот применяет повторно при материализации (§5.1). Панель
+# даёт предпросмотр количества тем же фильтром, что бот возьмёт как snapshot-базу.
+# =========================================================================== #
+
+# Канон значений messenger рассылки. tg активна; max — disabled-задел (план §11.4).
+BROADCAST_MESSENGERS: tuple[str, ...] = ("tg",)            # реально отправляемые
+_BROADCAST_MESSENGER_SET = frozenset(BROADCAST_MESSENGERS)
+BROADCAST_STATUSES: tuple[str, ...] = (
+    "draft", "queued", "sending", "paused", "done", "canceled",
+)
+_BROADCAST_STATUS_SET = frozenset(BROADCAST_STATUSES)
+
+
+def _broadcast_audience_where(
+    audience: dict[str, Any], *, start_idx: int = 1
+) -> tuple[str, list[Any], int]:
+    """WHERE «кандидаты рассылки» из ПОДМНОЖЕСТВА фильтров аудитории.
+
+    Жёсткое ядро «кому МОЖНО слать» (план §5.1) ВСЕГДА включено — даже если панель
+    передаст пустую аудиторию, отправка останется в рамках согласия/подписки:
+        messenger='tg' and tg_user_id is not null and consent = true
+        and erase_requested_at is null and bot_paused = false
+    ВАЖНО: ядро должно ПОБАЙТОВО совпадать с _AUDIENCE_WHERE бота (bot-telegram/db.py),
+    включая bot_paused=false (план §11.2, решение владельца ДА — промо не идёт поверх
+    живого ручного диалога). Иначе предпросмотр/cap-гейт/recipient_count считаются по
+    суперсету, а бот разошлёт МЕНЬШЕ — «точное число» при превышении лимита и аудит
+    разъезжаются с реальностью. Поверх ядра — операторские сужения (source/status) и
+    опц. исключение отписанных (exclude_unsubscribed, вкл. по умолчанию). Значения через
+    allow-list+$-плейсхолдеры. Возвращает (where_sql, params, next_idx).
+    """
+    clauses: list[str] = [
+        "messenger = 'tg'",
+        "tg_user_id is not null",
+        "consent = true",
+        "erase_requested_at is null",
+        "bot_paused = false",
+    ]
+    params: list[Any] = []
+    i = start_idx
+
+    def add(clause_tpl: str, value: Any) -> None:
+        nonlocal i
+        clauses.append(clause_tpl.format(i=i))
+        params.append(value)
+        i += 1
+
+    source = audience.get("source")
+    if source is not None and source in _SOURCE_SET:
+        add("source = ${i}", source)
+    status = audience.get("status")
+    if status is not None and status in _STATUS_SET:
+        add("status = ${i}", status)
+
+    # Исключить отписанных (по умолчанию True). Если оператор снимет — отписанные
+    # всё равно НЕ получат: бот режет unsubscribed на своей стороне (§5.1). Здесь —
+    # лишь честный предпросмотр и snapshot-база.
+    if audience.get("exclude_unsubscribed", True):
+        clauses.append("unsubscribed_at is null")
+
+    return " and ".join(clauses), params, i
+
+
+async def count_broadcast_audience(audience: dict[str, Any]) -> int:
+    """Предпросмотр числа получателей по фильтру аудитории (тем же WHERE, что бот)."""
+    where_sql, params, _ = _broadcast_audience_where(audience)
+    q = f"select count(*) from leads where {where_sql}"
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q, *params))
+
+
+async def count_recent_draft_broadcasts(*, within_hours: int) -> int:
+    """Сколько черновиков рассылок создано за окно (анти-флуд композера, §6.5)."""
+    q = """
+        select count(*) from broadcasts
+        where created_at >= now() - ($1 || ' hours')::interval
+    """
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q, str(within_hours)))
+
+
+async def create_broadcast_with_audit(
+    *,
+    title: str | None,
+    messenger: str,
+    kind: str,
+    body_template: str,
+    audience: dict[str, Any],
+    recipient_estimate: int,
+    file_meta: dict[str, Any] | None,
+    target_url: str | None,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> int:
+    """Создать черновик рассылки + опц. файл + опц. трекинг-токен. Аудит broadcast_create.
+
+    ОДНА транзакция: insert broadcasts(status='draft') → опц. insert broadcast_files(bytes)
+    → опц. insert link_tokens(token, target_url, broadcast_id) → _insert_audit. Получателей
+    НЕ материализует (это делает бот при queued, §5.2). Возвращает broadcasts.id.
+
+    messenger/kind валидируются здесь как defence-in-depth (хендлер тоже проверит).
+    audience_filter кладём как jsonb — подмножество фильтров, не сырой SQL.
+    """
+    if messenger not in _BROADCAST_MESSENGER_SET:
+        raise ValueError(f"Недопустимый мессенджер рассылки: {messenger!r}")
+    audience_json = json.dumps(audience, ensure_ascii=False, default=_json_default)
+    async with pool.acquire() as c:
+        async with c.transaction():
+            bid = await c.fetchval(
+                """
+                insert into broadcasts
+                    (title, messenger, kind, body_template, audience_filter,
+                     status, recipient_count, created_by)
+                values ($1, $2, $3, $4, $5::jsonb, 'draft', null, $6)
+                returning id
+                """,
+                title, messenger, kind, body_template, audience_json, actor,
+            )
+            bid = int(bid)
+            if file_meta is not None:
+                await c.execute(
+                    """
+                    insert into broadcast_files (broadcast_id, filename, mime, bytes)
+                    values ($1, $2, $3, $4)
+                    """,
+                    bid, file_meta.get("filename"), file_meta.get("mime"),
+                    file_meta.get("bytes"),
+                )
+            token: str | None = None
+            if target_url:
+                token = secrets.token_urlsafe(16)
+                await c.execute(
+                    """
+                    insert into link_tokens (token, target_url, broadcast_id)
+                    values ($1, $2, $3)
+                    """,
+                    token, target_url, bid,
+                )
+            await _insert_audit(
+                c, actor=actor, action="broadcast_create", ip=ip, user_agent=user_agent,
+                detail={
+                    "broadcast_id": bid,
+                    "messenger": messenger,
+                    "kind": kind,
+                    # аудитория — факт фильтров, без значений ПДн (их тут и нет):
+                    "audience": {k: audience.get(k) for k in
+                                 ("source", "status", "exclude_unsubscribed")
+                                 if k in audience},
+                    "recipient_estimate": int(recipient_estimate),
+                    "has_file": file_meta is not None,
+                    "has_link": bool(target_url),
+                },
+            )
+            return bid
+
+
+async def list_broadcasts(*, limit: int, offset: int) -> list[asyncpg.Record]:
+    """Список рассылок со сводными счётчиками получателей (для раздела /broadcasts).
+
+    Счётчики берём агрегатом по broadcast_recipients (пишет бот). Для свежесозданных
+    draft без получателей — нули. recipient_count (план) — материализуется ботом.
+    """
+    q = """
+        select
+            b.id, b.title, b.messenger, b.kind, b.status,
+            b.recipient_count, b.created_by, b.created_at,
+            b.started_at, b.finished_at,
+            coalesce(r.total, 0)   as r_total,
+            coalesce(r.sent, 0)    as r_sent,
+            coalesce(r.failed, 0)  as r_failed,
+            coalesce(r.skipped, 0) as r_skipped
+        from broadcasts b
+        left join (
+            select broadcast_id,
+                   count(*)                            as total,
+                   count(*) filter (where status = 'sent')    as sent,
+                   count(*) filter (where status = 'failed')  as failed,
+                   count(*) filter (where status = 'skipped') as skipped
+            from broadcast_recipients
+            group by broadcast_id
+        ) r on r.broadcast_id = b.id
+        order by b.created_at desc
+        limit $1 offset $2
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q, limit, offset)
+
+
+async def count_broadcasts() -> int:
+    async with pool.acquire() as c:
+        return int(await c.fetchval("select count(*) from broadcasts"))
+
+
+async def get_broadcast(broadcast_id: int) -> asyncpg.Record | None:
+    """Карточка рассылки. id типизирован int в хендлере → мусор не дойдёт до SQL."""
+    q = """
+        select id, title, messenger, kind, body_template, audience_filter,
+               status, recipient_count, created_by, created_at,
+               started_at, finished_at, totals
+        from broadcasts
+        where id = $1
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q, broadcast_id)
+
+
+def decode_audience(audience_filter: Any) -> dict[str, Any]:
+    """audience_filter из БД → dict. asyncpg отдаёт jsonb СТРОКОЙ (кодек не зарегистрирован,
+    как и для survey/totals — пишем json.dumps + ::jsonb). Парсим безопасно; мусор/None → {}.
+    Совместимо и со случаем, если когда-нибудь подключат json-кодек (тогда уже dict)."""
+    if audience_filter is None:
+        return {}
+    if isinstance(audience_filter, dict):
+        return audience_filter
+    if isinstance(audience_filter, (str, bytes)):
+        try:
+            val = json.loads(audience_filter)
+            return val if isinstance(val, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
+
+
+async def broadcast_recipient_stats(broadcast_id: int) -> asyncpg.Record:
+    """Честные 4 метрики (§6.1): отправлено/не доставлено/клики/отписки + всего.
+
+    sent/failed/skipped — count filter по broadcast_recipients (пишет бот). clicks —
+    отдельный count по link_clicks в окне [started_at, +∞) (TTL-окно для CTR считает
+    хендлер). unsubs — отписки после старта рассылки. «Открытий» НЕТ — Telegram их
+    боту не отдаёт (план §6.1).
+    """
+    q = """
+        select
+            count(*)                                   as total,
+            count(*) filter (where status = 'sent')    as sent,
+            count(*) filter (where status = 'failed')  as failed,
+            count(*) filter (where status = 'pending') as pending,
+            count(*) filter (where status = 'sending') as sending,
+            count(*) filter (where status = 'skipped') as skipped
+        from broadcast_recipients
+        where broadcast_id = $1
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q, broadcast_id)
+
+
+async def broadcast_click_count(broadcast_id: int) -> int:
+    """Число кликов по трекинг-ссылке рассылки (если ссылка есть). Знаменатель CTR=sent."""
+    async with pool.acquire() as c:
+        return int(await c.fetchval(
+            "select count(*) from link_clicks where broadcast_id = $1", broadcast_id
+        ))
+
+
+async def broadcast_unsub_count(broadcast_id: int) -> int:
+    """Отписки среди получателей рассылки ПОСЛЕ её старта (§6.1).
+
+    Считаем лидов-получателей этой рассылки, у кого unsubscribed_at >= started_at.
+    Если рассылка ещё не стартовала — 0.
+    """
+    q = """
+        select count(*)
+        from broadcast_recipients br
+        join broadcasts b on b.id = br.broadcast_id
+        join leads l on l.id = br.lead_id
+        where br.broadcast_id = $1
+          and b.started_at is not null
+          and l.unsubscribed_at is not null
+          and l.unsubscribed_at >= b.started_at
+    """
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q, broadcast_id))
+
+
+async def list_broadcast_recipients(
+    broadcast_id: int, *, limit: int, offset: int
+) -> list[asyncpg.Record]:
+    """Получатели рассылки для детального разреза (телефон маскируется в шаблоне).
+
+    НЕ селектит сырой phone — только хвост phone_tail (2 цифры) прямо в SQL, как
+    список лидов. click отмечаем подзапросом exists по link_clicks на per-recipient
+    токен. status — фактический исход (sent|failed|skipped|pending|sending).
+    """
+    q = """
+        select
+            br.lead_id, br.tg_user_id, br.status, br.error, br.sent_at,
+            l.name,
+            right(regexp_replace(coalesce(l.phone,''), '\\D', '', 'g'), 2) as phone_tail,
+            l.phone is not null and l.phone <> '' as has_phone,
+            exists (
+                select 1 from link_clicks lc
+                where lc.token = br.click_token
+            ) as clicked
+        from broadcast_recipients br
+        join leads l on l.id = br.lead_id
+        where br.broadcast_id = $1
+        order by br.status, br.sent_at desc nulls last, br.id
+        limit $2 offset $3
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q, broadcast_id, limit, offset)
+
+
+async def broadcast_link(broadcast_id: int) -> asyncpg.Record | None:
+    """Трекинг-ссылка рассылки (target_url), если регистрировалась. Для UI аналитики."""
+    q = """
+        select target_url, count(*) over () as n
+        from link_tokens
+        where broadcast_id = $1
+        limit 1
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q, broadcast_id)
+
+
+# --------------------------------------------------------------------------- #
+# ЗАПУСК рассылки (мощное действие, §7.1): draft→queued ровно один раз +
+# recipient_count пишется ДО старта + аудит broadcast_send. Защита от двойного
+# запуска — условный UPDATE … where status='draft' returning (0 строк → 409).
+# Получателей материализует БОТ при подхвате queued (панель их не пишет).
+# --------------------------------------------------------------------------- #
+async def queue_broadcast_with_audit(
+    broadcast_id: int,
+    *,
+    recipient_count: int,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str | None:
+    """Перевести draft→queued + записать recipient_count + аудит broadcast_send.
+
+    Возвращает:
+      * "queued"   — успех (была draft, стала queued);
+      * "conflict" — статус был не draft (уже запущена/отменена) → хендлер отдаёт 409;
+      * None       — рассылки нет → 404.
+    Условный UPDATE атомарно отсекает двойной запуск (гонка двух вкладок).
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            exists = await c.fetchrow(
+                "select status from broadcasts where id = $1 for update", broadcast_id
+            )
+            if exists is None:
+                return None
+            row = await c.fetchrow(
+                """
+                update broadcasts
+                set status = 'queued', recipient_count = $2
+                where id = $1 and status = 'draft'
+                returning id
+                """,
+                broadcast_id, recipient_count,
+            )
+            if row is None:
+                return "conflict"  # статус был не draft
+            await _insert_audit(
+                c, actor=actor, action="broadcast_send", ip=ip, user_agent=user_agent,
+                detail={"broadcast_id": broadcast_id, "recipient_count": recipient_count},
+            )
+            return "queued"
+
+
+async def resume_broadcast_with_audit(
+    broadcast_id: int,
+    *,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str | None:
+    """Возобновить ПРИОСТАНОВЛЕННУЮ рассылку: paused→sending. Аудит broadcast_resume.
+
+    Закрывает терминальный тупик: circuit-breaker (§5.9) и «файл не готов» (§5.5) ставят
+    broadcasts.status='paused', а воркёр подхватывает только 'queued'/'sending'. Без этого
+    пути транзиентный всплеск (краткий сбой Telegram в начале кампании) замораживал рассылку
+    навсегда — оставались неотправленные pending. Условный UPDATE … where status='paused'
+    атомарно отсекает гонку/повтор. Получателей НЕ перематериализуем (snapshot уже есть);
+    воркёр доберёт оставшиеся pending. recipient_count трогать не нужно — он стоит с запуска.
+
+    Грант: update on broadcasts (panel_rw) уже покрывает. Возвращает
+    "resumed" | "conflict" (статус был не paused) | None (404), как queue_broadcast_with_audit.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            exists = await c.fetchrow(
+                "select status from broadcasts where id = $1 for update", broadcast_id
+            )
+            if exists is None:
+                return None
+            row = await c.fetchrow(
+                """
+                update broadcasts set status = 'sending'
+                where id = $1 and status = 'paused'
+                returning id
+                """,
+                broadcast_id,
+            )
+            if row is None:
+                return "conflict"  # статус был не paused (draft/queued/sending/done/canceled)
+            await _insert_audit(
+                c, actor=actor, action="broadcast_resume", ip=ip, user_agent=user_agent,
+                detail={"broadcast_id": broadcast_id},
+            )
+            return "resumed"
+
+
+async def cancel_broadcast_with_audit(
+    broadcast_id: int,
+    *,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str | None:
+    """Отменить рассылку: → canceled из состояний draft|queued|paused. Аудит broadcast_cancel.
+
+    sending не отменяем здесь как «стоп-кран на лету» (это делает бот через paused);
+    из панели отменяем только ещё-не-идущие (draft|queued|paused). Возвращает
+    "canceled" | "conflict" | None (404), как queue_broadcast_with_audit.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            exists = await c.fetchrow(
+                "select status from broadcasts where id = $1 for update", broadcast_id
+            )
+            if exists is None:
+                return None
+            row = await c.fetchrow(
+                """
+                update broadcasts set status = 'canceled'
+                where id = $1 and status in ('draft', 'queued', 'paused')
+                returning id
+                """,
+                broadcast_id,
+            )
+            if row is None:
+                return "conflict"
+            await _insert_audit(
+                c, actor=actor, action="broadcast_cancel", ip=ip, user_agent=user_agent,
+                detail={"broadcast_id": broadcast_id, "from_status": exists["status"]},
+            )
+            return "canceled"

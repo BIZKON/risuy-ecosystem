@@ -1,4 +1,6 @@
 """Слой доступа к Postgres через asyncpg. Простой пул + функции по шагам воронки."""
+import logging
+
 import asyncpg
 
 import config
@@ -11,7 +13,10 @@ _FOLLOWUP_COLS = {"follow_up_1_at", "follow_up_2_at", "follow_up_3_at"}
 
 async def init() -> None:
     global pool
-    pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=5)
+    # max_size=10 (§5.4 плана): воркеры рассылки/outbox + polling-хендлеры воронки
+    # делят один пул; при 5 voronka голодала. Соединение НИКОГДА не держится через
+    # await send — claim/запись результата идут отдельными короткими транзакциями.
+    pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
 
 
 async def close() -> None:
@@ -77,12 +82,16 @@ async def mark_guide_sent(tg_user_id: int) -> None:
 async def get_due_followups(col: str, delay_seconds: int) -> list[int]:
     """tg_user_id лидов, которым пора отправить касание col (ещё не отправляли)."""
     assert col in _FOLLOWUP_COLS
+    # +2 фильтра (§4 плана): прогрев = маркетинг, подавляется отпиской и ручным
+    # перехватом. Фильтр на ЧТЕНИИ — касание не помечается отправленным, resume бесплатный.
     q = f"""
         select tg_user_id from leads
         where messenger = 'tg'
           and tg_user_id is not null
           and guide_sent_at is not null
           and {col} is null
+          and unsubscribed_at is null
+          and bot_paused = false
           and guide_sent_at + make_interval(secs => $1) <= now()
         limit 100
     """
@@ -96,3 +105,531 @@ async def mark_followup_sent(col: str, tg_user_id: int) -> None:
     q = f"update leads set {col} = now(), status = 'nurturing' where tg_user_id = $1"
     async with pool.acquire() as c:
         await c.execute(q, tg_user_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# РАСШИРЕНИЕ: перехват / переписка / outbox-дренаж / рассылки / трекинг / retention.
+# Всё под owner-ролью бота. Панель (panel_rw) сюда не ходит — она лишь кладёт задачи
+# (outbox/broadcasts/link_tokens) и читает результаты. Источник истины «кому слать» и
+# все фактические записи (messages / материализация / статусы / клики) — здесь, в боте.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Допустимые kind для messages/outbox — держим в синхроне с CHECK в schema_panel_ext.sql.
+_MSG_KINDS = {
+    "text", "photo", "document", "video", "voice",
+    "video_note", "audio", "animation", "sticker", "other",
+}
+
+
+# ── Перехват (bot_paused) ────────────────────────────────────────────────────
+async def is_bot_paused(tg_user_id: int) -> bool:
+    """True, если оператор взял ручное управление этим лидом. Нет строки → False."""
+    async with pool.acquire() as c:
+        val = await c.fetchval(
+            "select coalesce(bot_paused, false) from leads where tg_user_id = $1",
+            tg_user_id,
+        )
+    return bool(val)
+
+
+# ── Отписка (152-ФЗ) ─────────────────────────────────────────────────────────
+async def set_unsubscribed(tg_user_id: int) -> None:
+    """Идемпотентная отписка: первый момент фиксируем, повторный /stop не перетирает."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update leads set unsubscribed_at = coalesce(unsubscribed_at, now()) "
+            "where tg_user_id = $1",
+            tg_user_id,
+        )
+
+
+# ── Переписка (messages): резолв lead_id + лог входящих/исходящих ─────────────
+async def resolve_lead_id(tg_user_id: int) -> str | None:
+    """uuid лида по tg_user_id (может ещё не существовать → None). Мягко, без исключений."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select id from leads where tg_user_id = $1", tg_user_id
+        )
+
+
+async def log_message(
+    *,
+    tg_user_id: int,
+    direction: str,
+    kind: str = "text",
+    text: str | None = None,
+    file_id: str | None = None,
+    source: str | None = None,
+    tg_message_id: int | None = None,
+    lead_id: str | None = None,
+) -> None:
+    """Пишет одну строку в messages. lead_id мягко резолвится по tg_user_id, если не передан.
+
+    НИКОГДА не бросает наружу — лог переписки не должен ронять воронку/Лию/рассылку.
+    Вызывается из middleware (входящие) и messaging-слоя (исходящие).
+    """
+    if kind not in _MSG_KINDS:
+        kind = "other"
+    try:
+        async with pool.acquire() as c:
+            if lead_id is None:
+                lead_id = await c.fetchval(
+                    "select id from leads where tg_user_id = $1", tg_user_id
+                )
+            await c.execute(
+                """
+                insert into messages
+                    (lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id, source)
+                values ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id, source,
+            )
+    except Exception:  # noqa: BLE001 — изоляция: переписка-лог не критична к доставке
+        logging.getLogger(__name__).warning(
+            "log_message не записан (direction=%s kind=%s tg=%s)",
+            direction, kind, tg_user_id, exc_info=True,
+        )
+
+
+# ── Дренаж OUTBOX (точечные ответы оператора) ────────────────────────────────
+async def claim_outbox(limit: int) -> list[dict]:
+    """Короткая tx: помечает queued→sending, инкремент attempts, ставит claimed_at, commit.
+
+    Соединение возвращается в пул ДО отправки (send идёт без открытой транзакции, §5.4).
+    SKIP LOCKED исключает гонку нескольких воркеров/инстансов в пределах одного claim.
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            update outbox set status = 'sending', attempts = attempts + 1, claimed_at = now()
+            where id in (
+                select id from outbox
+                where status = 'queued'
+                order by id
+                limit $1
+                for update skip locked
+            )
+            returning id, lead_id, tg_user_id, kind, text, file_id, attempts, created_at
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def outbox_recheck_address(tg_user_id: int) -> str | None:
+    """Re-SELECT перед send: причина пропуска или None если слать можно.
+
+    'no_address' — нет tg_user_id (теоретически); 'erased' — отозвал согласие на ПДн.
+    consent для ответа на входящее НЕ требуем (клиент сам написал). §5.10.
+    """
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select tg_user_id, erase_requested_at from leads where tg_user_id = $1",
+            tg_user_id,
+        )
+    if row is None or row["tg_user_id"] is None:
+        return "no_address"
+    if row["erase_requested_at"] is not None:
+        return "erased"
+    return None
+
+
+async def mark_outbox_sent(item_id: int) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update outbox set status = 'sent', sent_at = now(), last_error = null where id = $1",
+            item_id,
+        )
+
+
+async def mark_outbox_failed(item_id: int, error: str) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update outbox set status = 'failed', last_error = $2 where id = $1",
+            item_id, error[:500],
+        )
+
+
+async def release_outbox(item_id: int, error: str, max_attempts: int, max_age_hours: int) -> None:
+    """Транзиентная ошибка: вернуть в queued, НО с потолком — иначе вечный pending (§5.10).
+
+    Потолок по attempts ИЛИ по возрасту created_at → переводим в failed.
+    """
+    async with pool.acquire() as c:
+        await c.execute(
+            """
+            update outbox set
+                status = case
+                    when attempts >= $2 or created_at < now() - make_interval(hours => $3)
+                    then 'failed' else 'queued' end,
+                last_error = $4
+            where id = $1
+            """,
+            item_id, max_attempts, max_age_hours, error[:500],
+        )
+
+
+async def reclaim_stuck_outbox(after_seconds: int) -> int:
+    """Возврат застрявших 'sending' (краш/редеплой) в 'queued'. Возвращает число строк."""
+    async with pool.acquire() as c:
+        res = await c.execute(
+            """
+            update outbox set status = 'queued'
+            where status = 'sending' and claimed_at < now() - make_interval(secs => $1)
+            """,
+            float(after_seconds),
+        )
+    return _affected(res)
+
+
+# ── РАССЫЛКИ: подхват заявок, материализация, claim, статусы ─────────────────
+# Жёсткий, неотменяемый фильтр «кому МОЖНО писать» (§5.1). Применяется И при
+# материализации, И повторно перед КАЖДЫМ send. Бот не доверяет панели.
+_AUDIENCE_WHERE = (
+    "messenger = 'tg' and tg_user_id is not null and consent = true "
+    "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false"
+)
+
+
+async def claim_broadcast_to_send() -> dict | None:
+    """Атомарно берёт ОДНУ рассылку из 'queued' с подтверждённым recipient_count в работу.
+
+    queued→sending под FOR UPDATE SKIP LOCKED: только один инстанс материализует.
+    recipient_count проставляет панель ДО старта (§7.1 п.6) — если null, не берём
+    (полу-записанная заявка). Возврат строки рассылки или None.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                """
+                select id, title, messenger, kind, body_template, recipient_count
+                from broadcasts
+                where status = 'queued' and recipient_count is not null
+                order by id
+                limit 1
+                for update skip locked
+                """
+            )
+            if row is None:
+                return None
+            await c.execute(
+                "update broadcasts set status = 'sending', started_at = coalesce(started_at, now()) "
+                "where id = $1",
+                row["id"],
+            )
+            return dict(row)
+
+
+async def materialize_recipients(broadcast_id: int) -> int:
+    """INSERT…SELECT получателей по неотменяемому WHERE (§5.2). Идемпотентно (on conflict).
+
+    Детерминированный snapshot до первой отправки. Возвращает число строк в очереди
+    получателей (после вставки). per-recipient click_token генерится позже, при первом
+    использовании трекинг-ссылки (см. ensure_click_token) — здесь оставляем null.
+    """
+    q = f"""
+        insert into broadcast_recipients (broadcast_id, lead_id, tg_user_id)
+        select $1, id, tg_user_id from leads where {_AUDIENCE_WHERE}
+        on conflict (broadcast_id, lead_id) do nothing
+    """
+    async with pool.acquire() as c:
+        await c.execute(q, broadcast_id)
+        cnt = await c.fetchval(
+            "select count(*) from broadcast_recipients where broadcast_id = $1", broadcast_id
+        )
+    return int(cnt)
+
+
+async def set_broadcast_recipient_count(broadcast_id: int, count: int) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcasts set recipient_count = $2 where id = $1", broadcast_id, count
+        )
+
+
+async def claim_broadcast_recipients(broadcast_id: int, limit: int) -> list[dict]:
+    """Короткая tx: pending→sending батчем, инкремент attempts, claimed_at, commit.
+
+    Соединение в пул ДО отправки. SKIP LOCKED — изоляция в пределах инстанса.
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            update broadcast_recipients
+            set status = 'sending', attempts = attempts + 1, claimed_at = now()
+            where id in (
+                select id from broadcast_recipients
+                where broadcast_id = $1 and status = 'pending'
+                order by id
+                limit $2
+                for update skip locked
+            )
+            returning id, lead_id, tg_user_id, click_token, attempts
+            """,
+            broadcast_id, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def recipient_recheck(lead_id: str) -> bool:
+    """TOCTOU re-check перед КАЖДЫМ send (§5.1): все 4+1 условия ещё держатся?
+
+    True = слать можно. False = отписался/erase/consent отозван/перехват → skipped.
+    """
+    q = f"select 1 from leads where id = $1 and {_AUDIENCE_WHERE}"
+    async with pool.acquire() as c:
+        return await c.fetchval(q, lead_id) is not None
+
+
+async def ensure_click_token(recipient_id: int, broadcast_id: int, lead_id: str,
+                             target_url: str) -> str:
+    """Лениво создаёт per-recipient click_token и регистрирует его в link_tokens.
+
+    Вызывается воркером в момент отправки, только если body_template несёт {link}.
+    target_url — единая трекинг-ссылка рассылки (зарегистрирована панелью отдельной
+    строкой link_tokens без click_token; здесь делаем per-recipient строку).
+    Идемпотентно: если токен уже есть на получателе — возвращаем его.
+    """
+    import secrets
+    async with pool.acquire() as c:
+        existing = await c.fetchval(
+            "select click_token from broadcast_recipients where id = $1", recipient_id
+        )
+        if existing:
+            return existing
+        token = secrets.token_urlsafe(16)
+        async with c.transaction():
+            await c.execute(
+                "insert into link_tokens (token, target_url, broadcast_id, lead_id) "
+                "values ($1, $2, $3, $4) on conflict (token) do nothing",
+                token, target_url, broadcast_id, lead_id,
+            )
+            await c.execute(
+                "update broadcast_recipients set click_token = $2 where id = $1",
+                recipient_id, token,
+            )
+    return token
+
+
+async def mark_recipient_sent(recipient_id: int) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcast_recipients set status = 'sent', sent_at = now(), error = null "
+            "where id = $1",
+            recipient_id,
+        )
+
+
+async def mark_recipient_failed(recipient_id: int, error: str) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcast_recipients set status = 'failed', error = $2 where id = $1",
+            recipient_id, error[:500],
+        )
+
+
+async def mark_recipient_skipped(recipient_id: int, reason: str) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcast_recipients set status = 'skipped', error = $2 where id = $1",
+            recipient_id, reason[:500],
+        )
+
+
+async def release_recipient(recipient_id: int, error: str, max_attempts: int) -> None:
+    """Транзиентная ошибка: вернуть в pending, потолок attempts → failed."""
+    async with pool.acquire() as c:
+        await c.execute(
+            """
+            update broadcast_recipients
+            set status = case when attempts >= $2 then 'failed' else 'pending' end,
+                error = $3
+            where id = $1
+            """,
+            recipient_id, max_attempts, error[:500],
+        )
+
+
+async def reclaim_stuck_recipients(after_seconds: int) -> int:
+    """Возврат застрявших 'sending' получателей в 'pending' (краш/редеплой). §5.5."""
+    async with pool.acquire() as c:
+        res = await c.execute(
+            """
+            update broadcast_recipients set status = 'pending'
+            where status = 'sending' and claimed_at < now() - make_interval(secs => $1)
+            """,
+            float(after_seconds),
+        )
+    return _affected(res)
+
+
+async def broadcast_counts(broadcast_id: int) -> dict:
+    """Сводка по получателям: {pending,sending,sent,failed,skipped,total}."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select status, count(*) n from broadcast_recipients "
+            "where broadcast_id = $1 group by status",
+            broadcast_id,
+        )
+    out = {"pending": 0, "sending": 0, "sent": 0, "failed": 0, "skipped": 0}
+    for r in rows:
+        out[r["status"]] = r["n"]
+    out["total"] = sum(out.values())
+    return out
+
+
+async def get_broadcast_status(broadcast_id: int) -> str | None:
+    async with pool.acquire() as c:
+        return await c.fetchval("select status from broadcasts where id = $1", broadcast_id)
+
+
+async def pause_broadcast(broadcast_id: int) -> None:
+    """Стоп-кран: sending→paused. Воркер доедает claimed-батч и больше не берёт pending."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcasts set status = 'paused' where id = $1 and status = 'sending'",
+            broadcast_id,
+        )
+
+
+async def finalize_broadcast(broadcast_id: int, totals: dict) -> None:
+    """sending→done + итоги. Только если не осталось pending/sending (вызывает воркер)."""
+    import json
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcasts set status = 'done', finished_at = now(), totals = $2::jsonb "
+            "where id = $1 and status = 'sending'",
+            broadcast_id, json.dumps(totals),
+        )
+
+
+async def update_broadcast_totals(broadcast_id: int, totals: dict) -> None:
+    import json
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcasts set totals = $2::jsonb where id = $1",
+            broadcast_id, json.dumps(totals),
+        )
+
+
+# ── Файл рассылки: заливка в служебный чат (§5.6) ────────────────────────────
+async def get_broadcast_file(broadcast_id: int) -> dict | None:
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select id, filename, mime, bytes, tg_file_id from broadcast_files "
+            "where broadcast_id = $1 order by id limit 1",
+            broadcast_id,
+        )
+    return dict(row) if row else None
+
+
+async def set_broadcast_file_id(file_row_id: int, tg_file_id: str) -> None:
+    """Проставить tg_file_id и ОБНУЛИТЬ bytes (ПДн-гигиена + место). §5.6/§6.5."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update broadcast_files set tg_file_id = $2, bytes = null where id = $1",
+            file_row_id, tg_file_id,
+        )
+
+
+# ── Трекинг /r/<token>: чтение токена + лог клика (пишет БОТ) ─────────────────
+async def get_link_token(token: str) -> dict | None:
+    """target_url + контекст по токену. None если нет. Вызывается обработчиком /r."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select token, target_url, broadcast_id, lead_id from link_tokens where token = $1",
+            token,
+        )
+    return dict(row) if row else None
+
+
+async def log_link_click(token: str, broadcast_id, lead_id, ua: str | None, ip: str | None) -> None:
+    """Лог клика. ua обрезается [:512]. Вызывать fire-and-forget — редирект важнее лога."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "insert into link_clicks (token, broadcast_id, lead_id, ua, ip) "
+            "values ($1, $2, $3, $4, $5::inet)",
+            token, broadcast_id, lead_id,
+            (ua[:512] if ua else None),
+            ip,
+        )
+
+
+# ── Retention: обезличивание по отзыву + TTL переписки (§6.4) ─────────────────
+async def due_for_erase(after_days: int) -> list[str]:
+    """uuid лидов, у которых erase_requested_at + N дней <= now() и ещё есть ПДн."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select id from leads
+            where erase_requested_at is not null
+              and erase_requested_at + make_interval(days => $1) <= now()
+              and (name is not null or phone is not null
+                   or phone_hash is not null or notes is not null)
+            limit 100
+            """,
+            after_days,
+        )
+    return [r["id"] for r in rows]
+
+
+async def erase_lead(lead_id: str, actor: str = "retention-cron") -> None:
+    """Обезличивает лид и его ПДн-производные одной транзакцией + аудит 'lead_erased'.
+
+    leads-строки НЕ удаляются (обезличиваются in-place), поэтому ON DELETE CASCADE не
+    срабатывает — чистим производные вручную: переписку удаляем (обезличивать нечего),
+    клики обезличиваем (lead_id→null, факт клика для агрегатов остаётся), PII-историю
+    в admin_audit чистим по lead_id. broadcast_recipients оставляем как агрегат, но
+    рвём связь с ПДн (tg_user_id обнуляем). action='lead_erased' — доказательство срока для РКН.
+    """
+    import json
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "update leads set name = null, phone = null, phone_hash = null, notes = null "
+                "where id = $1",
+                lead_id,
+            )
+            # Переписка — ПДн целиком, обезличить нечего → удаляем.
+            await c.execute("delete from messages where lead_id = $1", lead_id)
+            # Клики — рвём связь с субъектом, агрегат по broadcast остаётся.
+            await c.execute("update link_clicks set lead_id = null where lead_id = $1", lead_id)
+            # Получатели рассылок — обнуляем прямой идентификатор адреса.
+            await c.execute(
+                "update broadcast_recipients set tg_user_id = 0 where lead_id = $1", lead_id
+            )
+            # Чистим PII-детали в аудите по этому лиду (detail может нести len/факты — не текст,
+            # но на всякий случай обнуляем detail у не-системных записей этого лида).
+            await c.execute(
+                "update admin_audit set detail = null where lead_id = $1", lead_id
+            )
+            await c.execute(
+                "insert into admin_audit (actor, action, lead_id, detail) "
+                "values ($1, 'lead_erased', $2, $3::jsonb)",
+                actor, lead_id, json.dumps({"by": "retention-cron"}),
+            )
+
+
+async def purge_old_message_text(ttl_days: int) -> int:
+    """Абсолютный TTL: обнуляет text/file_id у messages старше N дней (самый объёмный ПДн).
+
+    Строки оставляем (агрегаты тредов/направление), чистим только содержимое. §6.4.
+    """
+    async with pool.acquire() as c:
+        res = await c.execute(
+            """
+            update messages set text = null, file_id = null
+            where created_at < now() - make_interval(days => $1)
+              and (text is not null or file_id is not null)
+            """,
+            ttl_days,
+        )
+    return _affected(res)
+
+
+def _affected(status: str) -> int:
+    """Число строк из command tag asyncpg вида 'UPDATE 7' / 'DELETE 3'."""
+    try:
+        return int(status.split()[-1])
+    except (ValueError, IndexError, AttributeError):
+        return 0

@@ -56,6 +56,60 @@ revoke all on all functions  in schema public from panel_rw;
 revoke all on all sequences  in schema public from panel_rw;
 grant usage on sequence admin_audit_id_seq to panel_rw;  -- подтвердить после массового revoke
 
+-- ── Расширение панели: переписка / перехват / рассылки / аналитика (least-privilege) ──
+-- (объекты создаются в db/schema_panel_ext.sql — применять ПОСЛЕ него.)
+-- Инвариант: панель НЕ пишет в Telegram и не имеет BOT_TOKEN. «Отправка» = INSERT в очередь;
+-- реально шлёт БОТ под owner-ролью. Поэтому write-поверхность панели сужена до постановки задач
+-- и флагов, а фактические события (messages / материализация получателей / клики) пишет бот.
+--
+-- Матрица «кто что пишет» (канон §2 плана):
+--   leads.bot_paused        UPDATE  — перехват переключает оператор
+--   leads.unsubscribed_at   SELECT  — отписку ставит субъект через бота (152-ФЗ); панель только видит
+--   messages                SELECT  — тред читает панель; пишет бот (вкл. зеркало операторских ответов)
+--   outbox                  SELECT, INSERT — панель кладёт 'queued'; статусы ведёт бот
+--   broadcasts              SELECT, INSERT, UPDATE — заявка + draft→queued→canceled; старт/итоги — бот
+--   broadcast_recipients    SELECT  — материализацию и статусы ведёт бот (единый WHERE «кому можно»)
+--   broadcast_files         SELECT, INSERT — панель кладёт байты; tg_file_id/обнуление bytes — бот
+--   link_tokens             SELECT, INSERT — панель регистрирует токены + target_url при создании рассылки
+--   link_clicks             SELECT  — пишет обработчик /r в боте
+
+-- leads: добавить UPDATE только на bot_paused (поверх status/notes/erase_requested_at выше).
+-- unsubscribed_at панель НЕ пишет — только ЧИТАЕТ (SELECT на leads уже выдан).
+grant update (bot_paused) on leads to panel_rw;
+
+-- Переписка: только чтение треда. Пишет бот (вход через middleware, исход через messaging-слой).
+grant select on messages to panel_rw;
+
+-- Очередь точечных ответов: панель кладёт 'queued', статусы ведёт бот.
+-- update для отмены — опционален и по умолчанию НЕ выдаётся (сужаем write-поверхность).
+grant select, insert on outbox to panel_rw;
+
+-- Рассылки: панель создаёт заявку и двигает draft→queued→canceled;
+-- started_at/finished_at/totals/recipient_count проставляет бот при исполнении.
+grant select, insert, update on broadcasts to panel_rw;
+
+-- Получатели: только SELECT. Материализацию и статусы ведёт БОТ (owner) — единый источник
+-- истины «кому слать» (неотменяемый WHERE из §5.1 в одном месте). Панели INSERT/sequence НЕ нужны.
+grant select on broadcast_recipients to panel_rw;
+
+-- Файл рассылки: панель кладёт bytes; tg_file_id и обнуление bytes делает бот после заливки.
+grant select, insert on broadcast_files to panel_rw;
+
+-- Токены трекинг-ссылок: регистрирует панель (token + target_url) при создании рассылки.
+grant select, insert on link_tokens to panel_rw;
+
+-- Клики: только SELECT для аналитики. Пишет обработчик /r/<token> в БОТЕ (owner).
+grant select on link_clicks to panel_rw;
+
+-- bigserial-PK с INSERT от панели → USAGE на их sequence (иначе INSERT упадёт).
+-- ВАЖНО: выдаём ПОСЛЕ массового `revoke all on all sequences … from panel_rw` выше,
+-- по образцу admin_audit_id_seq — иначе revoke снимет эти гранты.
+grant usage on sequence outbox_id_seq          to panel_rw;
+grant usage on sequence broadcasts_id_seq      to panel_rw;
+grant usage on sequence broadcast_files_id_seq to panel_rw;
+-- messages / broadcast_recipients / link_clicks (bigserial) — туда пишет БОТ (owner),
+-- панели их sequence НЕ нужен. link_tokens.token — text PK, sequence нет.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ВЫДАЧА ПАРОЛЯ РОЛИ (НЕ в git, НЕ в этом файле, НЕ в shell-истории):
 --

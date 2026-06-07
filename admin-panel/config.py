@@ -82,6 +82,36 @@ NOTES_MAX_LEN = 4000                                     # обрезка notes 
 EXPORT_ROW_CAP = _opt_int("EXPORT_ROW_CAP", 50_000)      # hard row-cap на CSV-экспорт
 PER_PAGE = 50                                            # пагинация списка (объёмы малы)
 
+# --- Переписка / рассылки (план §3,§5,§6,§7) ---
+# Лимиты сообщений Telegram (отвергаем сверх лимита ДО постановки в очередь, §5.11):
+#   текст/реплай ≤4096; caption у файла ≤1024. parse_mode НЕ используется — всё plain.
+MSG_MAX_LEN = _opt_int("MSG_MAX_LEN", 4096)              # ручной ответ / текст рассылки без файла
+CAPTION_MAX_LEN = _opt_int("CAPTION_MAX_LEN", 1024)      # подпись к файлу рассылки (TG-лимит)
+THREAD_CAP = _opt_int("THREAD_CAP", 200)                 # лента треда: последние N сообщений
+THREAD_REFRESH_SEC = _opt_int("THREAD_REFRESH_SEC", 15)  # meta-refresh карточки лида (no-JS)
+
+# Загрузка файла рассылки: отдельный лимит ТОЛЬКО для POST /broadcasts (НЕ ослаблять
+# глобальный MAX_BODY_BYTES). Бот первичной заливкой в служебный чат получит file_id (§6.5).
+MAX_UPLOAD_BYTES = _opt_int("MAX_UPLOAD_BYTES", 10 * 1024 * 1024)   # ~10 MB, в пределах bot-upload
+# Allow-list типов файла рассылки (картинки/документы) — не произвольные байты (§6.5).
+UPLOAD_MIME_ALLOW = (
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+# Hard-cap на размер аудитории рассылки (§7.1): сверх — требуем точный confirm_count эхом.
+MAX_BROADCAST_RECIPIENTS = _opt_int("MAX_BROADCAST_RECIPIENTS", 5000)
+# Анти-флуд черновиков рассылок (§6.5): не больше N создаётся за окно (счётчик в БД).
+BROADCAST_DRAFT_MAX_PER_HOUR = _opt_int("BROADCAST_DRAFT_MAX_PER_HOUR", 20)
+
+# allow-list схем target_url для трекинг-ссылки (defence-in-depth: и на записи в панели,
+# и на чтении в /r бота, §6.3). Редирект /r/<token> живёт в БОТЕ, не здесь.
+LINK_URL_SCHEMES = ("http", "https")
+
 # --- 152-ФЗ (из landing/privacy.html §6.5, landing/consent.html §6) ---
 ERASE_AFTER_DAYS = _opt_int("ERASE_AFTER_DAYS", 30)      # срок обезличивания после отзыва согласия
 
