@@ -25,7 +25,8 @@ _CSP = (
     "base-uri 'none'; "
     "form-action 'self'; "
     "frame-ancestors 'none'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: blob:; "    # blob: — превью выбранной картинки-вложения (object URL в reply.js)
+    "media-src 'self' blob:; "        # blob: — переслушать записанное голосовое ДО отправки (<audio>)
     "style-src 'self'; "
     "script-src 'self'; "
     "connect-src 'self'"

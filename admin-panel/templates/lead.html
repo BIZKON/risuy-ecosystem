@@ -144,44 +144,62 @@
          записанный blob кладётся в скрытый файл-инпут #rec-file и уходит обычным
          submit в тот же multipart-эндпоинт с тем же CSRF-токеном. #}
       {% if lead.tg_user_id is not none %}
-      <form class="reply" method="post" action="/leads/{{ lead.id }}/reply"
-            enctype="multipart/form-data">
+      {# Композер в стиле мессенджера: слева скрепка (файл) и микрофон (голос),
+         по центру поле, справа отправка. Превью вложения (миниатюра картинки /
+         иконка документа с «Открыть» / плеер голоса) рисует reply.js над полем,
+         чтобы можно было УДОСТОВЕРИТЬСЯ перед отправкой. Всё поведение в reply.js
+         (CSP запрещает inline-JS). Голос пишется MediaRecorder'ом и кладётся в
+         скрытый #rec-file (name="voice"); файл — в #reply-file (name="file"). #}
+      <form class="composer-form" method="post" action="/leads/{{ lead.id }}/reply"
+            enctype="multipart/form-data" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label class="field">
-          <span class="field__label vh">Ответ клиенту</span>
-          {# required снят: допустим ответ-вложение без текста (файл/голос). #}
-          <textarea class="field__input field__textarea" name="text" rows="3"
+
+        {# Превью выбранного вложения ДО отправки (заполняет reply.js). #}
+        <div class="composer__preview" id="composer-preview" hidden></div>
+
+        <div class="composer" id="composer" data-max-sec="120">
+          <div class="composer__tools">
+            <button class="composer__icon" type="button" id="attach-btn"
+                    title="Прикрепить файл (до {{ max_file_mb }} МБ)" aria-label="Прикрепить файл">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <button class="composer__icon composer__icon--mic" type="button" id="rec-toggle"
+                    title="Записать голос" aria-label="Записать голос">
+              <svg class="ic-mic" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="11" rx="3"/>
+                <path d="M5 10a7 7 0 0 0 14 0M12 17v4"/>
+              </svg>
+              <svg class="ic-stop" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true" hidden>
+                <rect x="5" y="5" width="14" height="14" rx="3"/>
+              </svg>
+            </button>
+          </div>
+
+          {# required снят: допустим ответ-вложение без текста (файл/голос). rows=1 + авто-рост в reply.js. #}
+          <textarea class="composer__input" name="text" id="reply-text" rows="1"
                     maxlength="{{ msg_max|default(4096, true) }}"
                     placeholder="Написать клиенту в Telegram…"></textarea>
-        </label>
 
-        {# Вложение файла. accept= — подсказка браузеру; финальная magic-byte
-           проверка на сервере (как в /products). #}
-        <label class="field">
-          <span class="field__label">Вложение <span class="field__hint">опц., до {{ max_file_mb }} МБ: картинка или документ</span></span>
-          <input class="field__input field__file" type="file" name="file"
-                 id="reply-file" accept="{{ accept_attr }}">
-          <span class="file-name mono" id="reply-file-name" data-empty="Файл не выбран">Файл не выбран</span>
-        </label>
-
-        {# Запись голосового. Всё поведение — в reply.js (CSP запрещает inline-JS).
-           Записанный blob reply.js кладёт в скрытый #rec-file (это второй файл-инпут
-           формы); бэкенд распознаёт его как голос и ставит kind='voice'. #}
-        <div class="rec" id="rec" data-max-sec="120">
-          <div class="rec__bar">
-            <button class="btn btn--ghost btn--sm" type="button" id="rec-toggle"
-                    data-label-idle="🎙 Записать голос" data-label-rec="⏹ Остановить">🎙 Записать голос</button>
-            <span class="hint" id="rec-status" role="status" aria-live="polite"></span>
-          </div>
-          <audio class="rec__preview" id="rec-preview" controls hidden></audio>
-          {# reply.js положит сюда записанный blob через DataTransfer. #}
-          <input type="file" id="rec-file" name="voice" hidden>
+          <button class="composer__send" type="submit" title="Отправить" aria-label="Отправить">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                 stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+            </svg>
+          </button>
         </div>
 
-        <div class="form-actions form-actions--reply">
-          <span class="hint">Отправит бот. Без форматирования и ссылок.</span>
-          <button class="btn btn--primary btn--sm" type="submit">Отправить</button>
+        <div class="composer__foot">
+          <span class="composer__status hint" id="rec-status" role="status" aria-live="polite"></span>
+          <span class="hint composer__note">Отправит бот. Без форматирования и ссылок.</span>
         </div>
+
+        {# Скрытые инпуты вложения: файл и записанный голос. reply.js кладёт в них. #}
+        <input type="file" id="reply-file" name="file" accept="{{ accept_attr }}" hidden>
+        <input type="file" id="rec-file" name="voice" hidden>
       </form>
       {% else %}
       <p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>
