@@ -19,7 +19,7 @@ import io
 import secrets
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from math import ceil
 from urllib.parse import urlencode
@@ -36,6 +36,7 @@ import auth
 import config
 import db
 import security
+import yookassa
 
 
 # --------------------------------------------------------------------------- #
@@ -2104,6 +2105,245 @@ async def payment_set_status(
     if row is None:
         return RedirectResponse(url="/payments?err=not_found", status_code=303)
     return RedirectResponse(url="/payments?updated=1", status_code=303)
+
+
+# =========================================================================== #
+# ПОДПИСКА / БИЛЛИНГ ПО ТАРИФАМ (раздел «Подписка», модель НЕЙРОАГЕНТОВ). Метрика =
+# сообщения ИИ (Лия) за период. Тарифы — в config (квота + overage). Текущий тариф/
+# период = последний ОПЛАЧЕННЫЙ счёт; превышение прошлого периода доначисляется в
+# следующий счёт. «Выбрать тариф» → счёт 'pending' + платёж ЮKassa → confirmation_url.
+# Вебхук перепроверяет платёж, ставит paid + карту, снимает флаг отмены.
+# =========================================================================== #
+
+def _plan(key: str | None) -> dict | None:
+    return config.SERVICE_PLANS.get(key) if key else None
+
+
+def _plan_amount(plan: dict | None):
+    """Decimal цены тарифа (или None для договорного)."""
+    if plan and plan.get("price") is not None:
+        return Decimal(str(plan["price"]))
+    return None
+
+
+def _next_period_from(end_date):
+    """(start, end) следующего периода: продлеваем от хвоста, иначе с сегодня."""
+    today = datetime.now(timezone.utc).date()
+    start = end_date if (end_date and end_date > today) else today
+    return start, start + timedelta(days=config.SERVICE_PLAN_PERIOD_DAYS)
+
+
+def _meter(used: int, quota):
+    """Счётчик: в квоте / превышение / осталось + доли для полосы (grey + orange)."""
+    if quota is None:
+        return {"used": used, "quota": None, "in_quota": used, "over": 0,
+                "remaining": None, "pct": 0, "over_pct": 0}
+    in_quota = min(used, quota)
+    over = max(0, used - quota)
+    remaining = max(0, quota - used)
+    total = max(used, quota) or 1
+    return {"used": used, "quota": quota, "in_quota": in_quota, "over": over,
+            "remaining": remaining,
+            "pct": round(in_quota * 100 / total), "over_pct": round(over * 100 / total)}
+
+
+async def _current_subscription() -> dict:
+    """Текущая подписка: тариф/период из последнего оплаченного счёта + флаг отмены +
+    живой расход сообщений ИИ за текущий период."""
+    latest = await db.get_latest_paid_invoice()
+    canceled = await db.is_subscription_canceled()
+    today = datetime.now(timezone.utc).date()
+    if latest is None:
+        return {"exists": False, "active": False, "canceled": canceled,
+                "plan_key": None, "meter": _meter(0, None)}
+    expired = latest["period_end"] < today
+    # Расход за текущий период: до now (если идёт) или до конца периода (если истёк).
+    end_cap = None if not expired else latest["period_end"]
+    used = await db.count_ai_messages(latest["period_start"], end_cap)
+    return {
+        "exists": True,
+        "active": (not expired) and (not canceled),
+        "canceled": canceled,
+        "expired": expired,
+        "plan_key": latest["plan_key"],
+        "plan_name": latest["plan_name"],
+        "amount_display": _fmt_amount(latest["amount"]) + " ₽",
+        "period_start": latest["period_start"],
+        "period_end": latest["period_end"],
+        "meter": _meter(used, latest["quota"]),
+    }
+
+
+def _plans_for_picker(current_key: str | None) -> list[dict]:
+    out = []
+    for k in config.SERVICE_PLAN_ORDER:
+        p = config.SERVICE_PLANS[k]
+        out.append({"key": k, "is_current": (k == current_key), **p})
+    return out
+
+
+def _present_invoice(r) -> dict:
+    """Строка истории: период + использование (живой расчёт) + транзакция."""
+    quota = r["quota"]
+    used = r["used"]
+    over = max(0, used - quota) if quota is not None else 0
+    remaining = max(0, quota - used) if quota is not None else None
+    return {
+        "id": r["id"],
+        "period_start": r["period_start"], "period_end": r["period_end"],
+        "plan_name": r["plan_name"],
+        "used": used, "quota": quota, "remaining": remaining, "over": over,
+        "amount_display": _fmt_amount(r["amount"]) + " ₽",
+        "status": r["status"], "paid_at": r["paid_at"], "card_last4": r["card_last4"],
+    }
+
+
+def _service_err_text(err: str | None) -> str | None:
+    return {
+        "bad_plan": "Неизвестный тариф.",
+        "not_payable": "Этот тариф оформляется по заявке — нажмите «Оставить заявку».",
+        "no_yookassa": "Онлайн-оплата выключена: не заданы ключи ЮKassa (YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY).",
+        "yk_failed": "Не удалось создать платёж в ЮKassa. Попробуйте позже.",
+    }.get(err or "")
+
+
+# ---- /subscription — текущий тариф + счётчик + история + «Выбрать тариф» ----- #
+@app.get("/subscription", response_class=HTMLResponse)
+async def subscription_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    paid: int = 0,
+    canceled: int = 0,
+    err: str | None = None,
+):
+    sub = await _current_subscription()
+    invoices = [_present_invoice(r) for r in await db.list_service_invoices()]
+    return templates.TemplateResponse(
+        request,
+        "subscription.html",
+        {
+            "sub": sub,
+            "plans": _plans_for_picker(sub.get("plan_key")),
+            "invoices": invoices,
+            "yookassa_enabled": config.YOOKASSA_ENABLED,
+            "contact_url": config.SERVICE_CONTACT_URL,
+            "period_days": config.SERVICE_PLAN_PERIOD_DAYS,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "subscription",
+            "paid_flash": bool(paid),
+            "canceled_flash": bool(canceled),
+            "err": _service_err_text(err),
+        },
+    )
+
+
+# ---- /subscription/select — выбрать тариф → счёт + платёж ЮKassa → оплата ---- #
+@app.post("/subscription/select")
+async def subscription_select(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    plan_key: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    plan = _plan(plan_key)
+    if plan is None:
+        return RedirectResponse(url="/subscription?err=bad_plan", status_code=303)
+    if not plan.get("payable"):
+        return RedirectResponse(url="/subscription?err=not_payable", status_code=303)
+    if not config.YOOKASSA_ENABLED:
+        return RedirectResponse(url="/subscription?err=no_yookassa", status_code=303)
+
+    # Превышение ПРОШЛОГО (текущего оплаченного) периода → доначисляем в этот счёт.
+    latest = await db.get_latest_paid_invoice()
+    overage_count = 0
+    overage_amount = Decimal("0")
+    start_from = None
+    if latest is not None:
+        prev_plan = _plan(latest["plan_key"]) or {}
+        prev_quota = latest["quota"]
+        if prev_quota is not None:
+            prev_used = await db.count_ai_messages(latest["period_start"], latest["period_end"])
+            overage_count = max(0, prev_used - prev_quota)
+        over_price = prev_plan.get("overage") or 0
+        overage_amount = (Decimal(str(over_price)) * overage_count).quantize(Decimal("0.01"))
+        start_from = latest["period_end"]
+
+    start, end = _next_period_from(start_from)
+    plan_amount = _plan_amount(plan)
+    amount = (plan_amount + overage_amount).quantize(Decimal("0.01"))
+
+    invoice_id = await db.create_period_invoice(
+        period_start=start, period_end=end, plan_key=plan_key, plan_name=plan["name"],
+        quota=plan["quota"], plan_amount=plan_amount, overage_count=overage_count,
+        overage_amount=overage_amount, amount=amount, currency=config.SERVICE_CURRENCY,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+
+    host = request.headers.get("host", "")
+    return_url = f"https://{host}/subscription?paid=1"
+    try:
+        payment = await yookassa.create_payment(
+            amount=amount, currency=config.SERVICE_CURRENCY,
+            description=f"{plan['name']} · {start:%d.%m.%Y}–{end:%d.%m.%Y}",
+            return_url=return_url, idempotence_key=invoice_id,
+            metadata={"invoice_id": invoice_id, "plan": plan_key},
+        )
+    except yookassa.YooKassaError:
+        import logging
+        logging.getLogger("admin-panel").exception("yookassa create_payment failed")
+        return RedirectResponse(url="/subscription?err=yk_failed", status_code=303)
+
+    pid = payment.get("id")
+    conf_url = (payment.get("confirmation") or {}).get("confirmation_url")
+    if pid:
+        await db.attach_yookassa_payment(invoice_id, pid)
+    if not conf_url:
+        return RedirectResponse(url="/subscription?err=yk_failed", status_code=303)
+    return RedirectResponse(url=conf_url, status_code=303)
+
+
+# ---- /subscription/cancel — отменить подписку (флаг в app_settings) -------- #
+@app.post("/subscription/cancel")
+async def subscription_cancel(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_subscription_canceled(
+        True, actor=session.actor, ip=_ip(request), user_agent=_ua(request)
+    )
+    return RedirectResponse(url="/subscription?canceled=1", status_code=303)
+
+
+# ---- /webhooks/yookassa — публичный вебхук (без сессии/CSRF) --------------- #
+@app.post("/webhooks/yookassa")
+async def yookassa_webhook(request: Request):
+    """Вебхук ЮKassa. НЕ доверяем телу: берём только id платежа, ПЕРЕПРОВЕРЯЕМ через
+    API ЮKassa (status=succeeded & paid) и лишь тогда отмечаем счёт оплаченным (+карта).
+    Оплата возобновляет подписку — снимаем флаг отмены. Всегда 200 (иначе ретраи)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+    obj = (body or {}).get("object") or {}
+    payment_id = obj.get("id")
+    if payment_id and config.YOOKASSA_ENABLED:
+        try:
+            payment = await yookassa.get_payment(payment_id)
+            if payment.get("status") == "succeeded" and payment.get("paid"):
+                card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
+                row = await db.mark_service_invoice_paid_by_payment(payment_id, card_last4=card)
+                # Оплата возобновляет подписку — снимаем флаг отмены (если стоял).
+                if row is not None and await db.is_subscription_canceled():
+                    await db.set_subscription_canceled(False, actor="yookassa-webhook",
+                                                       ip=None, user_agent=None)
+        except Exception:
+            import logging
+            logging.getLogger("admin-panel").exception("yookassa webhook verify failed")
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
 
 
 # =========================================================================== #

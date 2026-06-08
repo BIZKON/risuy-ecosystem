@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Подписка{% endblock %}
+{% block body_class %}page-subscription{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Подписка на сервис</h1>
+  <p class="page-head__hint">Оплата за экосистему (бот + панель + лендинг) по тарифам. Это <b>не</b> платежи ваших клиентов — те в разделе «Платежи».</p>
+</div>
+
+{% if paid_flash %}{{ flash('Вы вернулись со страницы оплаты. Если платёж прошёл — тариф и счётчик обновятся в течение минуты (по уведомлению ЮKassa).', 'info') }}{% endif %}
+{% if canceled_flash %}{{ flash('Подписка отменена. Доступ сохранится до конца оплаченного периода.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Карточка текущего тарифа + счётчик ── #}
+<section class="billing-card">
+  <div class="billing-card__head">
+    <div class="billing-card__id">
+      <h2 class="billing-card__title">Тариф
+        {% if sub.exists %}
+          <span class="plan-badge{% if not sub.active %} plan-badge--off{% endif %}">{{ sub.plan_name|upper }}</span>
+        {% else %}
+          <span class="plan-badge plan-badge--none">НЕ ВЫБРАН</span>
+        {% endif %}
+      </h2>
+      {% if sub.exists %}
+      <p class="billing-card__sub">
+        {{ sub.amount_display }} <span class="muted">за период</span>
+        · Следующий платёж <b>{{ sub.period_end.strftime('%d.%m.%Y') }}</b>
+        {% if sub.canceled %}· <span class="over-text">подписка отменена</span>
+        {% elif sub.expired %}· <span class="over-text">период истёк</span>{% endif %}
+      </p>
+      {% else %}
+      <p class="billing-card__sub muted">Выберите тариф, чтобы начать пользоваться сервисом.</p>
+      {% endif %}
+    </div>
+    <a class="btn btn--dark" href="#select-plan">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>
+      {% if sub.exists %}Обновить{% else %}Выбрать тариф{% endif %}
+    </a>
+  </div>
+
+  {% if sub.exists and sub.meter.quota is not none %}
+  <div class="meter-box">
+    <span class="meter-box__label">Запросы по тарифу</span>
+    {# Полоса — инлайновый SVG (CSP style-src 'self' запрещает style="width"): серое = в
+       квоте, оранжевое = превышение. preserveAspectRatio=none растягивает на всю ширину. #}
+    <svg class="meter" width="100%" height="20" viewBox="0 0 100 10" preserveAspectRatio="none" role="img" aria-label="Использование тарифа">
+      <rect x="0" y="0" width="100" height="10" rx="2" fill="#e2e6ec"/>
+      <rect x="0" y="0" width="{{ sub.meter.pct }}" height="10" rx="2" fill="#5b6b7f"/>
+      {% if sub.meter.over > 0 %}<rect x="{{ sub.meter.pct }}" y="0" width="{{ sub.meter.over_pct }}" height="10" fill="#e8821e"/>{% endif %}
+    </svg>
+    <p class="meter-box__stats">
+      Использовано: <b>{{ sub.meter.used }} из {{ sub.meter.quota }}</b>
+      · Осталось: <b>{{ sub.meter.remaining }}</b>
+      {% if sub.meter.over > 0 %}· <span class="over-text">Превышение: {{ sub.meter.over }}</span>{% endif %}
+    </p>
+  </div>
+  {% endif %}
+
+  {% if sub.exists and not sub.canceled %}
+  <form method="post" action="/subscription/cancel" class="billing-card__cancel">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn btn--soft" type="submit">Отменить подписку</button>
+  </form>
+  {% endif %}
+</section>
+
+{# ── История периодов (раскрытие в транзакции) ── #}
+<section class="section" aria-label="История">
+  <h2 class="section__title section__title--lg">История</h2>
+  {% if invoices %}
+  <div class="bhistory">
+    <div class="bhistory__head">
+      <span>Период</span><span>Тариф</span><span>Использовано</span><span>Осталось</span><span>Превышение</span><span class="bhistory__sp"></span>
+    </div>
+    {% for inv in invoices %}
+    <details class="bperiod">
+      <summary class="bperiod__row">
+        <span class="nowrap">{{ inv.period_start.strftime('%d.%m.%y') }} - {{ inv.period_end.strftime('%d.%m.%y') }}</span>
+        <span>{{ inv.plan_name|e }}</span>
+        <span>{{ inv.used }}{% if inv.quota is not none %} из {{ inv.quota }}{% endif %}</span>
+        <span>{% if inv.remaining is not none %}{{ inv.remaining }}{% else %}—{% endif %}</span>
+        <span class="{% if inv.over > 0 %}over-text{% endif %}">{{ inv.over }}</span>
+        <span class="bperiod__chev" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </span>
+      </summary>
+      <div class="bperiod__tx">
+        <div class="bperiod__tx-title">Транзакции</div>
+        <div class="bperiod__tx-head">
+          <span>Дата</span><span>Сумма</span><span>Тип платежа</span><span>Карта</span><span>Статус</span>
+        </div>
+        <div class="bperiod__tx-row">
+          <span class="nowrap">{{ inv.paid_at.strftime('%d.%m.%y') if inv.paid_at else '—' }}</span>
+          <span class="mono">{{ inv.amount_display }}</span>
+          <span>Оплата за подписку{% if inv.over > 0 %} + превышение{% endif %}</span>
+          <span class="mono">{% if inv.card_last4 %}**** {{ inv.card_last4|e }}{% else %}—{% endif %}</span>
+          <span>
+            {% if inv.status == 'paid' %}<span class="badge badge--ostatus" data-ostatus="paid">Успешно</span>
+            {% elif inv.status == 'pending' %}<span class="badge badge--ostatus" data-ostatus="pending">Ожидает</span>
+            {% else %}<span class="badge badge--ostatus" data-ostatus="canceled">Отменён</span>{% endif %}
+          </span>
+        </div>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">
+    <p class="empty__title">Платежей пока нет</p>
+    <p class="empty__text">Выберите тариф и оплатите первый период — здесь появится история.</p>
+  </div>
+  {% endif %}
+</section>
+
+{# ── Модалка «Выберите тариф» (CSS :target — без JS) ── #}
+<div class="modal" id="select-plan">
+  <a class="modal__backdrop" href="#" aria-label="Закрыть"></a>
+  <div class="modal__box" role="dialog" aria-label="Выберите тариф">
+    <div class="modal__head">
+      <h2 class="modal__title">Выберите тариф</h2>
+      <a class="modal__close" href="#" aria-label="Закрыть">✕</a>
+    </div>
+    {% if not yookassa_enabled %}
+    <p class="hint hint--block">Онлайн-оплата выключена: задайте <code class="mono">YOOKASSA_SHOP_ID</code> и <code class="mono">YOOKASSA_SECRET_KEY</code> в env панели, чтобы выбор тарифа заработал.</p>
+    {% endif %}
+    <div class="plan-grid">
+      {% for p in plans %}
+      <div class="plan-card{% if p.is_current %} plan-card--current{% endif %}">
+        <span class="plan-pill">{{ p.name }}</span>
+        <div class="plan-price">{{ p.price_display }}</div>
+        <p class="plan-sub">{{ p.subtitle }}</p>
+        <ul class="plan-feats">
+          {% for f in p.features %}<li>{{ f }}</li>{% endfor %}
+        </ul>
+        <div class="plan-cta">
+          {% if p.is_current %}
+          <button class="btn btn--block" type="button" disabled>Ваш текущий тариф</button>
+          {% elif p.payable %}
+          <form method="post" action="/subscription/select">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="plan_key" value="{{ p.key }}">
+            <button class="btn btn--dark btn--block" type="submit"{% if not yookassa_enabled %} disabled{% endif %}>Выбрать тариф</button>
+          </form>
+          {% else %}
+          {% if contact_url %}
+          <a class="btn btn--dark btn--block" href="{{ contact_url|e }}" target="_blank" rel="noopener">{{ p.cta or 'Оставить заявку' }}</a>
+          {% else %}
+          <button class="btn btn--dark btn--block" type="button" disabled>{{ p.cta or 'Оставить заявку' }}</button>
+          {% endif %}
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

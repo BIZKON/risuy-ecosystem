@@ -265,3 +265,58 @@ ORDER_STATUSES_MANUAL = ("paid", "pending", "refunded", "failed")
 ORDER_NOTE_MAX_LEN = 500
 # Потолок суммы заказа (defence-in-depth поверх numeric(12,2)): целая часть ≤ 10 цифр.
 ORDER_AMOUNT_MAX = 10_000_000_000
+
+# ── Биллинг сервиса (раздел «Подписка», schema_service.sql) ──────────────────
+# B2B-абонентка школа→агентство по ТАРИФАМ (модель НЕЙРОАГЕНТОВ): у каждого тарифа
+# квота сообщений ИИ/период + цена сверх квоты (overage). Метрика = сообщения,
+# сгенерированные ИИ (messages.source='liya'). Превышение доначисляется к следующему
+# счёту. Тарифы заданы здесь (агентство правит код; школа-оператор не меняет).
+SERVICE_PLAN_PERIOD_DAYS = _opt_int("SERVICE_PLAN_PERIOD_DAYS", 30)  # длина периода, дней
+SERVICE_CURRENCY = "RUB"
+
+# Каталог тарифов. price/overage — в рублях (int/float); quota — сообщений ИИ/период.
+# payable=False (Индивидуальный) → не оплачивается онлайн, ведёт на заявку (SERVICE_CONTACT_URL).
+# price_display/subtitle/features — маркетинговые строки карточки (как на скринах).
+SERVICE_PLANS = {
+    "econom": {
+        "name": "Эконом", "payable": True, "price": 3750, "quota": 500, "overage": 7.5,
+        "price_display": "2 250 ₽ / 3 750 ₽",
+        "subtitle": "Два тарифа для небольших компаний",
+        "features": ["300 / 500 сообщений ИИ", "7,5 ₽ за сообщение сверх тарифа",
+                     "Без ограничений по количеству каналов"],
+    },
+    "start": {
+        "name": "Стартовый", "payable": True, "price": 7500, "quota": 1500, "overage": 5,
+        "price_display": "7 500 ₽ в месяц",
+        "subtitle": "Для тех, кто хочет автоматизировать общение с клиентами",
+        "features": ["1500 сообщений ИИ в месяц", "5 ₽ за дополнительное сообщение ИИ"],
+    },
+    "custom": {
+        "name": "Индивидуальный", "payable": False, "price": None, "quota": None, "overage": None,
+        "price_display": "Цена договорная",
+        "subtitle": "Для предприятий: автоматизировать коммуникации, снизить затраты на поддержку и увеличить продажи",
+        "features": ["Приоритетная поддержка", "Неограниченное дообучение ИИ", "Личный менеджер",
+                     "Стоимость сообщения от 1 ₽", "От 6000 сообщений в месяц"],
+        "cta": "Оставить заявку",
+    },
+}
+SERVICE_PLAN_ORDER = ("econom", "start", "custom")
+SERVICE_PLAN_KEYS = tuple(SERVICE_PLANS.keys())
+# Куда ведёт «Оставить заявку» / «Связаться с техподдержкой» (опц.; пусто → mailto оператора).
+SERVICE_CONTACT_URL = os.environ.get("SERVICE_CONTACT_URL", "")
+
+SERVICE_INVOICE_STATUSES = ("pending", "paid", "canceled")
+SERVICE_INVOICE_STATUS_LABELS = {
+    "pending": "Ожидает оплаты",
+    "paid": "Оплачен",
+    "canceled": "Отменён",
+}
+# app_settings-ключ флага отмены подписки (панель пишет, бот не использует).
+SERVICE_CANCEL_SETTING_KEY = "service_subscription_canceled"
+
+# ЮKassa (онлайн-оплата подписки). Секреты — ТОЛЬКО env (shopId + secretKey из ЛК
+# ЮKassa). Нет ключей → онлайн-оплата выключена (кнопка «Оплатить» неактивна).
+YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
+YOOKASSA_API_BASE = os.environ.get("YOOKASSA_API_BASE", "https://api.yookassa.ru/v3")
+YOOKASSA_ENABLED = bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)

@@ -164,6 +164,21 @@ grant update (status, note, paid_at, amount, currency, product_id)
 -- НЕТ delete на orders (финансовую историю не удаляем; возврат = status='refunded').
 -- UUID-PK (default gen_random_uuid()) → секвенса нет, грант usage on sequence не нужен.
 
+-- ── Биллинг сервиса (service_invoices) — объекты в db/schema_service.sql, ПОСЛЕ него ──
+-- B2B-абонентка школа→агентство. Панель INSERT счёта при «Оплатить» и UPDATE статуса
+-- из вебхука ЮKassa (вебхук в процессе панели перепроверяет платёж через API ЮKassa).
+--   service_invoices  SELECT, INSERT, UPDATE — выставление счёта тарифа + отметка
+--   оплаты из вебхука (status/yookassa_payment_id/card_last4/paid_at).
+grant select on service_invoices to panel_rw;
+grant insert (period_start, period_end, plan_key, plan_name, quota, plan_amount,
+              overage_count, overage_amount, amount, currency, status,
+              yookassa_payment_id, created_by)
+    on service_invoices to panel_rw;
+grant update (status, yookassa_payment_id, card_last4, paid_at)
+    on service_invoices to panel_rw;
+-- НЕТ delete (финансовую историю не удаляем; отмена = status='canceled').
+-- UUID-PK (default gen_random_uuid()) → секвенса нет, грант usage on sequence не нужен.
+
 -- bigserial-PK с INSERT от панели → USAGE на их sequence (иначе INSERT упадёт).
 -- ВАЖНО: выдаём ПОСЛЕ массового `revoke all on all sequences … from panel_rw` выше,
 -- по образцу admin_audit_id_seq — иначе revoke снимет эти гранты.

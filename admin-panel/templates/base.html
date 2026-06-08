@@ -34,6 +34,7 @@
 {%- elif name == 'products' -%}<path d="M20.6 7.3 12 2 3.4 7.3 12 12.6l8.6-5.3z"/><path d="M3.4 7.3v9.4L12 22V12.6"/><path d="M20.6 7.3v9.4L12 22"/>
 {%- elif name == 'team' -%}<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8M21 20a6 6 0 0 0-4-5.6"/>
 {%- elif name == 'payments' -%}<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
+{%- elif name == 'subscription' -%}<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v4.5h-4.5"/>
 {%- elif name == 'logout' -%}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
 {%- endif -%}
 </svg>
@@ -58,6 +59,7 @@
 {% set NAV_TITLES = {
   'dashboard': 'Статистика', 'dialogs': 'Диалоги',
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
+  'subscription': 'Подписка',
 } %}
 
 <body class="app {% block body_class %}{% endblock %}">
@@ -81,6 +83,7 @@
       {{ nav_item('broadcasts',   '/broadcasts', 'Рассылки',   active) }}
       {{ nav_item('products',     '/products',   'Продукты',   active) }}
       {{ nav_item('payments',     '/payments',   'Платежи',    active) }}
+      {{ nav_item('subscription', '/subscription', 'Подписка',  active) }}
       {{ nav_item('team',         '#', 'Команда',      active, 0, true) }}
     </nav>
 

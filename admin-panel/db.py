@@ -47,6 +47,8 @@ _PRODUCT_CURRENCY_SET = frozenset(config.PRODUCT_CURRENCIES)
 
 # Платежи / заказы: allow-list'ы статусов — defence-in-depth поверх orders_status_chk.
 _ORDER_STATUS_SET = frozenset(config.ORDER_STATUSES)
+# Биллинг сервиса (подписка): статусы счёта — defence-in-depth поверх service_invoices_status_chk.
+_SERVICE_INVOICE_STATUS_SET = frozenset(config.SERVICE_INVOICE_STATUSES)
 
 # Сортировка списка: ключ из query-string → готовый ORDER BY фрагмент (без ввода).
 _SORT_SQL: dict[str, str] = {
@@ -1731,3 +1733,172 @@ async def set_order_status_with_audit(
                         "status": {"old": old["status"], "new": new_status}},
             )
             return row
+
+
+# =========================================================================== #
+# БИЛЛИНГ СЕРВИСА / ПОДПИСКА по ТАРИФАМ (раздел «Подписка», schema_service.sql).
+# B2B: школа платит агентству. Метрика = сообщения ИИ (messages.source='liya') за
+# период. Тарифы — в config. Текущий тариф/период = последний ОПЛАЧЕННЫЙ счёт; флаг
+# отмены — app_settings. Панель INSERT счёта при выборе тарифа + UPDATE статуса/карты
+# из вебхука ЮKassa (перепроверка платежа — в хендлере через yookassa.get_payment).
+# =========================================================================== #
+
+_INVOICE_COLS = (
+    "id, period_start, period_end, plan_key, plan_name, quota, plan_amount, "
+    "overage_count, overage_amount, amount, currency, status, "
+    "yookassa_payment_id, card_last4, paid_at, created_at"
+)
+
+
+async def count_ai_messages(period_start, period_end=None) -> int:
+    """Сообщения, сгенерированные ИИ (Лия), за период [start, end|now). Метрика тарифа.
+    period_start/end — date (timestamptz сравнивается с date по полуночи UTC)."""
+    if period_end is None:
+        q = ("select count(*) from messages "
+             "where source = 'liya' and direction = 'out' and created_at >= $1")
+        args = (period_start,)
+    else:
+        q = ("select count(*) from messages "
+             "where source = 'liya' and direction = 'out' "
+             "and created_at >= $1 and created_at < $2")
+        args = (period_start, period_end)
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q, *args))
+
+
+async def get_latest_paid_invoice() -> asyncpg.Record | None:
+    """Последний ОПЛАЧЕННЫЙ счёт — из него выводим текущий тариф и активный период."""
+    q = f"""
+        select {_INVOICE_COLS} from service_invoices
+        where status = 'paid'
+        order by period_end desc, paid_at desc
+        limit 1
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q)
+
+
+async def list_service_invoices(*, limit: int = 60) -> list[asyncpg.Record]:
+    """Счета-периоды + использование (сообщений ИИ) за окно каждого периода — одним
+    запросом через lateral (для столбцов Использовано/Осталось/Превышение в истории)."""
+    q = f"""
+        select {', '.join('i.' + col.strip() for col in _INVOICE_COLS.split(','))},
+               coalesce(u.used, 0) as used
+        from service_invoices i
+        left join lateral (
+            select count(*) as used
+            from messages m
+            where m.source = 'liya' and m.direction = 'out'
+              and m.created_at >= i.period_start and m.created_at < i.period_end
+        ) u on true
+        order by i.created_at desc
+        limit $1
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q, limit)
+
+
+async def get_service_invoice(invoice_id) -> asyncpg.Record | None:
+    q = f"select {_INVOICE_COLS} from service_invoices where id = $1"
+    async with pool.acquire() as c:
+        return await c.fetchrow(q, invoice_id)
+
+
+async def create_period_invoice(
+    *, period_start, period_end, plan_key: str, plan_name: str, quota: int | None,
+    plan_amount, overage_count: int, overage_amount, amount, currency: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> str:
+    """Создать счёт 'pending' за период тарифа (со снимком квоты/превышения) + аудит."""
+    if currency not in _PRODUCT_CURRENCY_SET:
+        raise ValueError(f"Недопустимая валюта: {currency!r}")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            iid = await c.fetchval(
+                """
+                insert into service_invoices
+                    (period_start, period_end, plan_key, plan_name, quota, plan_amount,
+                     overage_count, overage_amount, amount, currency, status, created_by)
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11)
+                returning id
+                """,
+                period_start, period_end, plan_key, plan_name, quota, plan_amount,
+                overage_count, overage_amount, amount, currency, actor,
+            )
+            await _insert_audit(
+                c, actor=actor, action="service_invoice_create",
+                ip=ip, user_agent=user_agent,
+                detail={"invoice_id": str(iid), "plan": plan_key,
+                        "amount": str(amount), "overage": overage_count,
+                        "period": [str(period_start), str(period_end)]},
+            )
+            return str(iid)
+
+
+async def attach_yookassa_payment(invoice_id, payment_id: str) -> None:
+    """Привязать id платежа ЮKassa к pending-счёту (для перепроверки в вебхуке)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update service_invoices set yookassa_payment_id = $1 "
+            "where id = $2 and status = 'pending'",
+            payment_id, invoice_id,
+        )
+
+
+async def mark_service_invoice_paid_by_payment(
+    payment_id: str, *, card_last4: str | None = None, actor: str = "yookassa-webhook"
+) -> asyncpg.Record | None:
+    """Отметить счёт оплаченным по id платежа ЮKassa (идемпотентно). None — счёт не найден.
+    Вызывается ИЗ ВЕБХУКА ПОСЛЕ перепроверки платежа через API ЮKassa (status=succeeded)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "select id, status from service_invoices "
+                "where yookassa_payment_id = $1 for update",
+                payment_id,
+            )
+            if row is None:
+                return None
+            if row["status"] == "paid":
+                return row  # идемпотентно: повторный вебхук — no-op
+            upd = await c.fetchrow(
+                """
+                update service_invoices
+                set status = 'paid', paid_at = coalesce(paid_at, now()),
+                    card_last4 = coalesce($2, card_last4)
+                where id = $1
+                returning id, status, plan_key, period_end
+                """,
+                row["id"], card_last4,
+            )
+            await _insert_audit(
+                c, actor=actor, action="service_invoice_paid",
+                detail={"invoice_id": str(row["id"]), "payment_id": payment_id},
+            )
+            return upd
+
+
+async def is_subscription_canceled() -> bool:
+    raw = await get_app_setting(config.SERVICE_CANCEL_SETTING_KEY)
+    return bool(raw and raw.strip())
+
+
+async def set_subscription_canceled(
+    canceled: bool, *, actor: str, ip: str | None, user_agent: str | None
+) -> None:
+    """Флаг отмены подписки в app_settings (панель пишет; бот не использует). Аудит."""
+    value = "1" if canceled else ""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                """
+                insert into app_settings (key, value) values ($1, $2)
+                on conflict (key) do update set value = excluded.value
+                """,
+                config.SERVICE_CANCEL_SETTING_KEY, value,
+            )
+            await _insert_audit(
+                c, actor=actor,
+                action="subscription_cancel" if canceled else "subscription_resume",
+                ip=ip, user_agent=user_agent, detail={"canceled": canceled},
+            )

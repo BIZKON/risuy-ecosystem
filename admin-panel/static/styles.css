@@ -1198,3 +1198,104 @@ select.field__input {
   cursor: pointer;
 }
 .checkline input { width: 16px; height: 16px; accent-color: var(--accent); flex: none; }
+
+/* ===================================================================== *
+ *  Подписка (биллинг по тарифам, модель НЕЙРОАГЕНТОВ).
+ * ===================================================================== */
+.btn--lg   { padding: 11px 22px; font-size: 15px; }
+.btn--block { width: 100%; justify-content: center; }
+.btn--dark {
+  background: #1c2430; color: #fff; border-color: #1c2430;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.btn--dark:hover { background: #2a3340; }
+.btn--dark[disabled] { opacity: 0.5; cursor: default; }
+.btn--soft { background: var(--surface-2); color: var(--ink-soft); border-color: var(--line); }
+.btn--soft:hover { background: #eceef2; }
+.section__title--lg { font-size: 20px; text-transform: none; letter-spacing: 0; color: var(--ink); margin-bottom: 14px; }
+.over-text { color: #d97706; font-weight: 650; }
+
+/* Карточка текущего тарифа */
+.billing-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 24px 26px;
+  box-shadow: var(--shadow);
+}
+.billing-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.billing-card__title { font-size: 24px; font-weight: 750; display: flex; align-items: center; gap: 12px; }
+.plan-badge {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.03em;
+  background: #1c2430; color: #fff; border-radius: 999px; padding: 5px 12px;
+}
+.plan-badge--off  { background: var(--ink-faint); }
+.plan-badge--none { background: var(--surface-2); color: var(--ink-faint); border: 1px solid var(--line); }
+.billing-card__sub { margin-top: 10px; font-size: 14px; color: var(--ink-soft); }
+
+.meter-box { margin-top: 22px; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 12px; padding: 16px 18px; }
+.meter-box__label { font-size: 14px; font-weight: 600; color: var(--ink); }
+.meter { display: block; width: 100%; height: 20px; margin: 12px 0 10px; border-radius: 5px; overflow: hidden; }
+.meter-box__stats { font-size: 13.5px; color: var(--ink-soft); }
+.meter-box__stats b { color: var(--ink); }
+
+.billing-card__cancel { margin-top: 22px; }
+
+/* История периодов */
+.bhistory { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.bhistory__head, .bperiod__row {
+  display: grid;
+  grid-template-columns: 1.6fr 1.2fr 1.2fr 0.9fr 1fr 40px;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 18px;
+}
+.bhistory__head { font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-faint); border-bottom: 1px solid var(--line); }
+.bperiod { border-bottom: 1px solid var(--line-soft); }
+.bperiod:last-child { border-bottom: 0; }
+.bperiod__row { cursor: pointer; list-style: none; font-size: 14px; }
+.bperiod__row::-webkit-details-marker { display: none; }
+.bperiod__row:hover { background: var(--surface-2); }
+.bperiod__chev { display: flex; justify-content: flex-end; color: var(--ink-faint); transition: transform 0.15s; }
+.bperiod[open] .bperiod__chev { transform: rotate(180deg); }
+.bperiod__tx { padding: 4px 18px 16px; background: var(--surface-2); }
+.bperiod__tx-title { text-align: center; font-size: 12px; color: var(--ink-faint); padding: 8px 0; }
+.bperiod__tx-head, .bperiod__tx-row {
+  display: grid; grid-template-columns: 1fr 1fr 2fr 1fr 1fr; gap: 10px; align-items: center;
+  padding: 8px 12px;
+}
+.bperiod__tx-head { font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-faint); }
+.bperiod__tx-row { font-size: 14px; background: var(--surface); border-radius: 8px; }
+
+/* Модалка «Выберите тариф» (CSS :target) */
+.modal { display: none; position: fixed; inset: 0; z-index: 50; }
+.modal:target { display: flex; align-items: flex-start; justify-content: center; padding: 40px 20px; overflow-y: auto; }
+.modal__backdrop { position: fixed; inset: 0; background: rgba(20, 30, 45, 0.5); }
+.modal__box { position: relative; background: var(--surface); border-radius: 16px; width: 100%; max-width: 1040px; padding: 26px 28px; box-shadow: 0 20px 60px rgba(20,30,45,0.25); }
+.modal__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.modal__title { font-size: 22px; font-weight: 750; }
+.modal__close { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--ink-soft); font-size: 16px; }
+.modal__close:hover { background: var(--surface-2); text-decoration: none; }
+
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.plan-card { border: 1px solid var(--line); border-radius: 14px; padding: 22px 22px 24px; display: flex; flex-direction: column; }
+.plan-card--current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.plan-pill {
+  align-self: flex-start;
+  background: linear-gradient(90deg, #2bb3c0, #2f6fd0);
+  color: #fff; font-weight: 700; font-size: 14px; border-radius: 999px; padding: 6px 16px;
+}
+.plan-price { font-size: 24px; font-weight: 750; margin: 16px 0 10px; }
+.plan-sub { font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; min-height: 40px; }
+.plan-feats { list-style: none; margin: 16px 0 0; padding: 16px 0 0; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 11px; flex: 1; }
+.plan-feats li { position: relative; padding-left: 26px; font-size: 13.5px; color: var(--ink); line-height: 1.4; }
+.plan-feats li::before { content: "✓"; position: absolute; left: 0; top: 0; color: var(--accent); font-weight: 700; }
+.plan-cta { margin-top: 20px; }
+
+@media (max-width: 720px) {
+  .bhistory__head { display: none; }
+  .bperiod__row { grid-template-columns: 1fr 1fr 40px; }
+  .bperiod__row span:nth-child(4), .bperiod__row span:nth-child(5) { display: none; }
+  .bperiod__tx-head, .bperiod__tx-row { grid-template-columns: 1fr 1fr 1fr; }
+  .bperiod__tx-head span:nth-child(3), .bperiod__tx-row span:nth-child(3) { display: none; }
+}
