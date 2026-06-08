@@ -38,7 +38,9 @@ _STATIC_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
-    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    # microphone=(self): разрешаем запись голоса в форме ответа оператора (диктофон в
+    # браузере панели). geolocation/camera по-прежнему полностью запрещены.
+    "Permissions-Policy": "geolocation=(), microphone=(self), camera=()",
     "X-Robots-Tag": "noindex, nofollow, noarchive",
 }
 
@@ -77,18 +79,36 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     per_path_limits — точечные исключения (план §6.5): путь загрузки файла рассылки
     POST /broadcasts имеет СВОЙ больший лимит (MAX_UPLOAD_BYTES), не ослабляя
     глобальный для всех остальных маршрутов. Совпадение по точному request.url.path.
+
+    per_path_suffix_limits — суффикс-исключения для ДИНАМИЧЕСКИХ путей, где точный
+    путь не выписать заранее: напр. POST /leads/{uuid}/reply (вложение в личный ответ)
+    оканчивается на '/reply'. Точный per_path_limits для него не сработал бы (uuid в
+    середине), поэтому отдельный суффикс-матч. Точное совпадение приоритетнее суффикса.
     Для chunked-без-Content-Length глобальный лимит здесь не срабатывает (как и
     раньше) — streaming-обрыв на превышении делает сам хендлер при чтении UploadFile.
     """
 
     def __init__(self, app, max_bytes: int,
-                 per_path_limits: dict[str, int] | None = None) -> None:
+                 per_path_limits: dict[str, int] | None = None,
+                 per_path_suffix_limits: dict[str, int] | None = None) -> None:
         super().__init__(app)
         self.max_bytes = max_bytes
         self.per_path_limits = per_path_limits or {}
+        # tuple для стабильного порядка проверки суффиксов (первый матч выигрывает).
+        self.per_path_suffix_limits = tuple((per_path_suffix_limits or {}).items())
+
+    def _limit_for(self, path: str) -> int:
+        # 1) точное совпадение пути (приоритет); 2) суффикс динамического пути; 3) дефолт.
+        exact = self.per_path_limits.get(path)
+        if exact is not None:
+            return exact
+        for suffix, lim in self.per_path_suffix_limits:
+            if path.endswith(suffix):
+                return lim
+        return self.max_bytes
 
     async def dispatch(self, request: Request, call_next):
-        limit = self.per_path_limits.get(request.url.path, self.max_bytes)
+        limit = self._limit_for(request.url.path)
         cl = request.headers.get("content-length")
         if cl is not None:
             try:
@@ -256,6 +276,10 @@ _DANGEROUS_SIGNATURES: tuple[bytes, ...] = (
 _IMG_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "gif"})
 _ZIP_OOXML_EXTS = frozenset({"zip", "docx", "xlsx", "pptx"})
 _OLE_EXTS = frozenset({"doc", "xls", "ppt"})
+# Аудио/голос личного ответа оператора (запись с микрофона). У каждого свой контейнер:
+# webm → EBML-заголовок; ogg → 'OggS'; m4a → ISO-BMFF box 'ftyp' на offset 4 (как mp4).
+# Сигнатуры проверяются в _content_matches_ext отдельными ветками (как webp/mp4/txt).
+_AUDIO_EXTS = frozenset({"webm", "ogg", "m4a"})
 
 # (offset, magic-bytes, допустимые расширения). Первый матч выигрывает.
 _PRODUCT_SIGNATURES: tuple[tuple[int, bytes, frozenset[str]], ...] = (
@@ -357,9 +381,16 @@ def _content_matches_ext(data: bytes, ext: str) -> bool:
     # webp: RIFF....WEBP (маркер на offset 8).
     if ext == "webp":
         return len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP"
-    # mp4: 'ftyp' box на offset 4 (....ftyp).
-    if ext == "mp4":
+    # mp4/m4a: ISO-BMFF box 'ftyp' на offset 4 (....ftyp). m4a — тот же контейнер,
+    # что mp4 (Safari пишет голос с микрофона как audio/mp4), поэтому проверка общая.
+    if ext in ("mp4", "m4a"):
         return len(data) >= 12 and data[4:8] == b"ftyp"
+    # webm: EBML-заголовок (Matroska-контейнер) — Chrome/Firefox пишут голос как audio/webm.
+    if ext == "webm":
+        return data[:4] == b"\x1aE\xdf\xa3"
+    # ogg: 'OggS' capture pattern на offset 0 (Firefox/Chrome могут писать в ogg/opus).
+    if ext == "ogg":
+        return data[:4] == b"OggS"
     # Остальное — по таблице префиксных сигнатур.
     for offset, sig, exts in _PRODUCT_SIGNATURES:
         if ext in exts and data[offset:offset + len(sig)] == sig:

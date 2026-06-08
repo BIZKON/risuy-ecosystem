@@ -147,6 +147,26 @@ PRODUCT_UPLOAD_BATCH = int(os.environ.get("PRODUCT_UPLOAD_BATCH", "5"))
 # null → рассылка-продукт с таким файлом уйдёт на паузу (см. worker._prepare_product_broadcast).
 PRODUCT_UPLOAD_MAX_ATTEMPTS = int(os.environ.get("PRODUCT_UPLOAD_MAX_ATTEMPTS", "5"))
 
+# ── Вложения в личный ответ оператора лиду (outbox-заливка) ───────────────────
+# Паттерн клонирован с продуктовой заливки: панель кладёт байты в outbox.file_bytes,
+# воркёр (_drain_outbox_uploads ДО _drain_outbox) льёт их в OPS_CHAT_ID и проставляет
+# file_id, после чего штатный _drain_outbox шлёт лиду по file_id. Кэп размера —
+# существующий MAX_PRODUCT_FILE_BYTES (тот же потолок Telegram 50 МБ, не дублируем).
+# Сколько вложений заливать за один тик воркера (личных ответов с файлом обычно единицы;
+# батч держим маленьким, чтобы не занимать bucket надолго — как у продуктов).
+OUTBOX_UPLOAD_BATCH = int(os.environ.get("OUTBOX_UPLOAD_BATCH", "5"))
+# Потолок попыток заливки вложения (симметрично PRODUCT_UPLOAD_MAX_ATTEMPTS): валидный-по-
+# magic, но отвергаемый Telegram файл не должен переселектироваться вечно каждым тиком (5с),
+# тратя токен бакета и засоряя OPS_CHAT_ID. После N неудач исходящее выпадает из очереди
+# заливки (outbox.upload_attempts >= лимит), file_id остаётся null → личный ответ с этим
+# вложением на паузе (текстовая часть/иные ответы не затронуты — см. worker._drain_outbox).
+OUTBOX_UPLOAD_MAX_ATTEMPTS = int(os.environ.get("OUTBOX_UPLOAD_MAX_ATTEMPTS", "5"))
+# Путь к ffmpeg для транскода голосового (запись с микрофона → ogg/opus voice). Если ffmpeg
+# упал/отсутствует — воркёр откатывает kind='voice' → 'audio' и шлёт исходник как файл.
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
+# Таймаут одного запуска ffmpeg-транскода голосового, сек (короткий клип; не вешаем тик воркера).
+VOICE_TRANSCODE_TIMEOUT = int(os.environ.get("VOICE_TRANSCODE_TIMEOUT", "15"))
+
 # Публичный базовый URL БОТА (его поддомен на Timeweb) — на нём живёт трекинг-редирект
 # /r/<token>. Ссылка {link} в рассылке строится как BOT_PUBLIC_BASE_URL + /r/<click_token>.
 # Пусто = плейсхолдер {link} не подставляется (рассылка без трекинга всё равно идёт).

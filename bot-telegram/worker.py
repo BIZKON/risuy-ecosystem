@@ -50,6 +50,7 @@ async def run(bot: Bot, interval: int | None = None) -> None:
     while True:
         try:
             await _reclaim()
+            await _drain_outbox_uploads(bot)  # байты вложения ответа → file_id (ДО отправки)
             await _drain_outbox(bot)
             await _drain_product_uploads(bot)
             await _run_broadcasts(bot)
@@ -64,6 +65,69 @@ async def _reclaim() -> None:
     n2 = await db.reclaim_stuck_recipients(config.RECLAIM_AFTER_SECONDS)
     if n1 or n2:
         logger.info("Reclaim: вернул в очередь outbox=%s recipients=%s", n1, n2)
+
+
+# ── OUTBOX: однократная заливка ВЛОЖЕНИЯ операторского ответа в служебный чат ──
+async def _drain_outbox_uploads(bot: Bot) -> None:
+    """Заливает вложения личных ответов оператора (outbox.file_bytes есть, file_id нет) в
+    OPS_CHAT_ID и сохраняет file_id (с обнулением байтов) — клон _drain_product_uploads, но
+    для outbox. Дальше _drain_outbox шлёт лиду по готовому file_id (как раньше для рассылок).
+
+    Заливка ОДИН раз. Отдельный «тик» СТРОГО ПЕРЕД _drain_outbox (см. run): пока байты не
+    превратились в file_id, строка не подхватится отправкой (claim_outbox шлёт по file_id).
+    Голосовое (kind='voice') до заливки конвертим в ogg/opus; если ffmpeg упал — деградируем
+    в kind='audio' и шлём исходник как аудио (бот НЕ падает). Любая ошибка по одному вложению
+    логируется и НЕ валит остальные/воркер — строка подождёт следующего тика (до кэпа попыток).
+    """
+    if config.OPS_CHAT_ID is None:
+        return  # некуда заливать — вложения подождут настройки OPS_CHAT_ID
+    items = await db.list_outbox_pending_upload(
+        config.OUTBOX_UPLOAD_BATCH, config.OUTBOX_UPLOAD_MAX_ATTEMPTS
+    )
+    for it in items:
+        outbox_id = it["id"]
+        raw = it.get("file_bytes")
+        if not raw:
+            continue  # гонка: байты уже обнулены другим путём
+        content = bytes(raw)
+        # Защита на стороне бота: не льём файл сверх лимита Telegram. Панель валидирует ДО
+        # записи, но битую/огромную строку считаем неудачной попыткой (инкремент attempts) —
+        # по достижении кэпа вложение выпадет из очереди и воркёр не зациклится.
+        if len(content) > config.MAX_PRODUCT_FILE_BYTES:
+            logger.error(
+                "Outbox #%s: вложение %s Б превышает лимит %s МБ — попытка заливки засчитана",
+                outbox_id, len(content), config.MAX_PRODUCT_FILE_MB,
+            )
+            await db.bump_outbox_upload_attempt(
+                outbox_id, f"file too big: {len(content)} bytes > {config.MAX_PRODUCT_FILE_BYTES}"
+            )
+            continue
+        # ВАЖНО: kind берём из строки (панель проставила явно), НЕ из kind_for_mime — иначе
+        # voice превратился бы в document и потерял нативный голосовой пузырь.
+        kind = it["kind"]
+        if kind == "voice":
+            # Запись микрофона → ogg/opus. Сбой ffmpeg — не фатален: шлём исходник как audio.
+            try:
+                content = await messaging.transcode_voice(content, it.get("file_mime"))
+            except Exception as e:  # noqa: BLE001 — деградация voice→audio, бот не падает
+                logger.warning(
+                    "Outbox #%s: транскод voice не удался (%s) → шлём как audio", outbox_id, e
+                )
+                kind = "audio"
+        try:
+            _msg, file_id = await messaging.upload_file_to_chat(
+                bot, config.OPS_CHAT_ID, kind,
+                content=content, filename=it.get("file_name"),
+                mime=it.get("file_mime"), caption=None,
+            )
+        except Exception as e:  # noqa: BLE001 — одно вложение не валит остальные/воркер
+            logger.error("Outbox #%s: заливка вложения не удалась: %s", outbox_id, e)
+            await db.bump_outbox_upload_attempt(outbox_id, f"{type(e).__name__}: {e}")
+            continue
+        # Передаём ФИНАЛЬНЫЙ kind: при voice→audio fallback строка получит 'audio', иначе
+        # _drain_outbox послал бы send_voice с audio-file_id (Telegram отвергнет).
+        await db.set_outbox_file_id(outbox_id, file_id, kind)  # file_id + kind + обнуление байтов
+        logger.info("Outbox #%s: вложение залито (kind=%s), file_id получен", outbox_id, kind)
 
 
 # ── OUTBOX: точечные ответы оператора ────────────────────────────────────────

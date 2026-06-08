@@ -457,3 +457,52 @@ async def upload_file_to_chat(bot: Bot, chat_id: int, kind: str, *, content: byt
         msg = await _rate_limited_call(lambda: bot.send_document(chat_id, buf, caption=cap))
         file_id = msg.document.file_id
     return msg, file_id
+
+
+async def transcode_voice(content: bytes, src_mime: str | None) -> bytes:
+    """Конверсия записи микрофона браузера в OGG/OPUS mono для НАТИВНОГО голосового Telegram.
+
+    Браузер пишет в audio/webm (opus) или audio/mp4 (AAC, Safari) — ни то, ни другое
+    Telegram не примет как voice (нужен ogg/opus). Гоним через ffmpeg (config.FFMPEG_BIN):
+    вход с stdin, выход в stdout, контейнер ogg/opus, mono 48 кГц, профиль voip.
+
+    На ЛЮБОЙ сбой (ffmpeg не найден/упал/таймаут/пустой выход) — RAISE: воркёр поймает и
+    сделает fallback на kind='audio' (пошлёт исходник как обычный аудиофайл, бот НЕ падает).
+    src_mime сейчас не нужен ffmpeg (он определяет формат по содержимому), но оставлен в
+    сигнатуре для симметрии вызова и будущей диагностики.
+    """
+    import asyncio as _asyncio  # импорт по месту (контракт): редкий путь, не грузим в hot-path
+    import subprocess
+
+    cmd = [
+        config.FFMPEG_BIN,
+        "-hide_banner", "-loglevel", "error",
+        "-i", "pipe:0",                       # вход из stdin (формат — авто по содержимому)
+        "-c:a", "libopus", "-b:a", "32k",
+        "-ar", "48000", "-ac", "1",
+        "-application", "voip",
+        "-f", "ogg", "pipe:1",                # выход ogg/opus в stdout
+    ]
+    proc = await _asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        out, err = await _asyncio.wait_for(
+            proc.communicate(input=content), timeout=config.VOICE_TRANSCODE_TIMEOUT
+        )
+    except _asyncio.TimeoutError:
+        # Таймаут: убиваем процесс и пробрасываем — воркёр уйдёт в audio-fallback.
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"transcode_voice: таймаут ffmpeg > {config.VOICE_TRANSCODE_TIMEOUT} c")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"transcode_voice: ffmpeg rc={proc.returncode}: "
+            f"{(err or b'').decode('utf-8', 'replace')[:300]}"
+        )
+    if not out:
+        raise RuntimeError("transcode_voice: ffmpeg вернул пустой поток")
+    return out

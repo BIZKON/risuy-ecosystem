@@ -170,9 +170,33 @@ PRODUCT_FILE_TYPES: dict[str, dict] = {
     # — Популярное медиа → document (как и в рассылках: единый file_id) —
     "mp4":  {"send": "document", "mimes": ("video/mp4", "application/mp4")},
     "mp3":  {"send": "document", "mimes": ("audio/mpeg", "audio/mp3")},
+    # — Голос/аудио для ЛИЧНОГО ответа оператора (не каталог оферов) → бот шлёт
+    #   как voice (после транскодинга в ogg/opus) или audio (fallback). Расширения
+    #   нужны здесь, чтобы magic-byte валидатор (security.sniff_product_file) узнавал
+    #   запись с микрофона. Классификацию voice vs document даёт _read_reply_file по
+    #   REPLY_AUDIO_MIMES — НЕ поле "send" (оно тут номинально document, реальный kind
+    #   ставит хендлер ответа). Браузерная запись приходит как webm/ogg (Chrome/FF) или
+    #   mp4/m4a (Safari); octet-stream допускаем — финально подтвердит magic-byte.
+    "webm": {"send": "document", "mimes": ("audio/webm", "video/webm", "application/octet-stream")},
+    "ogg":  {"send": "document", "mimes": ("audio/ogg", "application/ogg", "application/octet-stream")},
+    "m4a":  {"send": "document", "mimes": ("audio/mp4", "audio/x-m4a", "application/octet-stream")},
 }
 # Удобный плоский набор допустимых расширений (для accept= в форме и быстрых проверок).
 PRODUCT_FILE_EXTS = tuple(PRODUCT_FILE_TYPES.keys())
+
+# ── Личный ответ оператора лиду: вложение файла + голосовое (план «reply-attach») ──
+# Реюзаем PRODUCT_FILE_TYPES (картинки/доки) для валидации; голос — отдельный набор
+# MIME ниже. Классификация kind в _read_reply_file: image/* → 'photo';
+# MIME ∈ REPLY_AUDIO_MIMES → 'voice' (бот транскодит в ogg/opus, при сбое ffmpeg →
+# 'audio'); иначе → 'document'. Канон-MIME сверяется magic-byte'ом, поэтому набор
+# минимален: ровно те типы, что отдаёт запись с микрофона в браузере.
+REPLY_AUDIO_MIMES = ("audio/webm", "audio/mp4", "audio/ogg", "video/webm",
+                     "application/ogg", "audio/x-m4a")
+# Расширения голоса/аудио — подмножество PRODUCT_FILE_TYPES, для accept= в форме ответа.
+REPLY_AUDIO_EXTS = ("webm", "ogg", "m4a")
+# accept= для <input type=file> формы ответа: картинки/доки из каталога + голос.
+# (audio/* добавляем как MIME-маску, чтобы мобильные браузеры предложили диктофон.)
+REPLY_FILE_EXTS = PRODUCT_FILE_EXTS
 
 # Hard-cap на размер аудитории рассылки (§7.1): сверх — требуем точный confirm_count эхом.
 MAX_BROADCAST_RECIPIENTS = _opt_int("MAX_BROADCAST_RECIPIENTS", 5000)

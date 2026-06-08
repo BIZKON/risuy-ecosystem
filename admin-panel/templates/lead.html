@@ -10,7 +10,8 @@
    текст в форме ответа. Теперь /static/thread.js точечно обновляет #thread-box
    через GET /leads/{id}/thread; поле ввода вне этой области и не сбрасывается.
    Без JS — ручная кнопка «Обновить» (script-src 'self' разрешает /static/*). #}
-{% block head_extra %}<script src="/static/thread.js" defer></script>{% endblock %}
+{% block head_extra %}<script src="/static/thread.js" defer></script>
+<script src="/static/reply.js" defer></script>{% endblock %}
 
 {% block content %}
 <nav class="crumbs" aria-label="Хлебные крошки">
@@ -38,6 +39,7 @@
 {% if erased %}{{ flash('Запрос на удаление принят. Обезличивание — в течение 30 дней.', 'ok') }}{% endif %}
 {% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
 {% if paused_flash %}{{ flash('Режим бота переключён.', 'ok') }}{% endif %}
+{% if reply_err %}{{ flash(reply_err, 'error') }}{% endif %}
 
 {% if lead.erase_requested_at %}
 <div class="alert-strip alert-strip--static" role="status">
@@ -135,16 +137,47 @@
         {{ thread_list(thread) }}
       </div>
 
-      {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот. #}
+      {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот.
+         multipart: можно приложить файл (картинку/документ) и/или голосовое.
+         Текстовый ответ без файла работает как раньше (бэкенд ставит kind='text').
+         Голос пишется через MediaRecorder в /static/reply.js (CSP: без inline-JS),
+         записанный blob кладётся в скрытый файл-инпут #rec-file и уходит обычным
+         submit в тот же multipart-эндпоинт с тем же CSRF-токеном. #}
       {% if lead.tg_user_id is not none %}
-      <form class="reply" method="post" action="/leads/{{ lead.id }}/reply">
+      <form class="reply" method="post" action="/leads/{{ lead.id }}/reply"
+            enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
           <span class="field__label vh">Ответ клиенту</span>
+          {# required снят: допустим ответ-вложение без текста (файл/голос). #}
           <textarea class="field__input field__textarea" name="text" rows="3"
                     maxlength="{{ msg_max|default(4096, true) }}"
-                    placeholder="Написать клиенту в Telegram…" required></textarea>
+                    placeholder="Написать клиенту в Telegram…"></textarea>
         </label>
+
+        {# Вложение файла. accept= — подсказка браузеру; финальная magic-byte
+           проверка на сервере (как в /products). #}
+        <label class="field">
+          <span class="field__label">Вложение <span class="field__hint">опц., до {{ max_file_mb }} МБ: картинка или документ</span></span>
+          <input class="field__input field__file" type="file" name="file"
+                 id="reply-file" accept="{{ accept_attr }}">
+          <span class="file-name mono" id="reply-file-name" data-empty="Файл не выбран">Файл не выбран</span>
+        </label>
+
+        {# Запись голосового. Всё поведение — в reply.js (CSP запрещает inline-JS).
+           Записанный blob reply.js кладёт в скрытый #rec-file (это второй файл-инпут
+           формы); бэкенд распознаёт его как голос и ставит kind='voice'. #}
+        <div class="rec" id="rec" data-max-sec="120">
+          <div class="rec__bar">
+            <button class="btn btn--ghost btn--sm" type="button" id="rec-toggle"
+                    data-label-idle="🎙 Записать голос" data-label-rec="⏹ Остановить">🎙 Записать голос</button>
+            <span class="hint" id="rec-status" role="status" aria-live="polite"></span>
+          </div>
+          <audio class="rec__preview" id="rec-preview" controls hidden></audio>
+          {# reply.js положит сюда записанный blob через DataTransfer. #}
+          <input type="file" id="rec-file" name="voice" hidden>
+        </div>
+
         <div class="form-actions form-actions--reply">
           <span class="hint">Отправит бот. Без форматирования и ссылок.</span>
           <button class="btn btn--primary btn--sm" type="submit">Отправить</button>

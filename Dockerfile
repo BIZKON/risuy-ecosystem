@@ -16,6 +16,17 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# --- Системные пакеты: ffmpeg для конверсии голосовых вложений оператора ---
+# Бот при заливке kind='voice' (см. _drain_outbox_uploads) гонит исходник через ffmpeg
+# в ogg/opus для Telegram sendVoice: браузеры дают разные контейнеры/кодеки записи с
+# микрофона (Safari → mp4/aac, Chrome → webm/opus), а sendVoice требует именно
+# ogg/opus. Отдельный слой ПЕРЕД Python-кодом — кэшируется и не пересобирается при
+# правках бота/панели. Если ffmpeg недоступен в рантайме — бот падает в fallback
+# kind='audio' и шлёт исходник как есть (sendAudio), так что слой «мягкая» зависимость.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- Зависимости бота (как было) ---
 COPY bot-telegram/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

@@ -86,6 +86,12 @@ app.add_middleware(
         "/broadcasts": config.MAX_UPLOAD_BYTES,
         "/products": config.MAX_PRODUCT_FILE_BYTES,
     },
+    # Динамический путь вложения личного ответа POST /leads/{uuid}/reply — точный
+    # per_path не выписать (uuid в середине), поэтому суффикс-матч. Лимит = потолок
+    # файла офера (≤50 МБ Telegram); read_upload_capped в хендлере дублирует защиту.
+    per_path_suffix_limits={
+        "/reply": config.MAX_PRODUCT_FILE_BYTES,
+    },
 )
 
 templates = Jinja2Templates(directory="templates")
@@ -459,6 +465,7 @@ async def lead_detail(
     erased: int = 0,
     replied: int = 0,
     paused: int = 0,
+    err: str | None = None,
 ):
     rec = await db.get_lead(lead_id)
     if rec is None:
@@ -475,7 +482,7 @@ async def lead_detail(
         "lead.html",
         _lead_context(request, session, rec, revealed=None, saved=bool(saved),
                       erased=bool(erased), thread=thread, replied=bool(replied),
-                      paused_flash=bool(paused)),
+                      paused_flash=bool(paused), reply_err=err),
     )
 
 
@@ -506,9 +513,24 @@ async def _load_thread_audited(request, session, lead_id):
     return await db.get_thread(lead_id, cap=config.THREAD_CAP)
 
 
+def _reply_accept_attr() -> str:
+    """accept= для <input type=file> формы ответа: расширения каталога (.pdf,.png,…) с
+    точкой + MIME-маска audio/* (чтобы мобильные браузеры предложили диктофон под голос)."""
+    return ",".join("." + e for e in config.REPLY_FILE_EXTS) + ",audio/*"
+
+
+def _reply_err_text(err: str | None) -> str | None:
+    """Текст ошибки вложения ответа (PRG ?err=... из lead_reply). None → нет ошибки."""
+    return {
+        "bad_file": "Тип файла не поддерживается или содержимое не совпадает с расширением.",
+        "file_too_big": "Файл превышает лимит загрузки.",
+        "empty_reply": "Пустой ответ: добавьте текст или вложение.",
+    }.get(err or "")
+
+
 def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = False,
                   erased: bool = False, thread=None, replied: bool = False,
-                  paused_flash: bool = False) -> dict:
+                  paused_flash: bool = False, reply_err: str | None = None) -> dict:
     lead = dict(rec)
     lead["phone_masked"] = security.mask_phone(rec["phone_tail"], rec["has_phone"])
     return {
@@ -518,9 +540,13 @@ def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = 
         "erased": erased,
         "replied": replied,             # флеш «ответ поставлен в очередь»
         "paused_flash": paused_flash,   # флеш переключения перехвата
+        "reply_err": _reply_err_text(reply_err),  # ошибка вложения ответа (PRG)
         "thread": thread or [],
         "refresh_sec": config.THREAD_REFRESH_SEC,
         "msg_max": config.MSG_MAX_LEN,
+        # Вложение личного ответа: форматы для accept= и потолок размера (UI-подсказка).
+        "accept_attr": _reply_accept_attr(),
+        "max_file_mb": config.MAX_PRODUCT_FILE_MB,
         "statuses": config.STATUSES,
         "status_labels": config.STATUS_LABELS,
         "source_labels": config.SOURCE_LABELS,
@@ -651,19 +677,45 @@ async def lead_reply(
     session: auth.Session = Depends(require_session),
     text: str = Form(""),
     csrf_token: str = Form(""),
+    file: UploadFile | None = File(None),
+    voice: UploadFile | None = File(None),
 ):
     await _enforce_csrf(request, session, csrf_token)
 
     # Длину капим ПЕРВЫМ действием, до БД (§3.13/§5.11). plain-текст, без parse_mode.
+    # С файлом текст уходит подписью (caption ≤1024 у бота) — но это режет уже бот при
+    # сборке; здесь держим единый MSG_MAX_LEN-кап (как раньше для текста без файла).
     text = (text or "").strip()[: config.MSG_MAX_LEN]
-    if not text:
-        raise StarletteHTTPException(status_code=400, detail="Пустой ответ")
 
-    # INSERT в outbox 'queued' + аудит manual_reply ({len}, без текста). Реально шлёт
-    # бот; адресность (tg_user_id) и erase-фильтр он re-check'ает перед отправкой.
+    # Вложение (опц.): запись голоса (поле voice из MediaRecorder) ПРИОРИТЕТНЕЕ
+    # выбранного файла (поле file) — оператор записал намеренно. _read_reply_file
+    # валидирует (размер+ext+MIME+magic-byte, отказ exe) и классифицирует audio/* →
+    # kind='voice' (бот сконвертит в ogg). При ошибке — PRG-редирект с err-кодом.
+    upload = voice if (voice is not None and (voice.filename or "")) else file
+    meta, file_err = await _read_reply_file(request, upload)
+    if file_err:
+        return RedirectResponse(
+            url=f"/leads/{lead_id}?err={file_err}#thread", status_code=303
+        )
+
+    # Ослабленный инвариант: отклоняем ТОЛЬКО когда нет ни текста, ни файла. Голосовое/
+    # документ без подписи — валидный ответ (text может быть пустым).
+    if not text and meta is None:
+        return RedirectResponse(
+            url=f"/leads/{lead_id}?err=empty_reply#thread", status_code=303
+        )
+
+    # INSERT в outbox 'queued' + аудит manual_reply ({len}/has_file/kind, без текста и
+    # байтов). Реально шлёт бот; адресность (tg_user_id) и erase-фильтр он re-check'ает.
+    # Байты файла кладёт панель (как у продуктов) → бот зальёт в OPS_CHAT_ID и проставит
+    # outbox.file_id. kind берём из подтверждённого MIME (photo|document|voice).
     outbox_id = await db.enqueue_manual_reply(
         lead_id, text=text, actor=session.actor,
         ip=_ip(request), user_agent=_ua(request),
+        kind=meta["kind"] if meta else "text",
+        file_bytes=meta["bytes"] if meta else None,
+        file_name=meta["name"] if meta else None,
+        file_mime=meta["mime"] if meta else None,
     )
     if outbox_id is None:
         # Лид не найден ИЛИ без tg_user_id (некому слать) — не молчим, говорим оператору.
@@ -880,6 +932,52 @@ async def _read_product_file(request: Request, upload) -> tuple[dict | None, str
         "filename": (upload.filename or "file")[:255],
         "mime": sniffed["mime"],
         "send": _product_kind_send(sniffed["send"]),
+    }, None
+
+
+def _reply_kind(mime: str) -> str:
+    """Способ отправки личного ответа по подтверждённому MIME (план «reply-attach»):
+      image/*                → 'photo'    (фото/картинка);
+      MIME ∈ REPLY_AUDIO_MIMES → 'voice'  (запись с микрофона; бот транскодит в ogg/opus,
+                                            при сбое ffmpeg сам понизит до 'audio');
+      иначе                  → 'document' (pdf/doc/xls/zip/… — всё прочее).
+    kind кладётся в outbox.kind ЯВНО; бот уважает его при заливке (НЕ переопределяет по
+    MIME — иначе voice превратился бы в document).
+    """
+    if mime.startswith("image/"):
+        return "photo"
+    if mime in config.REPLY_AUDIO_MIMES:
+        return "voice"
+    return "document"
+
+
+async def _read_reply_file(request: Request, upload) -> tuple[dict | None, str | None]:
+    """Прочитать и провалидировать вложение личного ответа. Клон _read_product_file.
+
+    Возвращает (meta | None, err_code | None). meta = {"bytes","name","mime","kind"} при
+    валидном непустом файле; (None, None) если файла нет/пустой; (None, err) при отказе.
+    Валидация идентична файлу офера (размер ≤ MAX_PRODUCT_FILE_BYTES streaming-cap;
+    расширение+MIME+magic-byte через security.sniff_product_file; отказ исполняемым/
+    опасным). kind выводим из ПОДТВЕРЖДЁННОГО канон-MIME (_reply_kind), не из заявленного
+    браузером content_type.
+    """
+    if upload is None or not (upload.filename or ""):
+        return None, None
+    data = await security.read_upload_capped(upload, max_bytes=config.MAX_PRODUCT_FILE_BYTES)
+    if data is None:
+        return None, "file_too_big"
+    if not data:
+        return None, None  # пустой файл — трактуем как «без файла»
+    sniffed = security.sniff_product_file(
+        data, filename=upload.filename, claimed_mime=upload.content_type
+    )
+    if sniffed is None:
+        return None, "bad_file"
+    return {
+        "bytes": data,
+        "name": (upload.filename or "file")[:255],
+        "mime": sniffed["mime"],
+        "kind": _reply_kind(sniffed["mime"]),
     }, None
 
 

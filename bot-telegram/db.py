@@ -633,6 +633,70 @@ async def set_product_file_id(product_id: int, tg_file_id: str) -> None:
         )
 
 
+async def list_outbox_pending_upload(limit: int, max_attempts: int) -> list[dict]:
+    """Очередь заливки: исходящие с байтами вложения, но ещё без file_id (§ schema).
+
+    Покрыто частичным индексом outbox_pending_upload_idx. Кэп попыток (upload_attempts
+    < max_attempts) накладываем здесь, а не в индексе — литерал-лимит захардкодил бы env.
+    Битый/отвергаемый Telegram файл после N неудач выпадает из очереди (не зацикливает
+    воркёр, не засоряет OPS_CHAT_ID). Возвращает байты для заливки в OPS_CHAT_ID; после
+    успеха воркёр зовёт set_outbox_file_id (проставит file_id + обнулит file_bytes). Логику
+    «кому слать» не затрагивает — это про вложение в личный ответ оператора лиду. kind
+    берётся из строки (photo/document/voice/audio), НЕ из MIME (иначе voice → document).
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select id, kind, file_bytes, file_name, file_mime, upload_attempts
+            from outbox
+            where file_bytes is not null and file_id is null
+              and upload_attempts < $2
+            order by id
+            limit $1
+            """,
+            limit, max_attempts,
+        )
+    return [dict(r) for r in rows]
+
+
+async def bump_outbox_upload_attempt(outbox_id: int, error: str) -> None:
+    """Инкремент outbox.upload_attempts + запись последней ошибки заливки (диагностика).
+
+    Вызывается воркёром при неудачной заливке вложения личного ответа. По достижении лимита
+    (см. list_outbox_pending_upload) исходящее перестаёт переселектироваться. Симметрично
+    release_outbox/release_recipient, но без возврата в очередь — статус задаёт сам
+    предикат очереди (file_bytes есть, file_id null, attempts < лимит)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update outbox set upload_attempts = upload_attempts + 1, upload_error = $2 "
+            "where id = $1",
+            outbox_id, error[:500],
+        )
+
+
+async def set_outbox_file_id(outbox_id: int, file_id: str, kind: str | None = None) -> None:
+    """Проставить outbox.file_id и ОБНУЛИТЬ file_bytes (bytea) — однократность заливки
+    и гигиена места, симметрично set_product_file_id. Пишет БОТ (owner-роль).
+    upload_error чистим (заливка удалась).
+
+    kind (опц.) ОБНОВЛЯЕМ, если фактический тип заливки разошёлся со строкой: при сбое
+    ffmpeg воркёр деградирует voice→audio и заливает как audio (audio-file_id). Без правки
+    kind строка осталась бы 'voice', и _drain_outbox послал бы send_voice с audio-file_id —
+    Telegram отвергнет (file_id типобинден). Поэтому воркёр передаёт ФИНАЛЬНЫЙ kind."""
+    async with pool.acquire() as c:
+        if kind is None:
+            await c.execute(
+                "update outbox set file_id = $2, file_bytes = null, upload_error = null where id = $1",
+                outbox_id, file_id,
+            )
+        else:
+            await c.execute(
+                "update outbox set file_id = $2, kind = $3, file_bytes = null, "
+                "upload_error = null where id = $1",
+                outbox_id, file_id, kind,
+            )
+
+
 # ── app_settings: singleton-настройки панели (бот ЧИТАЕТ) ─────────────────────
 async def get_app_setting(key: str) -> str | None:
     """Значение singleton-настройки по ключу (или None). value — text (KV-универсальность)."""

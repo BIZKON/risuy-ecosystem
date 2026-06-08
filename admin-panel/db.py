@@ -515,11 +515,22 @@ async def enqueue_manual_reply(
     actor: str,
     ip: str | None,
     user_agent: str | None,
+    kind: str = "text",
+    file_bytes: bytes | None = None,
+    file_name: str | None = None,
+    file_mime: str | None = None,
 ) -> int | None:
     """Поставить ручной ответ в outbox. None, если лид не найден или без tg_user_id.
 
     Адресность (есть tg_user_id) проверяем здесь; повторный re-check + erase-фильтр
     делает бот перед отправкой (§5.10). Текст в аудит НЕ пишем — только длину.
+
+    Вложение (план «reply-attach»): при file_bytes кладём байты + имя/MIME и явный kind
+    ('photo'|'document'|'voice'|'audio') — паттерн продуктовой заливки (products.file →
+    бот зальёт в OPS_CHAT_ID и проставит outbox.file_id). Колонку file_id панель НЕ
+    пишет: его проставит БОТ после заливки (как у продуктов). kind ставит ХЕНДЛЕР явно
+    (по MIME) — без файла остаётся 'text' (поведение как раньше). Аудит — БЕЗ байтов:
+    только len текста, факт файла и kind.
     """
     async with pool.acquire() as c:
         async with c.transaction():
@@ -530,16 +541,20 @@ async def enqueue_manual_reply(
                 return None  # нет лида/адреса → ничего не ставим (бот всё равно не отправит)
             outbox_id = await c.fetchval(
                 """
-                insert into outbox (lead_id, tg_user_id, kind, text, status, created_by)
-                values ($1, $2, 'text', $3, 'queued', $4)
+                insert into outbox
+                    (lead_id, tg_user_id, kind, text, status, created_by,
+                     file_bytes, file_name, file_mime)
+                values ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)
                 returning id
                 """,
-                lead_id, lead["tg_user_id"], text, actor,
+                lead_id, lead["tg_user_id"], kind, text, actor,
+                file_bytes, file_name, file_mime,
             )
             await _insert_audit(
                 c, actor=actor, action="manual_reply", lead_id=lead_id,
                 ip=ip, user_agent=user_agent,
-                detail={"outbox_id": int(outbox_id), "len": len(text)},
+                detail={"outbox_id": int(outbox_id), "len": len(text),
+                        "has_file": bool(file_bytes), "kind": kind},
             )
             return int(outbox_id)
 
