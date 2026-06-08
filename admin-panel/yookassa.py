@@ -51,6 +51,14 @@ def _request(method: str, path: str, *, body: dict | None = None,
     }
     if idempotence_key:
         headers["Idempotence-Key"] = idempotence_key
+    # --- ВРЕМЕННЫЙ DEBUG (диагностика 401): какие креды РЕАЛЬНО загружены в процесс.
+    #     Печатаем shopId + SHA-хэш ключа (НЕ сам ключ) + длину — чтобы сравнить с
+    #     хэшем ключа из настроек Timeweb (env-PATCH мог не доехать до контейнера). ---
+    import hashlib as _hl, logging as _lg
+    _sk = config.YOOKASSA_SECRET_KEY or ""
+    _lg.getLogger("admin-panel").warning(
+        "YK-DEBUG shop=%r keysha=%s keylen=%d",
+        config.YOOKASSA_SHOP_ID, _hl.sha256(_sk.encode()).hexdigest()[:12], len(_sk))
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
