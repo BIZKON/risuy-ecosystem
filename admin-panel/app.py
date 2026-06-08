@@ -153,9 +153,24 @@ def _safe_next(path: str) -> str:
 
 
 async def _enforce_csrf(request: Request, session: auth.Session, submitted: str | None) -> None:
-    if not _same_origin(request):
+    so = _same_origin(request)
+    tok_ok = auth.check_csrf(session.csrf_token, submitted)
+    if not so or not tok_ok:
+        # ВРЕМЕННАЯ ДИАГНОСТИКА CSRF-403 (убрать после разбора). Без значения токена
+        # и без ПДн: только какой гейт упал + безопасные заголовки запроса.
+        import logging
+        logging.getLogger("admin-panel").warning(
+            "CSRF-DIAG path=%s same_origin=%s host=%r origin=%r referer=%r "
+            "submitted_empty=%s submitted_len=%s session_len=%s token_match=%s",
+            request.url.path, so,
+            request.headers.get("host"), request.headers.get("origin"),
+            request.headers.get("referer"),
+            not submitted, len(submitted or ""), len(session.csrf_token or ""),
+            (submitted == session.csrf_token),
+        )
+    if not so:
         raise CSRFError()
-    if not auth.check_csrf(session.csrf_token, submitted):
+    if not tok_ok:
         raise CSRFError()
 
 
