@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat_card, flash, pager %}
+
+{% block title %}Платежи{% endblock %}
+{% block body_class %}page-payments{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Платежи</h1>
+  <p class="page-head__hint">Ручной учёт продаж. Онлайн-оплата (ЮKassa / Telegram Stars) с автозаписью — следующим этапом.</p>
+</div>
+
+{% if saved %}{{ flash('Продажа записана.', 'ok') }}{% endif %}
+{% if updated %}{{ flash('Статус заказа обновлён.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Дашборд выручки ── #}
+<section class="section" aria-label="Выручка">
+  <h2 class="section__title">Выручка</h2>
+  <div class="stats stats--funnel">
+    {{ stat_card('Доход (оплачено)', summary.paid_total, '', 'accent') }}
+    {{ stat_card('За 30 дней',       summary.paid_30d) }}
+    {{ stat_card('За 7 дней',        summary.paid_7d) }}
+    {{ stat_card('Продаж',           summary.paid_count) }}
+    {{ stat_card('Возвраты',         summary.refunded_total, '', 'muted', summary.refunded_count|string ~ ' шт') }}
+  </div>
+</section>
+
+{# ── Форма записи продажи ── #}
+<section class="section" aria-label="Записать продажу">
+  <h2 class="section__title">Записать продажу</h2>
+  <form class="order-form" method="post" action="/payments" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="order-form__grid">
+      <label class="field">
+        <span class="field__label">Лид <span class="field__hint">необязательно</span></span>
+        <select class="field__input" name="lead_id">
+          <option value="">— без лида —</option>
+          {% for l in lead_opts %}
+          <option value="{{ l.id }}">{{ l.name|e if l.name else 'Без имени' }}{% if l.created_at %} · {{ l.created_at.strftime('%d.%m.%Y') }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Офер <span class="field__hint">необязательно</span></span>
+        <select class="field__input" name="product_id">
+          <option value="">— без офера —</option>
+          {% for p in product_opts %}
+          <option value="{{ p.id }}">{{ p.name|e }}{% if p.price_display %} · {{ p.price_display }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Сумма</span>
+        <input class="field__input" type="text" name="amount" inputmode="decimal"
+               placeholder="1990" enterkeyhint="done" required>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Валюта</span>
+        <select class="field__input" name="currency">
+          {% for c in currencies %}
+          <option value="{{ c }}" {% if c == 'RUB' %}selected{% endif %}>{{ currency_labels.get(c, c) }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Статус</span>
+        <select class="field__input" name="status">
+          {% for s in statuses %}
+          <option value="{{ s }}" {% if s == 'paid' %}selected{% endif %}>{{ status_labels.get(s, s) }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field order-form__note">
+        <span class="field__label">Заметка <span class="field__hint">до {{ note_max }}</span></span>
+        <input class="field__input" type="text" name="note" maxlength="{{ note_max }}"
+               placeholder="Тариф, договорённость, рассрочка…">
+      </label>
+    </div>
+
+    <label class="checkline">
+      <input type="checkbox" name="mark_converted" value="1">
+      <span>Перевести лида в статус «Купил» (если выбран лид)</span>
+    </label>
+
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Записать продажу</button>
+    </div>
+  </form>
+</section>
+
+{# ── Лента заказов ── #}
+<section class="section" aria-label="Заказы">
+  <h2 class="section__title">Заказы</h2>
+  {% if orders %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Дата</th>
+          <th scope="col">Лид</th>
+          <th scope="col">Офер</th>
+          <th scope="col" class="num">Сумма</th>
+          <th scope="col">Статус</th>
+          <th scope="col">Канал</th>
+          <th scope="col" class="col-action"><span class="vh">Действие</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in orders %}
+        <tr>
+          <td class="nowrap muted">{{ o.created_at.strftime('%d.%m.%Y') if o.created_at else '—' }}</td>
+          <td>
+            {% if o.lead_id %}<a href="/dialogs/{{ o.lead_id }}">{{ o.lead_name|e if o.lead_name else 'Лид' }}</a>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>{{ o.product_name|e if o.product_name else '—' }}</td>
+          <td class="num mono">{{ o.amount_display }}</td>
+          <td><span class="badge badge--ostatus" data-ostatus="{{ o.status|e }}">{{ status_labels.get(o.status, o.status) }}</span></td>
+          <td class="muted">{{ source_labels.get(o.source, o.source) }}</td>
+          <td class="col-action">
+            {% if o.status != 'refunded' %}
+            <form class="inline-form" method="post" action="/payments/{{ o.id }}/status">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="status" value="refunded">
+              <button class="btn btn--danger-ghost btn--sm" type="submit" title="Отметить возврат">Возврат</button>
+            </form>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pager(page, per_page, total, base_qs|default('', true)) }}
+  {% else %}
+  <div class="empty">
+    <p class="empty__title">Пока нет заказов</p>
+    <p class="empty__text">Запишите первую продажу формой выше — здесь появится лента и дашборд выручки.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

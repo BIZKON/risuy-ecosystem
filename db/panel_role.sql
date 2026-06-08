@@ -149,6 +149,21 @@ grant update (product_id) on broadcasts to panel_rw;
 -- (upsert ключа), БОТ ЧИТАЕТ при выдаче воронки. updated_at — триггер, key/value пишет панель.
 grant select, insert, update on app_settings to panel_rw;
 
+-- ── Платежи / заказы (orders) — объекты в db/schema_orders.sql, применять ПОСЛЕ него ──
+-- Phase 1A: панель фиксирует продажи руками (source='manual') и читает для дашборда.
+--   orders  SELECT, INSERT, UPDATE — оператор записывает/правит заказ; статус paid|refunded.
+-- Phase 1B (онлайн-оплата): строки orders провайдеров пишет БОТ (owner) из вебхука —
+-- эти гранты его не касаются. id/created_at — default (uuid/now), в INSERT не включаем;
+-- provider_payment_id панель не пишет (его проставит бот в 1B) — column-level грант его НЕ
+-- включает. paid_at пишет панель (manual-продажа сразу оплачена).
+grant select on orders to panel_rw;
+grant insert (lead_id, product_id, amount, currency, status, source, note, created_by, paid_at)
+    on orders to panel_rw;
+grant update (status, note, paid_at, amount, currency, product_id)
+    on orders to panel_rw;
+-- НЕТ delete на orders (финансовую историю не удаляем; возврат = status='refunded').
+-- UUID-PK (default gen_random_uuid()) → секвенса нет, грант usage on sequence не нужен.
+
 -- bigserial-PK с INSERT от панели → USAGE на их sequence (иначе INSERT упадёт).
 -- ВАЖНО: выдаём ПОСЛЕ массового `revoke all on all sequences … from panel_rw` выше,
 -- по образцу admin_audit_id_seq — иначе revoke снимет эти гранты.

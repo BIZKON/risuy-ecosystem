@@ -57,7 +57,7 @@
 
 {% set NAV_TITLES = {
   'dashboard': 'Статистика', 'dialogs': 'Диалоги',
-  'products': 'Продукты', 'broadcasts': 'Рассылки',
+  'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
 } %}
 
 <body class="app {% block body_class %}{% endblock %}">
@@ -80,8 +80,8 @@
       {{ nav_item('integrations', '#', 'Интеграции',   active, 0, true) }}
       {{ nav_item('broadcasts',   '/broadcasts', 'Рассылки',   active) }}
       {{ nav_item('products',     '/products',   'Продукты',   active) }}
+      {{ nav_item('payments',     '/payments',   'Платежи',    active) }}
       {{ nav_item('team',         '#', 'Команда',      active, 0, true) }}
-      {{ nav_item('payments',     '#', 'Платежи',      active, 0, true) }}
     </nav>
 
     {% if csrf_token %}

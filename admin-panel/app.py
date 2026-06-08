@@ -1927,6 +1927,186 @@ BROADCAST_STATUS_LABELS = {
 
 
 # =========================================================================== #
+# ПЛАТЕЖИ (раздел «Платежи», Phase 1A). Ручной учёт продаж: оператор фиксирует
+# заказ (лид опц. + офер опц. + сумма + статус) → orders (source='manual'); дашборд
+# выручки + лента заказов. Бот в 1A не участвует (онлайн-оплата = Phase 1B). Зеркалит
+# каталог продуктов: CSRF, PRG, аудит в той же транзакции.
+# =========================================================================== #
+
+def _present_order_row(r) -> dict:
+    return {
+        "id": r["id"],
+        "amount_display": _fmt_price(r["amount"], r["currency"]),
+        "status": r["status"],
+        "source": r["source"],
+        "note": r["note"],
+        "created_at": r["created_at"],
+        "paid_at": r["paid_at"],
+        "lead_id": r["lead_id"],
+        "lead_name": r["lead_name"],
+        "product_name": r["product_name"],
+    }
+
+
+def _order_err_text(err: str | None) -> str | None:
+    return {
+        "bad_amount": "Сумма указана неверно (число ≥ 0, до 2 знаков после запятой).",
+        "bad_status": "Недопустимый статус заказа.",
+        "bad_currency": "Недопустимая валюта.",
+        "not_found": "Заказ не найден.",
+    }.get(err or "")
+
+
+# ---- /payments — дашборд выручки + лента заказов + форма записи продажи ----- #
+@app.get("/payments", response_class=HTMLResponse)
+async def payments_list(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    updated: int = 0,
+    err: str | None = None,
+):
+    try:
+        page = max(1, int(request.query_params.get("page", "1")))
+    except ValueError:
+        page = 1
+    per_page = config.PER_PAGE
+    offset = (page - 1) * per_page
+
+    summary = await db.revenue_summary()
+    total = await db.count_orders()
+    rows = await db.list_orders(limit=per_page, offset=offset)
+    orders = [_present_order_row(r) for r in rows]
+
+    # Селекторы формы «Записать продажу»: последние лиды + активные оферы.
+    lead_opts = [
+        {"id": r["id"], "name": r["name"], "created_at": r["created_at"]}
+        for r in await db.list_recent_leads_for_select()
+    ]
+    product_opts = [
+        {"id": r["id"], "name": r["name"],
+         "price_display": _fmt_price(r["price"], r["currency"])}
+        for r in await db.list_products_for_select()
+    ]
+
+    # Сумму выводим со знаком ₽ (MVP-допущение единой валюты, см. db.revenue_summary).
+    rub = config.PRODUCT_CURRENCY_SIGNS["RUB"]
+    summary_view = {
+        "paid_total": f"{_fmt_amount(summary['paid_total'])} {rub}",
+        "paid_30d": f"{_fmt_amount(summary['paid_30d'])} {rub}",
+        "paid_7d": f"{_fmt_amount(summary['paid_7d'])} {rub}",
+        "refunded_total": f"{_fmt_amount(summary['refunded_total'])} {rub}",
+        "paid_count": summary["paid_count"],
+        "pending_count": summary["pending_count"],
+        "refunded_count": summary["refunded_count"],
+        "total_count": summary["total_count"],
+    }
+
+    base_qs = ""
+    return templates.TemplateResponse(
+        request,
+        "payments.html",
+        {
+            "orders": orders,
+            "summary": summary_view,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "base_qs": base_qs,
+            "lead_opts": lead_opts,
+            "product_opts": product_opts,
+            "statuses": config.ORDER_STATUSES_MANUAL,
+            "status_labels": config.ORDER_STATUS_LABELS,
+            "source_labels": config.ORDER_SOURCE_LABELS,
+            "currencies": config.PRODUCT_CURRENCIES,
+            "currency_labels": config.PRODUCT_CURRENCY_LABELS,
+            "note_max": config.ORDER_NOTE_MAX_LEN,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "payments",
+            "saved": bool(saved),
+            "updated": bool(updated),
+            "err": _order_err_text(err),
+        },
+    )
+
+
+def _fmt_amount(value) -> str:
+    """Сумма без знака валюты: «1 990» / «1 990,50» (узкий неразрывный пробел)."""
+    if value is None:
+        return "0"
+    d = Decimal(value)
+    whole = int(d)
+    cents = int((d - whole) * 100)
+    int_str = f"{whole:,}".replace(",", " ")
+    return int_str if cents == 0 else f"{int_str},{cents:02d}"
+
+
+# ---- /payments — записать продажу (POST, manual) -------------------------- #
+@app.post("/payments")
+async def payment_create(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    lead_id: str = Form(""),
+    product_id: str = Form(""),
+    amount: str = Form(""),
+    currency: str = Form("RUB"),
+    status: str = Form("paid"),
+    note: str = Form(""),
+    mark_converted: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+
+    amount_val, amount_ok = _parse_price(amount)
+    if not amount_ok or amount_val is None:
+        return RedirectResponse(url="/payments?err=bad_amount", status_code=303)
+    if status not in config.ORDER_STATUSES:
+        return RedirectResponse(url="/payments?err=bad_status", status_code=303)
+    if currency not in db._PRODUCT_CURRENCY_SET:
+        return RedirectResponse(url="/payments?err=bad_currency", status_code=303)
+
+    # Лид/офер опциональны; парсим типобезопасно (мусор → None, не до SQL).
+    lead_uuid = None
+    if (lead_id or "").strip():
+        try:
+            lead_uuid = uuid.UUID(lead_id.strip())
+        except ValueError:
+            lead_uuid = None
+    pid: int | None = int(product_id.strip()) if (product_id or "").strip().isdigit() else None
+    note_val = (note or "").strip()[: config.ORDER_NOTE_MAX_LEN] or None
+    mark_conv = (mark_converted or "").strip() == "1"
+
+    await db.create_order_with_audit(
+        lead_id=lead_uuid, product_id=pid, amount=amount_val, currency=currency,
+        status=status, note=note_val, mark_converted=mark_conv,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/payments?saved=1", status_code=303)
+
+
+# ---- /payments/{id}/status — возврат/правка статуса (POST) ----------------- #
+@app.post("/payments/{order_id}/status")
+async def payment_set_status(
+    request: Request,
+    order_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    status: str = Form(...),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if status not in config.ORDER_STATUSES:
+        return RedirectResponse(url="/payments?err=bad_status", status_code=303)
+    row = await db.set_order_status_with_audit(
+        order_id, new_status=status, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if row is None:
+        return RedirectResponse(url="/payments?err=not_found", status_code=303)
+    return RedirectResponse(url="/payments?updated=1", status_code=303)
+
+
+# =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #
 @app.exception_handler(AuthRedirect)

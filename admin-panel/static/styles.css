@@ -1165,3 +1165,36 @@ select.field__input {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ===================================================================== *
+ *  Платежи: статус-бейдж заказа + форма записи продажи.
+ * ===================================================================== */
+.badge--ostatus { background: var(--surface-2); color: var(--ink-soft); border-color: var(--line); }
+.badge--ostatus[data-ostatus="paid"]     { background: var(--ok-soft);     color: var(--ok);        border-color: #c2e0cb; }
+.badge--ostatus[data-ostatus="pending"]  { background: var(--warn-soft);   color: var(--warn);      border-color: #ecd6b3; }
+.badge--ostatus[data-ostatus="refunded"] { background: #f1f2f4;            color: var(--ink-faint); border-color: var(--line); }
+.badge--ostatus[data-ostatus="failed"]   { background: var(--danger-soft); color: var(--danger);    border-color: #e9c2c2; }
+
+.order-form {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+}
+.order-form__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px 16px;
+}
+.order-form__note { grid-column: 1 / -1; }
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 14px;
+  font-size: 14px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.checkline input { width: 16px; height: 16px; accent-color: var(--accent); flex: none; }

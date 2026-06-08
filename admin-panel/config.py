@@ -242,3 +242,26 @@ SOURCE_LABELS = {
     "other": "Другое",
 }
 MESSENGER_LABELS = {"tg": "Telegram", "max": "MAX"}
+
+# ── Платежи / заказы (раздел «Платежи», schema_orders.sql) ───────────────────
+# Статусы заказа — синхронны CHECK orders_status_chk. Валюты переиспользуем из
+# каталога (PRODUCT_CURRENCIES/SIGNS выше). Источник оплаты: manual в 1A; в 1B
+# добавятся yookassa/telegram_stars (их пишет бот из вебхука).
+ORDER_STATUSES = ("paid", "pending", "refunded", "failed")
+ORDER_STATUS_LABELS = {
+    "paid": "Оплачен",
+    "pending": "Ожидает",
+    "refunded": "Возврат",
+    "failed": "Не прошёл",
+}
+ORDER_SOURCES = ("manual", "yookassa", "telegram_stars")
+ORDER_SOURCE_LABELS = {
+    "manual": "Вручную",
+    "yookassa": "ЮKassa",
+    "telegram_stars": "Telegram Stars",
+}
+# Статусы, которые оператор может выставить руками в 1A (refund/возврат + правка).
+ORDER_STATUSES_MANUAL = ("paid", "pending", "refunded", "failed")
+ORDER_NOTE_MAX_LEN = 500
+# Потолок суммы заказа (defence-in-depth поверх numeric(12,2)): целая часть ≤ 10 цифр.
+ORDER_AMOUNT_MAX = 10_000_000_000

@@ -45,6 +45,9 @@ _PRODUCT_KIND_SET = frozenset(config.PRODUCT_KINDS)
 _PRODUCT_STATUS_SET = frozenset(config.PRODUCT_STATUSES)
 _PRODUCT_CURRENCY_SET = frozenset(config.PRODUCT_CURRENCIES)
 
+# Платежи / заказы: allow-list'ы статусов — defence-in-depth поверх orders_status_chk.
+_ORDER_STATUS_SET = frozenset(config.ORDER_STATUSES)
+
 # Сортировка списка: ключ из query-string → готовый ORDER BY фрагмент (без ввода).
 _SORT_SQL: dict[str, str] = {
     "created_desc": "created_at desc",
@@ -1561,3 +1564,170 @@ async def list_lead_magnet_products() -> list[asyncpg.Record]:
     """
     async with pool.acquire() as c:
         return await c.fetch(q)
+
+
+# =========================================================================== #
+# ПЛАТЕЖИ / ЗАКАЗЫ (раздел «Платежи», schema_orders.sql). Phase 1A: панель
+# фиксирует продажи руками (source='manual'), читает для дашборда. Бот в 1A не
+# участвует. panel_rw: SELECT + INSERT/UPDATE на колонках (provider_payment_id —
+# нет, его пишет бот в 1B). Аудит order_create/order_status в той же транзакции.
+# =========================================================================== #
+
+async def revenue_summary() -> asyncpg.Record:
+    """Сводка по выручке одним проходом (как dashboard_counts).
+
+    Суммы агрегируются по ВСЕМ валютам в одну цифру — допущение MVP (школа продаёт
+    в ₽; валюта на каждом заказе видна в ленте). Когда появятся не-RUB продажи —
+    разнести по currency. paid_* — только оплаченные; refunded — отдельно.
+    """
+    q = """
+        select
+            coalesce(sum(amount) filter (where status = 'paid'), 0)            as paid_total,
+            coalesce(sum(amount) filter (where status = 'paid'
+                     and created_at >= now() - interval '30 days'), 0)         as paid_30d,
+            coalesce(sum(amount) filter (where status = 'paid'
+                     and created_at >= now() - interval '7 days'), 0)          as paid_7d,
+            coalesce(sum(amount) filter (where status = 'refunded'), 0)        as refunded_total,
+            count(*) filter (where status = 'paid')                            as paid_count,
+            count(*) filter (where status = 'pending')                         as pending_count,
+            count(*) filter (where status = 'refunded')                        as refunded_count,
+            count(*)                                                           as total_count
+        from orders
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q)
+
+
+async def count_orders(*, status: str | None = None) -> int:
+    if status and status in _ORDER_STATUS_SET:
+        q, args = "select count(*) from orders where status = $1", (status,)
+    else:
+        q, args = "select count(*) from orders", ()
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q, *args))
+
+
+async def list_orders(
+    *, limit: int, offset: int, status: str | None = None
+) -> list[asyncpg.Record]:
+    """Лента заказов: имя лида и название офера подтягиваем left join (заказ может
+    быть без лида/офера). Только метаданные — без байт файла офера."""
+    where = "where o.status = $3" if (status and status in _ORDER_STATUS_SET) else ""
+    q = f"""
+        select o.id, o.amount, o.currency, o.status, o.source, o.note,
+               o.created_at, o.paid_at,
+               o.lead_id, l.name as lead_name,
+               o.product_id, p.name as product_name
+        from orders o
+        left join leads    l on l.id = o.lead_id
+        left join products p on p.id = o.product_id
+        {where}
+        order by o.created_at desc
+        limit $1 offset $2
+    """
+    args = [limit, offset] + ([status] if where else [])
+    async with pool.acquire() as c:
+        return await c.fetch(q, *args)
+
+
+async def list_recent_leads_for_select(*, limit: int = 200) -> list[asyncpg.Record]:
+    """Последние лиды для селектора «привязать к лиду» в форме записи продажи.
+    Только id + имя + дата (телефон не нужен — выбираем по имени)."""
+    q = """
+        select id, name, created_at
+        from leads
+        order by created_at desc
+        limit $1
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q, limit)
+
+
+async def create_order_with_audit(
+    *,
+    lead_id,                      # uuid | None
+    product_id: int | None,
+    amount,                       # Decimal
+    currency: str,
+    status: str,
+    note: str | None,
+    mark_converted: bool,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> str:
+    """Записать продажу (source='manual') + аудит в той же транзакции. Опционально
+    переводит лид в 'converted' (грант update(status) на leads есть). paid_at
+    проставляется при status='paid'. Возвращает orders.id (uuid-строкой)."""
+    if status not in _ORDER_STATUS_SET:
+        raise ValueError(f"Недопустимый статус заказа: {status!r}")
+    if currency not in _PRODUCT_CURRENCY_SET:
+        raise ValueError(f"Недопустимая валюта: {currency!r}")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            oid = await c.fetchval(
+                """
+                insert into orders
+                    (lead_id, product_id, amount, currency, status, source,
+                     note, created_by, paid_at)
+                values ($1, $2, $3, $4, $5, 'manual', $6, $7,
+                        case when $5 = 'paid' then now() else null end)
+                returning id
+                """,
+                lead_id, product_id, amount, currency, status, note, actor,
+            )
+            converted = False
+            if mark_converted and lead_id is not None:
+                upd = await c.fetchval(
+                    "update leads set status = 'converted' where id = $1 returning id",
+                    lead_id,
+                )
+                converted = upd is not None
+            await _insert_audit(
+                c, actor=actor, action="order_create", lead_id=lead_id,
+                ip=ip, user_agent=user_agent,
+                detail={
+                    "order_id": str(oid),
+                    "amount": str(amount), "currency": currency, "status": status,
+                    "has_lead": lead_id is not None, "has_product": product_id is not None,
+                    "marked_converted": converted,
+                },
+            )
+            return str(oid)
+
+
+async def set_order_status_with_audit(
+    order_id,
+    *,
+    new_status: str,
+    actor: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> asyncpg.Record | None:
+    """Сменить статус заказа (возврат/правка). paid_at ставим при переходе в 'paid'
+    (если ещё не стоял). Аудит order_status в той же транзакции. None — заказ не найден."""
+    if new_status not in _ORDER_STATUS_SET:
+        raise ValueError(f"Недопустимый статус заказа: {new_status!r}")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            old = await c.fetchrow(
+                "select status from orders where id = $1 for update", order_id
+            )
+            if old is None:
+                return None
+            row = await c.fetchrow(
+                """
+                update orders
+                set status = $1,
+                    paid_at = case when $1 = 'paid' then coalesce(paid_at, now()) else paid_at end
+                where id = $2
+                returning id, status
+                """,
+                new_status, order_id,
+            )
+            await _insert_audit(
+                c, actor=actor, action="order_status", ip=ip, user_agent=user_agent,
+                detail={"order_id": str(order_id),
+                        "status": {"old": old["status"], "new": new_status}},
+            )
+            return row
