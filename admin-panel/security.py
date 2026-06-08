@@ -23,7 +23,12 @@ import config
 _CSP = (
     "default-src 'none'; "
     "base-uri 'none'; "
-    "form-action 'self'; "
+    # form-action: помимо 'self' разрешаем редирект формы на платёжные страницы
+    # ЮKassa (confirmation_url = yoomoney.ru/checkout/…; флоу может идти и через
+    # yookassa.ru). Без них кнопка «Выбрать тариф» не уводила на оплату (CSP резал
+    # cross-origin редирект после POST). Прямая навигация на эти домены не затронута.
+    "form-action 'self' https://yoomoney.ru https://*.yoomoney.ru "
+    "https://yookassa.ru https://*.yookassa.ru; "
     "frame-ancestors 'none'; "
     "img-src 'self' data: blob:; "    # blob: — превью выбранной картинки-вложения (object URL в reply.js)
     "media-src 'self' blob:; "        # blob: — переслушать записанное голосовое ДО отправки (<audio>)
