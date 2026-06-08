@@ -376,6 +376,7 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
             "session": session,
             "csrf_token": session.csrf_token,
             "status_labels": config.STATUS_LABELS,
+            "active": "dashboard",
         },
     )
 
@@ -420,6 +421,8 @@ async def leads_list(request: Request, session: auth.Session = Depends(require_s
             "statuses": config.STATUSES,
             "sources": config.SOURCES,
             "messengers": config.MESSENGERS,
+            # Таблица лидов живёт под разделом «Диалоги» — подсвечиваем его.
+            "active": "dialogs",
         },
     )
 
@@ -438,6 +441,170 @@ def _present_list_row(r) -> dict:
         "subscribed": r["subscribed"],
         "erase_requested_at": r["erase_requested_at"],
     }
+
+
+# =========================================================================== #
+# ДИАЛОГИ — мессенджер-вид (список контактов с бейджем канала + чат справа).
+# Тот же набор данных, что у /leads, но с превью последнего сообщения, временем и
+# счётчиком «без ответа». Право-панель переиспользует чат-композер из _chat.html
+# (та же форма POST /leads/{id}/reply, та же thread.js-лента) — единый источник,
+# чтобы интерфейс ответа не разъезжался (грабля #14 в handoff).
+# =========================================================================== #
+
+# Иконки-подписи вложений для превью в списке (зеркалит _thread.html).
+_KIND_PREVIEW = {
+    "photo": "🖼 Фото", "document": "📎 Файл", "video": "🎬 Видео",
+    "video_note": "⭕ Кружок", "voice": "🎤 Голосовое", "audio": "🎵 Аудио",
+    "animation": "🎞 GIF", "sticker": "🩶 Стикер", "other": "Вложение",
+}
+
+# Короткие коды каналов-источников для углового бейджа карточки диалога.
+_SOURCE_SHORT = {
+    "vk": "ВК", "reels": "RL", "dzen": "ДЗ", "youtube": "YT",
+    "max": "MAX", "other": "•",
+}
+
+_WEEKDAYS_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
+def _dialog_time_label(dt) -> str:
+    """Компактная отметка времени для строки диалога: сегодня → ЧЧ:ММ,
+    в пределах недели → день недели, иначе → ДД.ММ. UTC (как и тред)."""
+    if dt is None:
+        return ""
+    now = datetime.now(timezone.utc)
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    delta = (now.date() - dt.date()).days
+    if 1 <= delta < 7:
+        return _WEEKDAYS_RU[dt.weekday()]
+    return dt.strftime("%d.%m")
+
+
+def _dialog_preview(kind: str | None, text: str | None, direction: str | None) -> str:
+    """Превью последнего сообщения: иконка вложения + обрезанный текст, префикс
+    «Вы: » для исходящих. Текст обрезаем (CSS-эллипсис добивает по ширине)."""
+    body = (text or "").strip()
+    if kind and kind != "text":
+        tag = _KIND_PREVIEW.get(kind, "Вложение")
+        body = f"{tag} {body}".strip() if body else tag
+    body = body[:90]
+    if direction == "out":
+        body = "Вы: " + body
+    return body or "—"
+
+
+def _present_dialog_row(r) -> dict:
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "messenger": r["messenger"],
+        "source": r["source"],
+        "source_short": _SOURCE_SHORT.get(r["source"], "•"),
+        "status": r["status"],
+        "phone_masked": security.mask_phone(r["phone_tail"], r["has_phone"]),
+        "last_preview": _dialog_preview(r["last_kind"], r["last_text"], r["last_direction"]),
+        "time_label": _dialog_time_label(r["last_at"]),
+        "unread": r["unread"],
+        "bot_paused": r["bot_paused"],
+        "unsubscribed_at": r["unsubscribed_at"],
+        "erase_requested_at": r["erase_requested_at"],
+    }
+
+
+async def _render_dialogs(
+    request: Request,
+    session: auth.Session,
+    *,
+    selected_id=None,
+    rec=None,
+    thread=None,
+    replied: bool = False,
+    paused_flash: bool = False,
+    reply_err: str | None = None,
+):
+    """Единый рендер раздела «Диалоги»: список слева + (опц.) выбранный чат справа.
+    rec=None → правая панель пустая (приглашение выбрать диалог)."""
+    filters, raw = _parse_filters(request, session)
+    rows = await db.list_dialogs(filters, limit=config.PER_PAGE, offset=0)
+    dialogs = [_present_dialog_row(r) for r in rows]
+    unanswered = await db.count_unanswered_dialogs()
+
+    ctx: dict = {
+        "dialogs": dialogs,
+        "filters": raw,
+        "selected_id": selected_id,
+        "csrf_token": session.csrf_token,
+        "session": session,
+        "active": "dialogs",
+        "nav_dialogs_badge": unanswered,
+        "statuses": config.STATUSES,
+        "status_labels": config.STATUS_LABELS,
+        "source_labels": config.SOURCE_LABELS,
+        "messenger_labels": config.MESSENGER_LABELS,
+    }
+    if rec is not None:
+        lead = dict(rec)
+        lead["phone_masked"] = security.mask_phone(rec["phone_tail"], rec["has_phone"])
+        ctx.update({
+            "lead": lead,
+            "thread": thread or [],
+            "replied": replied,
+            "paused_flash": paused_flash,
+            "reply_err": _reply_err_text(reply_err),
+            "refresh_sec": config.THREAD_REFRESH_SEC,
+            "msg_max": config.MSG_MAX_LEN,
+            "accept_attr": _reply_accept_attr(),
+            "max_file_mb": config.MAX_PRODUCT_FILE_MB,
+            "chat_from": "dialog",   # композер вернёт PRG на /dialogs/{id}
+        })
+    return templates.TemplateResponse(request, "dialogs.html", ctx)
+
+
+# ---- /dialogs — список диалогов (правая панель пустая) -------------------- #
+@app.get("/dialogs", response_class=HTMLResponse)
+async def dialogs_index(request: Request, session: auth.Session = Depends(require_session)):
+    return await _render_dialogs(request, session, selected_id=None)
+
+
+# ---- /dialogs/{id} — список + выбранный чат справа ------------------------ #
+@app.get("/dialogs/{lead_id}", response_class=HTMLResponse)
+async def dialogs_detail(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    replied: int = 0,
+    paused: int = 0,
+    err: str | None = None,
+):
+    rec = await db.get_lead(lead_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+    # lead_view + thread_view в аудит (как на карточке) — открытие = чтение ПДн диалога.
+    await db.audit(actor=session.actor, action="lead_view", lead_id=lead_id,
+                   ip=_ip(request), user_agent=_ua(request))
+    thread = await _load_thread_audited(request, session, lead_id)
+    return await _render_dialogs(
+        request, session, selected_id=lead_id, rec=rec, thread=thread,
+        replied=bool(replied), paused_flash=bool(paused), reply_err=err,
+    )
+
+
+def _chat_return(lead_id, from_: str, *, replied: bool = False,
+                 paused: bool = False, err: str | None = None) -> RedirectResponse:
+    """PRG-редирект после действия в чате. from_ ∈ {dialog, card} — allow-list,
+    жёстко зашитые базовые пути (НЕ open-redirect: значение не подставляется в URL)."""
+    base = "/dialogs" if from_ == "dialog" else "/leads"
+    params = {}
+    if replied:
+        params["replied"] = "1"
+    if paused:
+        params["paused"] = "1"
+    if err:
+        params["err"] = err
+    qs = urlencode(params)
+    suffix = f"?{qs}#thread" if qs else "#thread"
+    return RedirectResponse(url=f"{base}/{lead_id}{suffix}", status_code=303)
 
 
 # ---- /leads/search — POST→PRG, телефон → хеш, чистый redirect (§3.10) ----- #
@@ -577,6 +744,8 @@ def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = 
         "csrf_token": session.csrf_token,
         "session": session,
         "notes_max": config.NOTES_MAX_LEN,
+        # Карточка лида живёт под разделом «Диалоги» — подсвечиваем его в сайдбаре.
+        "active": "dialogs",
     }
 
 
@@ -665,8 +834,9 @@ async def lead_bot_pause(
     lead_id: uuid.UUID,
     session: auth.Session = Depends(require_session),
     csrf_token: str = Form(""),
+    from_: str = Form("card", alias="from"),
 ):
-    return await _set_bot_paused(request, lead_id, session, csrf_token, paused=True)
+    return await _set_bot_paused(request, lead_id, session, csrf_token, paused=True, from_=from_)
 
 
 @app.post("/leads/{lead_id}/bot-resume")
@@ -675,11 +845,13 @@ async def lead_bot_resume(
     lead_id: uuid.UUID,
     session: auth.Session = Depends(require_session),
     csrf_token: str = Form(""),
+    from_: str = Form("card", alias="from"),
 ):
-    return await _set_bot_paused(request, lead_id, session, csrf_token, paused=False)
+    return await _set_bot_paused(request, lead_id, session, csrf_token, paused=False, from_=from_)
 
 
-async def _set_bot_paused(request, lead_id, session, csrf_token, *, paused: bool):
+async def _set_bot_paused(request, lead_id, session, csrf_token, *, paused: bool,
+                          from_: str = "card"):
     await _enforce_csrf(request, session, csrf_token)
     # UPDATE одной колонки leads.bot_paused в транзакции с аудитом (bot_paused|bot_resumed).
     # Telegram панель НЕ трогает: на паузе бот сам перестаёт авто-отвечать (его проверки).
@@ -689,7 +861,7 @@ async def _set_bot_paused(request, lead_id, session, csrf_token, *, paused: bool
     )
     if row is None:
         raise StarletteHTTPException(status_code=404, detail="Лид не найден")
-    return RedirectResponse(url=f"/leads/{lead_id}?paused=1#thread", status_code=303)
+    return _chat_return(lead_id, from_, paused=True)
 
 
 # ---- /leads/{id}/reply — ручной ответ → INSERT в outbox (НЕ Telegram, §4) -- #
@@ -701,6 +873,7 @@ async def lead_reply(
     text: str = Form(""),
     csrf_token: str = Form(""),
     files: list[UploadFile] = File(default=[]),
+    from_: str = Form("card", alias="from"),
 ):
     await _enforce_csrf(request, session, csrf_token)
 
@@ -715,9 +888,7 @@ async def lead_reply(
     for up in (files or []):
         meta, file_err = await _read_reply_file(request, up)
         if file_err:
-            return RedirectResponse(
-                url=f"/leads/{lead_id}?err={file_err}#thread", status_code=303
-            )
+            return _chat_return(lead_id, from_, err=file_err)
         if meta is not None:
             attachments.append(meta)
             if len(attachments) >= config.MAX_REPLY_ATTACHMENTS:
@@ -725,9 +896,7 @@ async def lead_reply(
 
     # Ослабленный инвариант: отклоняем ТОЛЬКО когда нет ни текста, ни вложений.
     if not text and not attachments:
-        return RedirectResponse(
-            url=f"/leads/{lead_id}?err=empty_reply#thread", status_code=303
-        )
+        return _chat_return(lead_id, from_, err="empty_reply")
 
     # INSERT в outbox 'queued' (по строке на текст и на каждое вложение) + аудит без байтов.
     # Реально шлёт бот; адресность (tg_user_id) и erase-фильтр он re-check'ает. Байты кладёт
@@ -741,7 +910,7 @@ async def lead_reply(
         raise StarletteHTTPException(
             status_code=400, detail="Лиду нельзя написать (нет Telegram-адреса)"
         )
-    return RedirectResponse(url=f"/leads/{lead_id}?replied=1#thread", status_code=303)
+    return _chat_return(lead_id, from_, replied=True)
 
 
 # ---- /export.csv — POST, маска, аудит ДО стрима, row-cap (§3.11) ---------- #

@@ -124,6 +124,47 @@
 {%- endmacro %}
 
 
+{# Переключатель перехвата (бот авто-отвечает ↔ оператор на ручном). Используется
+   и на карточке лида, и в правой панели «Диалоги». from_ задаёт куда вернуть PRG
+   (card → /leads/{id}, dialog → /dialogs/{id}) — allow-list на сервере. #}
+{% macro bot_toggle(lead, csrf_token, from_='card') %}
+  {%- if lead.bot_paused %}
+  <form class="inline-form" method="post" action="/leads/{{ lead.id }}/bot-resume">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="from" value="{{ from_ }}">
+    <button class="btn btn--secondary btn--sm" type="submit"
+            title="Вернуть боту авто-ответы">🤖 Вернуть авто</button>
+  </form>
+  {%- else %}
+  <form class="inline-form" method="post" action="/leads/{{ lead.id }}/bot-pause">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="from" value="{{ from_ }}">
+    <button class="btn btn--danger-ghost btn--sm" type="submit"
+            title="Взять ручное управление — бот замолчит, отвечаете вы">🔴 На ручное</button>
+  </form>
+  {%- endif %}
+{%- endmacro %}
+
+
+{# Бейдж режима бота (авто/ручное) — компактный индикатор для шапки чата. #}
+{% macro bot_mode_badge(lead) %}
+  {%- if lead.bot_paused -%}
+  <span class="badge badge--paused" title="Оператор на ручном — бот не авто-отвечает">🔴 На ручном</span>
+  {%- else -%}
+  <span class="badge badge--auto" title="Бот авто-отвечает (Лия + прогрев)">🤖 Авто</span>
+  {%- endif -%}
+{%- endmacro %}
+
+
+{# Аватар-инициал контакта (фото нет). Цвет — по источнику (data-source в CSS).
+   None/пустое имя → «?» (а не «N» из none|string). #}
+{% macro avatar(name, source) %}
+  {%- set nm = (name|string|trim) if name else '' -%}
+  {%- set ch = nm[:1]|upper if nm else '?' -%}
+  <span class="avatar" data-source="{{ source|e }}" aria-hidden="true">{{ ch }}</span>
+{%- endmacro %}
+
+
 {# Флеш-уведомление. kind: ok|error|info. role=alert для ошибок (доступность). #}
 {% macro flash(message, kind='info') %}
   {%- if message %}

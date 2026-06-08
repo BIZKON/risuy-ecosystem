@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, source_badge, messenger_badge, flash, bot_toggle, bot_mode_badge, avatar %}
+
+{% block title %}Диалоги{% endblock %}
+{% block body_class %}page-dialogs{% endblock %}
+{% block main_class %}main--flush{% endblock %}
+
+{# thread.js (точечный авто-рефреш ленты) + reply.js (композер) — только когда
+   справа открыт чат. Без выбранного диалога не грузим (нечего обновлять). #}
+{% block head_extra %}{% if lead %}<script src="/static/thread.js?v={{ asset_version }}" defer></script>
+<script src="/static/reply.js?v={{ asset_version }}" defer></script>{% endif %}{% endblock %}
+
+{% set q = filters.get('qname', '') %}
+{% set st = filters.get('status', '') %}
+
+{% block content %}
+<div class="dialogs">
+
+  {# ── Левая колонка: поиск + статус-чипы + список контактов ── #}
+  <aside class="dlist" aria-label="Список диалогов">
+    <div class="dlist__head">
+      <form class="dlist__search" method="get" action="/dialogs" autocomplete="off">
+        <svg class="dlist__qico" viewBox="0 0 24 24" width="16" height="16" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input class="dlist__q" type="search" name="qname" value="{{ q }}"
+               placeholder="Поиск по имени" inputmode="text" enterkeyhint="search">
+        {% if st %}<input type="hidden" name="status" value="{{ st }}">{% endif %}
+        {% if q %}<a class="dlist__clear" href="/dialogs{% if st %}?status={{ st }}{% endif %}" title="Сбросить поиск" aria-label="Сбросить">✕</a>{% endif %}
+      </form>
+
+      {# Статус-чипы — ссылки (без JS, CSP-safe). Сохраняют активный поиск по имени.
+         q url-кодируем: имя оператора может содержать пробел/&/спецсимволы. #}
+      {% set qenc = q|urlencode %}
+      {% set qpart = ('&qname=' ~ qenc) if q else '' %}
+      <div class="dlist__chips" role="tablist" aria-label="Фильтр по статусу">
+        <a class="chip{% if not st %} is-on{% endif %}" href="/dialogs{% if q %}?qname={{ qenc }}{% endif %}">Все</a>
+        <a class="chip{% if st == 'new' %} is-on{% endif %}" href="/dialogs?status=new{{ qpart }}">Новые</a>
+        <a class="chip{% if st == 'guide_sent' %} is-on{% endif %}" href="/dialogs?status=guide_sent{{ qpart }}">Гайд</a>
+        <a class="chip{% if st == 'nurturing' %} is-on{% endif %}" href="/dialogs?status=nurturing{{ qpart }}">Прогрев</a>
+        <a class="chip{% if st == 'converted' %} is-on{% endif %}" href="/dialogs?status=converted{{ qpart }}">Купили</a>
+      </div>
+    </div>
+
+    <div class="dlist__scroll">
+      {% for d in dialogs %}
+      <a class="dcard{% if d.id == selected_id %} is-active{% endif %}{% if d.erase_requested_at %} is-erase{% endif %}"
+         href="/dialogs/{{ d.id }}">
+        <span class="dcard__ava">
+          {{ avatar(d.name, d.source) }}
+          <span class="chanbadge" data-source="{{ d.source|e }}"
+                title="{{ source_labels.get(d.source, d.source)|e }}">{{ d.source_short }}</span>
+        </span>
+        <span class="dcard__body">
+          <span class="dcard__row">
+            <span class="dcard__name">{{ d.name|e if d.name else 'Без имени' }}<span class="dcard__chan">[{{ source_labels.get(d.source, d.source)|e }}]</span></span>
+            <span class="dcard__time">{{ d.time_label }}</span>
+          </span>
+          <span class="dcard__row">
+            <span class="dcard__preview">{{ d.last_preview|e }}</span>
+            {% if d.unread %}<span class="dcard__unread" title="Без ответа">{{ d.unread }}</span>{% endif %}
+          </span>
+        </span>
+      </a>
+      {% else %}
+      <p class="dlist__empty muted">
+        {% if q or st %}Ничего не найдено. <a href="/dialogs">Сбросить</a>.{% else %}Пока нет диалогов. Список заполнится, как только клиент напишет боту.{% endif %}
+      </p>
+      {% endfor %}
+    </div>
+
+    <div class="dlist__foot">
+      <a class="dlist__table" href="/leads">Таблица лидов →</a>
+    </div>
+  </aside>
+
+  {# ── Правая колонка: переписка выбранного диалога ── #}
+  <section class="dchat" aria-label="Переписка">
+    {% if lead %}
+    <header class="dchat__bar">
+      <div class="dchat__id">
+        {{ avatar(lead.name, lead.source) }}
+        <div class="dchat__who">
+          <span class="dchat__name">{{ lead.name|e if lead.name else 'Без имени' }}</span>
+          <span class="dchat__meta">
+            {{ messenger_badge(lead.messenger) }}
+            {{ source_badge(lead.source) }}
+            {{ bot_mode_badge(lead) }}
+            {% if lead.unsubscribed_at %}<span class="badge badge--unsub" title="Клиент отписался">Отписан</span>{% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="dchat__actions">
+        {{ bot_toggle(lead, csrf_token, 'dialog') }}
+        <a class="btn btn--ghost btn--sm" href="/leads/{{ lead.id }}"
+           title="Карточка лида: телефон, статус, заметки, 152-ФЗ">Карточка →</a>
+      </div>
+    </header>
+
+    {% if replied or paused_flash or reply_err %}
+    <div class="dchat__flash">
+      {% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
+      {% if paused_flash %}{{ flash('Режим бота переключён.', 'ok') }}{% endif %}
+      {% if reply_err %}{{ flash(reply_err, 'error') }}{% endif %}
+    </div>
+    {% endif %}
+
+    <div class="dchat__surface">
+      {% include "_chat.html" %}
+    </div>
+    {% else %}
+    <div class="dchat__empty">
+      <div class="dchat__empty-card">
+        <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor"
+             stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 9 9 0 0 1-4-1L3 20l1-5.5a8.5 8.5 0 0 1-1-4A8.38 8.38 0 0 1 11.5 2 8.5 8.5 0 0 1 21 11.5z"/>
+        </svg>
+        <p class="dchat__empty-title">Выберите диалог</p>
+        <p class="dchat__empty-text">Слева — список контактов с каналом. Откройте любой, чтобы увидеть переписку и ответить.</p>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

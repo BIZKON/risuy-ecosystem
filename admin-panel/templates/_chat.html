@@ -1,0 +1,78 @@
+{# Поверхность диалога: лента переписки (#thread-box, точечный авто-рефреш через
+   thread.js) + личный композер ответа (текст + НЕСКОЛЬКО вложений: файлы/голос).
+   ЕДИНЫЙ источник композера для карточки лида (lead.html) и раздела «Диалоги»
+   (dialogs.html) — чтобы интерфейс ответа не разъезжался (грабля #14 в handoff).
+
+   Требуемый контекст: lead, thread, csrf_token, refresh_sec, msg_max, max_file_mb,
+   accept_attr; chat_from ∈ {card, dialog} — куда вернуть PRG после ответа.
+   IDs/классы КОМПОЗЕРА не менять — на них завязан static/reply.js. #}
+{% from "_thread.html" import thread_list %}
+
+{% if not lead.bot_paused %}
+<p class="hint hint--block">Бот в режиме «Авто»: он сам отвечает (Лия + прогрев). Ваш ответ уйдёт <b>в дополнение</b> к боту — чтобы вести диалог только руками, нажмите «На ручное».</p>
+{% endif %}
+
+{# Лента обновляется точечно через /static/thread.js (data-* атрибуты), без
+   перезагрузки страницы — поле ответа НИЖЕ при этом не сбрасывается. #}
+<div id="thread-box" data-thread-url="/leads/{{ lead.id }}/thread"
+     data-refresh="{{ refresh_sec|default(15, true) }}">
+  {{ thread_list(thread) }}
+</div>
+
+{# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот.
+   multipart: текст и/или НЕСКОЛЬКО вложений (файлы + голос). #}
+{% if lead.tg_user_id is not none %}
+<form class="composer-form" method="post" action="/leads/{{ lead.id }}/reply"
+      enctype="multipart/form-data" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {# Куда вернуть PRG после ответа: card → /leads/{id}, dialog → /dialogs/{id}. #}
+  <input type="hidden" name="from" value="{{ chat_from|default('card') }}">
+
+  {# Превью выбранного вложения ДО отправки (заполняет reply.js). #}
+  <div class="composer__preview" id="composer-preview" hidden></div>
+
+  <div class="composer" id="composer" data-max-sec="120">
+    <div class="composer__tools">
+      <button class="composer__icon" type="button" id="attach-btn"
+              title="Прикрепить файл (до {{ max_file_mb }} МБ)" aria-label="Прикрепить файл">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+      <button class="composer__icon composer__icon--mic" type="button" id="rec-toggle"
+              title="Записать голос" aria-label="Записать голос">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="2" width="6" height="11" rx="3"/>
+          <path d="M5 10a7 7 0 0 0 14 0M12 17v4"/>
+        </svg>
+      </button>
+    </div>
+
+    {# required снят: допустим ответ-вложение без текста (файл/голос). rows=1 + авто-рост в reply.js. #}
+    <textarea class="composer__input" name="text" id="reply-text" rows="1"
+              maxlength="{{ msg_max|default(4096, true) }}"
+              placeholder="Написать клиенту в Telegram…"></textarea>
+
+    <button class="composer__send" type="submit" title="Отправить" aria-label="Отправить">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="composer__foot">
+    <span class="composer__status hint" id="rec-status" role="status" aria-live="polite"></span>
+    <span class="hint composer__note">Отправит бот. Без форматирования и ссылок.</span>
+  </div>
+
+  {# Транзитный пикер (без name — не сабмитится) + реальный сабмитный #attachments
+     (name="files", multiple) — reply.js держит в нём весь список вложений. #}
+  <input type="file" id="file-picker" accept="{{ accept_attr }}" multiple hidden>
+  <input type="file" id="attachments" name="files" multiple hidden>
+</form>
+{% else %}
+<p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>
+{% endif %}

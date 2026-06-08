@@ -222,6 +222,80 @@ async def list_leads(
 
 
 # --------------------------------------------------------------------------- #
+# Список ДИАЛОГОВ (раздел «Диалоги», мессенджер-вид). То же, что list_leads, но с
+# последним сообщением (для превью+времени) и счётчиком «без ответа» — число
+# входящих, пришедших ПОСЛЕ последнего исходящего (либо всех входящих, если
+# оператор/бот ни разу не отвечал). Сортировка — по активности (последнее
+# сообщение, иначе дата создания). panel_rw: только SELECT на leads+messages.
+#
+# Колонки последнего сообщения переименованы ВНУТРИ латерали (last_text/last_kind/
+# last_direction/last_msg_source/last_at), чтобы НЕ конфликтовать с одноимёнными
+# колонками leads (source/created_at) — иначе build_filters с unqualified `source`
+# дал бы «ambiguous column».
+# --------------------------------------------------------------------------- #
+_DIALOG_SELECT = """
+    select l.id, l.created_at, l.updated_at, l.messenger, l.source, l.name,
+           right(regexp_replace(coalesce(l.phone,''), '\\D', '', 'g'), 2) as phone_tail,
+           l.phone is not null and l.phone <> '' as has_phone,
+           l.consent, l.subscribed, l.status, l.erase_requested_at,
+           l.bot_paused, l.unsubscribed_at, l.tg_user_id,
+           lm.last_text, lm.last_kind, lm.last_direction, lm.last_at,
+           coalesce(u.unread, 0) as unread
+    from leads l
+    left join lateral (
+        select m.text as last_text, m.kind as last_kind,
+               m.direction as last_direction, m.created_at as last_at
+        from messages m
+        where m.lead_id = l.id
+        order by m.created_at desc, m.id desc
+        limit 1
+    ) lm on true
+    left join lateral (
+        select count(*) as unread
+        from messages m
+        where m.lead_id = l.id and m.direction = 'in'
+          and m.created_at > coalesce(
+              (select max(mo.created_at) from messages mo
+               where mo.lead_id = l.id and mo.direction = 'out'),
+              'epoch'::timestamptz)
+    ) u on true
+"""
+
+
+async def list_dialogs(
+    filters: dict[str, Any], *, limit: int, offset: int
+) -> list[asyncpg.Record]:
+    where_sql, params, next_i = build_filters(**filters)
+    q = f"""
+        {_DIALOG_SELECT}
+        where {where_sql}
+        order by coalesce(lm.last_at, l.created_at) desc, l.created_at desc
+        limit ${next_i} offset ${next_i + 1}
+    """
+    params = params + [limit, offset]
+    async with pool.acquire() as c:
+        return await c.fetch(q, *params)
+
+
+async def count_unanswered_dialogs() -> int:
+    """Сколько лидов с непрочитанным входящим (последнее сообщение — от клиента,
+    оператор ещё не ответил). Бейдж раздела «Диалоги» в сайдбаре."""
+    q = """
+        select count(*) from leads l
+        where exists (
+            select 1 from messages m
+            where m.lead_id = l.id and m.direction = 'in'
+              and m.created_at > coalesce(
+                  (select max(mo.created_at) from messages mo
+                   where mo.lead_id = l.id and mo.direction = 'out'),
+                  'epoch'::timestamptz)
+        )
+    """
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q))
+
+
+# --------------------------------------------------------------------------- #
 # Карточка (§2). Default — БЕЗ полного телефона, только хвост. Полный номер
 # берётся отдельным запросом reveal_phone() лишь внутри POST /reveal.
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,11 @@
-{# Базовый шаблон админ-панели лидов. Server-rendered, без внешних CDN/шрифтов/JS.
-   Все страницы с ПДн закрыты сессией; индексация запрещена. #}
+{# Базовый шаблон админ-панели. Server-rendered, без внешних CDN/шрифтов/JS.
+   Каркас: левый сайдбар-навигация (как в референсе) + верхний appbar + контент.
+   Все страницы с ПДн закрыты сессией; индексация запрещена.
+
+   Контракт блоков: login.html / error.html опустошают {% block chrome %} (сессии
+   ещё/уже нет — сайдбар не показываем); поэтому content/main/footer ВНЕ chrome,
+   чтобы эти страницы рендерились. Раскладку даёт CSS-grid по body.app (для
+   login/error body переключается в display:block — см. styles.css). #}
 <!doctype html>
 <html lang="ru">
 <head>
@@ -8,32 +14,94 @@
   {# Внутренняя панель с ПДн — нигде не индексируется. #}
   <meta name="robots" content="noindex, nofollow">
   <meta name="referrer" content="no-referrer">
-  <title>{% block title %}Лиды{% endblock %} · Школа Лесова</title>
+  <title>{% block title %}Панель{% endblock %} · Школа Лесова</title>
   {% block head_extra %}{% endblock %}
   <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
-<body class="{% block body_class %}{% endblock %}">
+
+{# Иконки сайдбара — инлайновый SVG (CSP разрешает: это не скрипт). stroke 1.7. #}
+{% macro nav_icon(name) %}
+<svg class="snav__ico" viewBox="0 0 24 24" width="20" height="20" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+     stroke-linejoin="round" aria-hidden="true">
+{%- if name == 'dashboard' -%}<path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="13" y="7" width="3" height="10"/>
+{%- elif name == 'dialogs' -%}<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 9 9 0 0 1-4-1L3 20l1-5.5a8.5 8.5 0 0 1-1-4A8.38 8.38 0 0 1 11.5 2 8.5 8.5 0 0 1 21 11.5z"/>
+{%- elif name == 'channels' -%}<path d="M4.9 4.9a16 16 0 0 0 0 14.2M19.1 4.9a16 16 0 0 1 0 14.2M7.8 7.8a8 8 0 0 0 0 8.4M16.2 7.8a8 8 0 0 1 0 8.4"/><circle cx="12" cy="12" r="1.5"/>
+{%- elif name == 'agents' -%}<path d="M12 3l1.6 3.6L17 8l-3.4 1.4L12 13l-1.6-3.6L7 8l3.4-1.4L12 3z"/><path d="M5 16l.8 1.8L8 18.6l-2.2.8L5 21l-.8-1.6L2 18.6l2.2-.8L5 16z"/>
+{%- elif name == 'knowledge' -%}<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+{%- elif name == 'integrations' -%}<path d="M14 7h3a2 2 0 0 1 2 2v3M10 7H7a2 2 0 0 0-2 2v3"/><rect x="9" y="3" width="6" height="6" rx="1"/><rect x="3" y="14" width="6" height="6" rx="1"/><rect x="15" y="14" width="6" height="6" rx="1"/>
+{%- elif name == 'broadcasts' -%}<path d="M3 11l18-8-8 18-2-7-8-3z"/>
+{%- elif name == 'products' -%}<path d="M20.6 7.3 12 2 3.4 7.3 12 12.6l8.6-5.3z"/><path d="M3.4 7.3v9.4L12 22V12.6"/><path d="M20.6 7.3v9.4L12 22"/>
+{%- elif name == 'team' -%}<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8M21 20a6 6 0 0 0-4-5.6"/>
+{%- elif name == 'payments' -%}<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
+{%- elif name == 'logout' -%}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}
+
+{# Один навигационный пункт. soon=true → серая неактивная заглушка («скоро»). #}
+{% macro nav_item(key, href, label, active, badge=0, soon=false) %}
+  {%- if soon -%}
+  <span class="snav__item is-soon" aria-disabled="true" title="Раздел в разработке">
+    {{ nav_icon(key) }}<span class="snav__label">{{ label }}</span>
+    <span class="snav__soon">скоро</span>
+  </span>
+  {%- else -%}
+  <a class="snav__item{% if active == key %} is-active{% endif %}" href="{{ href }}"
+     {% if active == key %}aria-current="page"{% endif %}>
+    {{ nav_icon(key) }}<span class="snav__label">{{ label }}</span>
+    {%- if badge and badge > 0 %}<span class="snav__badge">{{ badge }}</span>{% endif %}
+  </a>
+  {%- endif -%}
+{%- endmacro %}
+
+{% set NAV_TITLES = {
+  'dashboard': 'Статистика', 'dialogs': 'Диалоги',
+  'products': 'Продукты', 'broadcasts': 'Рассылки',
+} %}
+
+<body class="app {% block body_class %}{% endblock %}">
   {% block chrome %}
-  <header class="topbar">
-    <div class="topbar__inner">
-      <a class="brand" href="/">Лиды<span class="brand__sub">Школа Лесова</span></a>
-      <nav class="topnav" aria-label="Основная навигация">
-        <a href="/"{% if active == 'dashboard' %} aria-current="page"{% endif %}>Дашборд</a>
-        <a href="/leads"{% if active == 'leads' %} aria-current="page"{% endif %}>Лиды</a>
-        <a href="/products"{% if active == 'products' %} aria-current="page"{% endif %}>Продукты</a>
-        <a href="/broadcasts"{% if active == 'broadcasts' %} aria-current="page"{% endif %}>Рассылки</a>
-      </nav>
-      {% if csrf_token %}
+  <aside class="sidebar" aria-label="Разделы">
+    <a class="sidebar__brand" href="/">
+      <span class="sidebar__logo" aria-hidden="true">ШЛ</span>
+      <span class="sidebar__brandtext">
+        <span class="sidebar__name">Школа Лесова</span>
+        <span class="sidebar__sub">админ-панель</span>
+      </span>
+    </a>
+
+    <nav class="snav" aria-label="Основная навигация">
+      {{ nav_item('dashboard',    '/',           'Статистика', active) }}
+      {{ nav_item('dialogs',      '/dialogs',    'Диалоги',    active, nav_dialogs_badge|default(0, true)) }}
+      {{ nav_item('channels',     '#', 'Каналы',       active, 0, true) }}
+      {{ nav_item('agents',       '#', 'ИИ-агенты',    active, 0, true) }}
+      {{ nav_item('knowledge',    '#', 'Базы знаний',  active, 0, true) }}
+      {{ nav_item('integrations', '#', 'Интеграции',   active, 0, true) }}
+      {{ nav_item('broadcasts',   '/broadcasts', 'Рассылки',   active) }}
+      {{ nav_item('products',     '/products',   'Продукты',   active) }}
+      {{ nav_item('team',         '#', 'Команда',      active, 0, true) }}
+      {{ nav_item('payments',     '#', 'Платежи',      active, 0, true) }}
+    </nav>
+
+    {% if csrf_token %}
+    <div class="sidebar__foot">
+      {% if session %}<span class="sidebar__user" title="{{ session.actor|e }}">{{ session.actor|e }}</span>{% endif %}
       <form class="logout" method="post" action="/logout">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn--ghost btn--sm">Выйти</button>
+        <button type="submit" class="snav__item snav__item--btn">{{ nav_icon('logout') }}<span class="snav__label">Выйти</span></button>
       </form>
-      {% endif %}
     </div>
+    {% endif %}
+  </aside>
+
+  <header class="appbar">
+    <h1 class="appbar__title">{% block appbar_title %}{{ NAV_TITLES.get(active, 'Панель') }}{% endblock %}</h1>
+    {% if session %}<span class="appbar__user">{{ session.actor|e }}</span>{% endif %}
   </header>
   {% endblock %}
 
-  <main class="main" id="content">
+  <main class="main {% block main_class %}{% endblock %}" id="content">
     {% block content %}{% endblock %}
   </main>
 

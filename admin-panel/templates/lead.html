@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import status_badge, source_badge, messenger_badge, phone_masked, phone_full, bool_mark, flash %}
+{% from "_macros.html" import status_badge, source_badge, messenger_badge, phone_masked, phone_full, bool_mark, flash, bot_toggle %}
 {% from "_thread.html" import thread_list %}
 
 {% block title %}Лид · {{ lead.name|e if lead.name else 'без имени' }}{% endblock %}
@@ -15,7 +15,7 @@
 
 {% block content %}
 <nav class="crumbs" aria-label="Хлебные крошки">
-  <a href="/leads">← К списку</a>
+  <a href="/dialogs/{{ lead.id }}">← К диалогу</a>
 </nav>
 
 <div class="page-head">
@@ -102,109 +102,21 @@
   {# ── Правая колонка: переписка + write-поверхность + таймлайн + 152-ФЗ. ── #}
   <div class="col-right">
 
-    {# ── Переписка: тред + перехват + ручной ответ. text|e (autoescape). ── #}
+    {# ── Переписка: тред + перехват + ручной ответ. Поверхность диалога вынесена
+       в _chat.html (ЕДИНЫЙ композер с разделом «Диалоги»). chat_from по умолчанию
+       'card' → PRG возвращает на эту карточку. ── #}
     <section class="card" id="thread" aria-label="Переписка">
       <div class="card__head-row">
         <h2 class="card__title">Переписка</h2>
         <div class="card__head-actions">
           {# Перехват: бот перестаёт авто-отвечать (Лия+прогрев), оператор пишет руками.
              Воронка выдачи гайда НЕ глушится. UPDATE leads.bot_paused + аудит. #}
-          {% if lead.bot_paused %}
-          <form class="inline-form" method="post" action="/leads/{{ lead.id }}/bot-resume">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn btn--secondary btn--sm" type="submit"
-                    title="Вернуть боту авто-ответы">🤖 Вернуть авто</button>
-          </form>
-          {% else %}
-          <form class="inline-form" method="post" action="/leads/{{ lead.id }}/bot-pause">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn btn--danger-ghost btn--sm" type="submit"
-                    title="Взять ручное управление — бот замолчит, отвечаете вы">🔴 На ручное</button>
-          </form>
-          {% endif %}
+          {{ bot_toggle(lead, csrf_token, 'card') }}
           <a class="btn btn--ghost btn--sm" href="/leads/{{ lead.id }}#thread" title="Обновить переписку">Обновить</a>
         </div>
       </div>
 
-      {% if not lead.bot_paused %}
-      <p class="hint hint--block">Бот в режиме «Авто»: он сам отвечает (Лия + прогрев). Ваш ответ уйдёт <b>в дополнение</b> к боту — чтобы вести диалог только руками, нажмите «На ручное».</p>
-      {% endif %}
-
-      {# Лента обновляется точечно через /static/thread.js (data-* атрибуты), без
-         перезагрузки страницы — поле ответа НИЖЕ при этом не сбрасывается. #}
-      <div id="thread-box" data-thread-url="/leads/{{ lead.id }}/thread"
-           data-refresh="{{ refresh_sec|default(15, true) }}">
-        {{ thread_list(thread) }}
-      </div>
-
-      {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот.
-         multipart: текст и/или НЕСКОЛЬКО вложений (файлы + голос). Каждое вложение
-         уйдёт отдельным сообщением (Telegram не комбинирует документ+голос) — бэкенд
-         кладёт по строке outbox на текст и на каждое вложение. Текстовый ответ без
-         вложений работает как раньше (kind='text'). #}
-      {% if lead.tg_user_id is not none %}
-      {# Композер в стиле мессенджера: слева скрепка (добавить файлы) и микрофон
-         (записать голос), по центру поле, справа отправка. Превью списком чипов над
-         полем (миниатюра картинки / иконка документа с «Открыть» / плеер голоса —
-         УДОСТОВЕРИТЬСЯ перед отправкой), у каждого «✕». Всё поведение в reply.js
-         (CSP запрещает inline-JS): вложения копятся в #attachments (name="files")
-         через DataTransfer, голос пишется MediaRecorder'ом и добавляется в тот же список. #}
-      <form class="composer-form" method="post" action="/leads/{{ lead.id }}/reply"
-            enctype="multipart/form-data" autocomplete="off">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-
-        {# Превью выбранного вложения ДО отправки (заполняет reply.js). #}
-        <div class="composer__preview" id="composer-preview" hidden></div>
-
-        <div class="composer" id="composer" data-max-sec="120">
-          <div class="composer__tools">
-            <button class="composer__icon" type="button" id="attach-btn"
-                    title="Прикрепить файл (до {{ max_file_mb }} МБ)" aria-label="Прикрепить файл">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-              </svg>
-            </button>
-            <button class="composer__icon composer__icon--mic" type="button" id="rec-toggle"
-                    title="Записать голос" aria-label="Записать голос">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="9" y="2" width="6" height="11" rx="3"/>
-                <path d="M5 10a7 7 0 0 0 14 0M12 17v4"/>
-              </svg>
-            </button>
-          </div>
-
-          {# required снят: допустим ответ-вложение без текста (файл/голос). rows=1 + авто-рост в reply.js. #}
-          <textarea class="composer__input" name="text" id="reply-text" rows="1"
-                    maxlength="{{ msg_max|default(4096, true) }}"
-                    placeholder="Написать клиенту в Telegram…"></textarea>
-
-          <button class="composer__send" type="submit" title="Отправить" aria-label="Отправить">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                 stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-            </svg>
-          </button>
-        </div>
-
-        <div class="composer__foot">
-          <span class="composer__status hint" id="rec-status" role="status" aria-live="polite"></span>
-          <span class="hint composer__note">Отправит бот. Без форматирования и ссылок.</span>
-        </div>
-
-        {# Скрытые инпуты вложения: файл и записанный голос. reply.js кладёт в них. #}
-        {# Транзитный пикер (без name — не сабмитится): «+» открывает его, reply.js
-           добавляет выбранные файлы в общий список. #attachments (name="files",
-           multiple) — РЕАЛЬНЫЙ сабмитный инпут: reply.js держит в нём весь список
-           вложений (файлы + запись голоса) через DataTransfer. Бэкенд читает files[]
-           и классифицирует каждый по MIME (audio→voice). #}
-        <input type="file" id="file-picker" accept="{{ accept_attr }}" multiple hidden>
-        <input type="file" id="attachments" name="files" multiple hidden>
-      </form>
-      {% else %}
-      <p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>
-      {% endif %}
+      {% include "_chat.html" %}
     </section>
 
     {# Форма правки — ровно 2 поля: статус и заметки. #}
