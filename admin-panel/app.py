@@ -107,24 +107,26 @@ def _ua(request: Request) -> str | None:
 
 
 def _same_origin(request: Request) -> bool:
-    """Проверка Origin/Referer = свой хост (доп. слой к CSRF-токену, §3.5).
+    """Проверка Origin/Referer = свой хост — ВТОРИЧНЫЙ слой (основной контроль —
+    CSRF-токен, §3.5).
 
-    Сверяем host:port. Если ни Origin, ни Referer не пришли — НЕ блокируем
-    (некоторые клиенты их не шлют), полагаемся на CSRF-токен как основной контроль.
+    Источник часто НЕЛЬЗЯ достоверно определить, и это НЕ повод блокировать:
+      • заголовков нет (некоторые клиенты их не шлют);
+      • Origin='null' — opaque origin: Safari/WebKit при Referrer-Policy: no-referrer
+        шлёт ровно это на POST-формы, плюс так делают приватные расширения;
+      • значение без схемы (неразбираемо).
+    Во всех этих случаях НЕ блокируем и полагаемся на токен. Блокируем ТОЛЬКО при
+    ЯВНОМ несовпадении разобранного хоста — настоящий cross-site POST с чужого сайта
+    несёт реальный чужой Origin и здесь отбивается (а токен он подделать не может).
     """
     target = request.headers.get("host")
     if not target:
         return True
     for hdr in ("origin", "referer"):
         val = request.headers.get(hdr)
-        if not val:
-            continue
-        # Грубо вытащим host из URL без внешних либ.
-        try:
-            after_scheme = val.split("://", 1)[1]
-        except IndexError:
-            return False
-        host = after_scheme.split("/", 1)[0]
+        if not val or val == "null" or "://" not in val:
+            continue  # источник не определить → доверяем CSRF-токену
+        host = val.split("://", 1)[1].split("/", 1)[0]
         return host == target
     return True
 
@@ -153,24 +155,9 @@ def _safe_next(path: str) -> str:
 
 
 async def _enforce_csrf(request: Request, session: auth.Session, submitted: str | None) -> None:
-    so = _same_origin(request)
-    tok_ok = auth.check_csrf(session.csrf_token, submitted)
-    if not so or not tok_ok:
-        # ВРЕМЕННАЯ ДИАГНОСТИКА CSRF-403 (убрать после разбора). Без значения токена
-        # и без ПДн: только какой гейт упал + безопасные заголовки запроса.
-        import logging
-        logging.getLogger("admin-panel").warning(
-            "CSRF-DIAG path=%s same_origin=%s host=%r origin=%r referer=%r "
-            "submitted_empty=%s submitted_len=%s session_len=%s token_match=%s",
-            request.url.path, so,
-            request.headers.get("host"), request.headers.get("origin"),
-            request.headers.get("referer"),
-            not submitted, len(submitted or ""), len(session.csrf_token or ""),
-            (submitted == session.csrf_token),
-        )
-    if not so:
+    if not _same_origin(request):
         raise CSRFError()
-    if not tok_ok:
+    if not auth.check_csrf(session.csrf_token, submitted):
         raise CSRFError()
 
 
