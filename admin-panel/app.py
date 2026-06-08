@@ -90,7 +90,9 @@ app.add_middleware(
     # per_path не выписать (uuid в середине), поэтому суффикс-матч. Лимит = потолок
     # файла офера (≤50 МБ Telegram); read_upload_capped в хендлере дублирует защиту.
     per_path_suffix_limits={
-        "/reply": config.MAX_PRODUCT_FILE_BYTES,
+        # /reply несёт НЕСКОЛЬКО вложений суммарно → лимит выше пофайлового; каждый файл
+        # всё равно ≤ MAX_PRODUCT_FILE_BYTES (read_upload_capped) и ≤50 МБ у бота.
+        "/reply": config.MAX_REPLY_BODY_BYTES,
     },
 )
 
@@ -698,47 +700,43 @@ async def lead_reply(
     session: auth.Session = Depends(require_session),
     text: str = Form(""),
     csrf_token: str = Form(""),
-    file: UploadFile | None = File(None),
-    voice: UploadFile | None = File(None),
+    files: list[UploadFile] = File(default=[]),
 ):
     await _enforce_csrf(request, session, csrf_token)
 
     # Длину капим ПЕРВЫМ действием, до БД (§3.13/§5.11). plain-текст, без parse_mode.
-    # С файлом текст уходит подписью (caption ≤1024 у бота) — но это режет уже бот при
-    # сборке; здесь держим единый MSG_MAX_LEN-кап (как раньше для текста без файла).
     text = (text or "").strip()[: config.MSG_MAX_LEN]
 
-    # Вложение (опц.): запись голоса (поле voice из MediaRecorder) ПРИОРИТЕТНЕЕ
-    # выбранного файла (поле file) — оператор записал намеренно. _read_reply_file
-    # валидирует (размер+ext+MIME+magic-byte, отказ exe) и классифицирует audio/* →
-    # kind='voice' (бот сконвертит в ogg). При ошибке — PRG-редирект с err-кодом.
-    upload = voice if (voice is not None and (voice.filename or "")) else file
-    meta, file_err = await _read_reply_file(request, upload)
-    if file_err:
-        return RedirectResponse(
-            url=f"/leads/{lead_id}?err={file_err}#thread", status_code=303
-        )
+    # НЕСКОЛЬКО вложений (файлы + голос) в одном поле files (multiple). Валидируем КАЖДОЕ
+    # как файл офера (размер+ext+MIME+magic-byte, отказ exe); _read_reply_file классифицирует
+    # image→photo / audio/*→voice (бот сконвертит в ogg) / иначе document. Первый отказ →
+    # PRG-редирект с err-кодом. Потолок числа вложений — анти-абуз.
+    attachments: list[dict] = []
+    for up in (files or []):
+        meta, file_err = await _read_reply_file(request, up)
+        if file_err:
+            return RedirectResponse(
+                url=f"/leads/{lead_id}?err={file_err}#thread", status_code=303
+            )
+        if meta is not None:
+            attachments.append(meta)
+            if len(attachments) >= config.MAX_REPLY_ATTACHMENTS:
+                break
 
-    # Ослабленный инвариант: отклоняем ТОЛЬКО когда нет ни текста, ни файла. Голосовое/
-    # документ без подписи — валидный ответ (text может быть пустым).
-    if not text and meta is None:
+    # Ослабленный инвариант: отклоняем ТОЛЬКО когда нет ни текста, ни вложений.
+    if not text and not attachments:
         return RedirectResponse(
             url=f"/leads/{lead_id}?err=empty_reply#thread", status_code=303
         )
 
-    # INSERT в outbox 'queued' + аудит manual_reply ({len}/has_file/kind, без текста и
-    # байтов). Реально шлёт бот; адресность (tg_user_id) и erase-фильтр он re-check'ает.
-    # Байты файла кладёт панель (как у продуктов) → бот зальёт в OPS_CHAT_ID и проставит
-    # outbox.file_id. kind берём из подтверждённого MIME (photo|document|voice).
-    outbox_id = await db.enqueue_manual_reply(
-        lead_id, text=text, actor=session.actor,
+    # INSERT в outbox 'queued' (по строке на текст и на каждое вложение) + аудит без байтов.
+    # Реально шлёт бот; адресность (tg_user_id) и erase-фильтр он re-check'ает. Байты кладёт
+    # панель (как у продуктов) → бот зальёт в OPS_CHAT_ID и проставит outbox.file_id.
+    rows = await db.enqueue_manual_reply(
+        lead_id, text=text, attachments=attachments, actor=session.actor,
         ip=_ip(request), user_agent=_ua(request),
-        kind=meta["kind"] if meta else "text",
-        file_bytes=meta["bytes"] if meta else None,
-        file_name=meta["name"] if meta else None,
-        file_mime=meta["mime"] if meta else None,
     )
-    if outbox_id is None:
+    if rows is None:
         # Лид не найден ИЛИ без tg_user_id (некому слать) — не молчим, говорим оператору.
         raise StarletteHTTPException(
             status_code=400, detail="Лиду нельзя написать (нет Telegram-адреса)"

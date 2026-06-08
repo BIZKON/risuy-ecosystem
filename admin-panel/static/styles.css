@@ -740,7 +740,7 @@ select.field__input {
 .composer__note { color: var(--ink-faint); margin-left: auto; }
 
 /* превью вложения ДО отправки: чип файла (миниатюра/иконка + «Открыть») или плеер голоса */
-.composer__preview { margin-bottom: 8px; }
+.composer__preview { margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
 .attach-chip, .attach-audio {
   display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--line); border-radius: var(--radius);

@@ -112,6 +112,15 @@ UPLOAD_MIME_ALLOW = (
 MAX_PRODUCT_FILE_MB = _opt_int("MAX_PRODUCT_FILE_MB", 50)        # потолок файла офера, МБ (≤50 у бота)
 MAX_PRODUCT_FILE_BYTES = MAX_PRODUCT_FILE_MB * 1024 * 1024
 
+# Личный ответ может нести НЕСКОЛЬКО вложений (файлы + голос) — каждое уйдёт отдельным
+# сообщением (Telegram не комбинирует документ+голос). MAX_REPLY_ATTACHMENTS — потолок
+# числа вложений в одном ответе (анти-абуз). MAX_REPLY_BODY_BYTES — лимит ВСЕГО тела
+# POST /leads/{id}/reply (несколько файлов суммарно); каждый файл всё равно ≤
+# MAX_PRODUCT_FILE_BYTES (read_upload_capped) и ≤50 МБ у бота. Тело спулится на диск
+# (Starlette), память не раздувает.
+MAX_REPLY_ATTACHMENTS = _opt_int("MAX_REPLY_ATTACHMENTS", 10)
+MAX_REPLY_BODY_BYTES = _opt_int("MAX_REPLY_BODY_MB", 100) * 1024 * 1024
+
 # Виды офера — синхронны CHECK products_kind_chk в db/schema_products.sql. Порядок =
 # порядок в select конструктора (lead_magnet первым: с него начинается воронка).
 PRODUCT_KINDS = ("lead_magnet", "tripwire", "main")

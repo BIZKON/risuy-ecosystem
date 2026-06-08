@@ -138,18 +138,17 @@
       </div>
 
       {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот.
-         multipart: можно приложить файл (картинку/документ) и/или голосовое.
-         Текстовый ответ без файла работает как раньше (бэкенд ставит kind='text').
-         Голос пишется через MediaRecorder в /static/reply.js (CSP: без inline-JS),
-         записанный blob кладётся в скрытый файл-инпут #rec-file и уходит обычным
-         submit в тот же multipart-эндпоинт с тем же CSRF-токеном. #}
+         multipart: текст и/или НЕСКОЛЬКО вложений (файлы + голос). Каждое вложение
+         уйдёт отдельным сообщением (Telegram не комбинирует документ+голос) — бэкенд
+         кладёт по строке outbox на текст и на каждое вложение. Текстовый ответ без
+         вложений работает как раньше (kind='text'). #}
       {% if lead.tg_user_id is not none %}
-      {# Композер в стиле мессенджера: слева скрепка (файл) и микрофон (голос),
-         по центру поле, справа отправка. Превью вложения (миниатюра картинки /
-         иконка документа с «Открыть» / плеер голоса) рисует reply.js над полем,
-         чтобы можно было УДОСТОВЕРИТЬСЯ перед отправкой. Всё поведение в reply.js
-         (CSP запрещает inline-JS). Голос пишется MediaRecorder'ом и кладётся в
-         скрытый #rec-file (name="voice"); файл — в #reply-file (name="file"). #}
+      {# Композер в стиле мессенджера: слева скрепка (добавить файлы) и микрофон
+         (записать голос), по центру поле, справа отправка. Превью списком чипов над
+         полем (миниатюра картинки / иконка документа с «Открыть» / плеер голоса —
+         УДОСТОВЕРИТЬСЯ перед отправкой), у каждого «✕». Всё поведение в reply.js
+         (CSP запрещает inline-JS): вложения копятся в #attachments (name="files")
+         через DataTransfer, голос пишется MediaRecorder'ом и добавляется в тот же список. #}
       <form class="composer-form" method="post" action="/leads/{{ lead.id }}/reply"
             enctype="multipart/form-data" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -195,8 +194,13 @@
         </div>
 
         {# Скрытые инпуты вложения: файл и записанный голос. reply.js кладёт в них. #}
-        <input type="file" id="reply-file" name="file" accept="{{ accept_attr }}" hidden>
-        <input type="file" id="rec-file" name="voice" hidden>
+        {# Транзитный пикер (без name — не сабмитится): «+» открывает его, reply.js
+           добавляет выбранные файлы в общий список. #attachments (name="files",
+           multiple) — РЕАЛЬНЫЙ сабмитный инпут: reply.js держит в нём весь список
+           вложений (файлы + запись голоса) через DataTransfer. Бэкенд читает files[]
+           и классифицирует каждый по MIME (audio→voice). #}
+        <input type="file" id="file-picker" accept="{{ accept_attr }}" multiple hidden>
+        <input type="file" id="attachments" name="files" multiple hidden>
       </form>
       {% else %}
       <p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>

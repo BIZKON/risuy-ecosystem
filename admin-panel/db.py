@@ -515,23 +515,27 @@ async def enqueue_manual_reply(
     actor: str,
     ip: str | None,
     user_agent: str | None,
-    kind: str = "text",
-    file_bytes: bytes | None = None,
-    file_name: str | None = None,
-    file_mime: str | None = None,
+    attachments: list[dict] | None = None,
 ) -> int | None:
-    """Поставить ручной ответ в outbox. None, если лид не найден или без tg_user_id.
+    """Поставить ручной ответ в outbox. None, если лид не найден / без tg_user_id / пусто.
 
-    Адресность (есть tg_user_id) проверяем здесь; повторный re-check + erase-фильтр
-    делает бот перед отправкой (§5.10). Текст в аудит НЕ пишем — только длину.
+    Ответ может нести ТЕКСТ и/или НЕСКОЛЬКО вложений (файлы + голос). Telegram шлёт
+    каждое вложение ОТДЕЛЬНЫМ сообщением (документ+голос не комбинируются), поэтому
+    кладём по строке outbox на «кусок»: сначала текстовая строка (если есть текст),
+    затем по строке на каждое вложение в порядке списка (порядок отправки = возрастание
+    outbox.id). Текст ОТДЕЛЬНОЙ строкой, а не подписью к файлу — чтобы длинный текст не
+    резался лимитом caption (1024) и порядок был предсказуем.
 
-    Вложение (план «reply-attach»): при file_bytes кладём байты + имя/MIME и явный kind
-    ('photo'|'document'|'voice'|'audio') — паттерн продуктовой заливки (products.file →
-    бот зальёт в OPS_CHAT_ID и проставит outbox.file_id). Колонку file_id панель НЕ
-    пишет: его проставит БОТ после заливки (как у продуктов). kind ставит ХЕНДЛЕР явно
-    (по MIME) — без файла остаётся 'text' (поведение как раньше). Аудит — БЕЗ байтов:
-    только len текста, факт файла и kind.
+    attachments = [{"kind","bytes","name","mime"}, …]; kind ('photo'|'document'|'voice'|
+    'audio') проставил хендлер по подтверждённому magic-byte MIME. Байты кладёт панель;
+    file_id проставит БОТ после заливки в OPS_CHAT_ID (как у продуктов). Адресность
+    (tg_user_id) проверяем здесь; erase-фильтр + re-check бот делает перед отправкой
+    (§5.10). Аудит — БЕЗ байтов и текста: только len текста и виды вложений. Возвращает
+    число поставленных строк (≥1) или None если лиду нельзя написать / нечего слать.
     """
+    attachments = attachments or []
+    if not text and not attachments:
+        return None
     async with pool.acquire() as c:
         async with c.transaction():
             lead = await c.fetchrow(
@@ -539,24 +543,33 @@ async def enqueue_manual_reply(
             )
             if lead is None or lead["tg_user_id"] is None:
                 return None  # нет лида/адреса → ничего не ставим (бот всё равно не отправит)
-            outbox_id = await c.fetchval(
-                """
-                insert into outbox
-                    (lead_id, tg_user_id, kind, text, status, created_by,
-                     file_bytes, file_name, file_mime)
-                values ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)
-                returning id
-                """,
-                lead_id, lead["tg_user_id"], kind, text, actor,
-                file_bytes, file_name, file_mime,
-            )
+            tg = lead["tg_user_id"]
+            count = 0
+            if text:
+                await c.execute(
+                    "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by) "
+                    "values ($1, $2, 'text', $3, 'queued', $4)",
+                    lead_id, tg, text, actor,
+                )
+                count += 1
+            for a in attachments:
+                await c.execute(
+                    """
+                    insert into outbox
+                        (lead_id, tg_user_id, kind, text, status, created_by,
+                         file_bytes, file_name, file_mime)
+                    values ($1, $2, $3, null, 'queued', $4, $5, $6, $7)
+                    """,
+                    lead_id, tg, a["kind"], actor, a["bytes"], a["name"], a["mime"],
+                )
+                count += 1
             await _insert_audit(
                 c, actor=actor, action="manual_reply", lead_id=lead_id,
                 ip=ip, user_agent=user_agent,
-                detail={"outbox_id": int(outbox_id), "len": len(text),
-                        "has_file": bool(file_bytes), "kind": kind},
+                detail={"rows": count, "len": len(text or ""),
+                        "attachments": [a["kind"] for a in attachments]},
             )
-            return int(outbox_id)
+            return count
 
 
 # =========================================================================== #

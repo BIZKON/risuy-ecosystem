@@ -1,14 +1,13 @@
-// Композер ответа лиду: вложение файла + запись голоса + ПРЕВЬЮ до отправки.
+// Композер ответа лиду: НЕСКОЛЬКО вложений (файлы + голос) + превью списком до отправки.
 //
-// CSP запрещает inline-JS (script-src 'self') — всё поведение здесь, у элементов
-// шаблона стабильные id. Скрытые инпуты: #reply-file (name="file", выбранный файл)
-// и #rec-file (name="voice", запись MediaRecorder через DataTransfer). Бэкенд
-// распознаёт voice как голос (kind='voice'); один и тот же multipart-submit, тот же
-// CSRF-токен. Превью (миниатюра картинки / иконка документа с «Открыть» / плеер
-// голоса) рисуем в #composer-preview — blob: URL разрешён в CSP media-src/img-src,
-// поэтому запись можно ПЕРЕСЛУШАТЬ, а документ ОТКРЫТЬ ещё до отправки.
-//
-// Взаимоисключение: ответ несёт ОДНО вложение — выбор файла стирает запись и наоборот.
+// CSP запрещает inline-JS (script-src 'self') — всё поведение здесь. Вложения копятся в
+// JS-массиве `selected` (File[]) и зеркалятся в #attachments (name="files", multiple)
+// через DataTransfer; уходят обычным multipart-submit с тем же CSRF-токеном. Голос
+// пишется MediaRecorder'ом и ДОБАВЛЯЕТСЯ в тот же список (взаимоисключения с файлом нет).
+// Превью — список чипов в #composer-preview: миниатюра картинки / иконка документа с
+// «Открыть» / <audio controls> голоса (blob: разрешён в CSP media-src/img-src), у каждого
+// «✕ убрать». Бэкенд читает files[], классифицирует каждый по MIME (audio/* → voice) и
+// кладёт по строке outbox на каждое вложение (Telegram шлёт их отдельными сообщениями).
 (function () {
   "use strict";
 
@@ -16,134 +15,123 @@
   var form = composer && composer.closest("form");
   if (!composer || !form) return;
 
-  var attachBtn = document.getElementById("attach-btn");
-  var fileInput = document.getElementById("reply-file");  // name="file"
-  var recFile   = document.getElementById("rec-file");    // name="voice"
-  var recToggle = document.getElementById("rec-toggle");
-  var status    = document.getElementById("rec-status");
-  var preview   = document.getElementById("composer-preview");
-  var textarea  = document.getElementById("reply-text");
+  var attachBtn   = document.getElementById("attach-btn");
+  var picker      = document.getElementById("file-picker");   // транзитный (без name) — для выбора
+  var attachInput = document.getElementById("attachments");   // name="files" — реальный сабмитный
+  var recToggle   = document.getElementById("rec-toggle");
+  var status      = document.getElementById("rec-status");
+  var preview     = document.getElementById("composer-preview");
+  var textarea    = document.getElementById("reply-text");
 
-  // ── Управление blob: URL (освобождаем прошлый, чтобы не течь) ──────────────
-  var currentURL = null;
-  function setURL(u) {
-    if (currentURL) { try { URL.revokeObjectURL(currentURL); } catch (e) {} }
-    currentURL = u || null;
-    return currentURL;
-  }
-  function clearPreview() {
-    if (preview) { preview.textContent = ""; preview.hidden = true; }
-    setURL(null);
-  }
-  function resetAttachment(which) {            // 'all' | 'file' | 'voice'
-    if (which !== "voice" && fileInput) { try { fileInput.value = ""; } catch (e) {} }
-    if (which !== "file"  && recFile)   { try { recFile.value = ""; } catch (e) {} }
-    clearPreview();
-    if (status) status.textContent = "";
-  }
+  var MAX_FILES = 10;     // UX-потолок (авторитетный кэп — на бэкенде)
+  var selected = [];      // File[]
+  var chipURLs = [];      // blob: URL текущих чипов (revoke при rebuild)
 
-  // ── Хелперы DOM (textContent для имён файлов — без HTML-инъекций) ──────────
   function el(tag, cls, text) {
     var n = document.createElement(tag);
     if (cls) n.className = cls;
-    if (text != null) n.textContent = text;
+    if (text != null) n.textContent = text;   // textContent: имена файлов без HTML-инъекций
     return n;
   }
   function fmtSize(b) { return (b / 1024 / 1024).toFixed(2) + " МБ"; }
-  function removeBtn(onClick) {
-    var b = el("button", "chip-btn chip-btn--danger", "✕");
-    b.type = "button"; b.title = "Убрать вложение";
-    b.setAttribute("aria-label", "Убрать вложение");
-    b.addEventListener("click", onClick);
-    return b;
+
+  // Зеркалим selected → реальный сабмитный инпут files[] через DataTransfer.
+  function syncInput() {
+    try {
+      var dt = new DataTransfer();
+      selected.forEach(function (f) { dt.items.add(f); });
+      if (attachInput) attachInput.files = dt.files;
+    } catch (e) { /* очень старый браузер без присваивания input.files — без мультивложений */ }
+  }
+  function clearURLs() {
+    chipURLs.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) {} });
+    chipURLs = [];
   }
 
-  // ── Превью выбранного файла: миниатюра картинки / иконка документа + «Открыть» ──
-  function showFilePreview(file) {
-    if (!preview) return;
-    clearPreview();
-    var url = setURL(URL.createObjectURL(file));
+  function chipFor(file, index) {
+    var url = URL.createObjectURL(file); chipURLs.push(url);
     var isImg = (file.type || "").indexOf("image/") === 0;
+    var isAudio = (file.type || "").indexOf("audio/") === 0;
+    var row = el("div", isAudio ? "attach-audio" : "attach-chip");
 
-    var chip = el("div", "attach-chip");
-    var thumb = el("span", "attach-chip__thumb");
-    if (isImg) { var img = el("img"); img.src = url; img.alt = ""; thumb.appendChild(img); }
-    else { thumb.textContent = "📄"; }  // 📄
-    chip.appendChild(thumb);
-
-    var body = el("div", "attach-chip__body");
-    body.appendChild(el("span", "attach-chip__name", file.name));
-    body.appendChild(el("span", "attach-chip__meta", fmtSize(file.size)));
-    chip.appendChild(body);
-
-    var actions = el("div", "attach-chip__actions");
-    var open = el("button", "chip-btn", "Открыть");
-    open.type = "button"; open.title = "Открыть в новой вкладке";
-    open.addEventListener("click", function () { window.open(url, "_blank", "noopener"); });
-    actions.appendChild(open);
-    actions.appendChild(removeBtn(function () { resetAttachment("file"); }));
-    chip.appendChild(actions);
-
-    preview.appendChild(chip);
-    preview.hidden = false;
+    if (isAudio) {
+      var audio = el("audio"); audio.controls = true; audio.src = url; audio.preload = "metadata";
+      row.appendChild(audio);
+      row.appendChild(el("span", "attach-chip__meta", "Голос · " + fmtSize(file.size)));
+    } else {
+      var thumb = el("span", "attach-chip__thumb");
+      if (isImg) { var img = el("img"); img.src = url; img.alt = ""; thumb.appendChild(img); }
+      else thumb.textContent = "📄";
+      row.appendChild(thumb);
+      var body = el("div", "attach-chip__body");
+      body.appendChild(el("span", "attach-chip__name", file.name));
+      body.appendChild(el("span", "attach-chip__meta", fmtSize(file.size)));
+      row.appendChild(body);
+      var open = el("button", "chip-btn", "Открыть");
+      open.type = "button"; open.title = "Открыть в новой вкладке";
+      open.addEventListener("click", function () { window.open(url, "_blank", "noopener"); });
+      row.appendChild(open);
+    }
+    var rm = el("button", "chip-btn chip-btn--danger", "✕");
+    rm.type = "button"; rm.title = "Убрать"; rm.setAttribute("aria-label", "Убрать вложение");
+    rm.addEventListener("click", function () { selected.splice(index, 1); rebuild(); });
+    row.appendChild(rm);
+    return row;
   }
 
-  // ── Превью записанного голоса: плеер (переслушать) + длительность + убрать ──
-  function showVoicePreview(blob, seconds) {
+  function rebuild() {
+    syncInput();
     if (!preview) return;
-    clearPreview();
-    var url = setURL(URL.createObjectURL(blob));
-    var box = el("div", "attach-audio");
-    var audio = el("audio");
-    audio.controls = true; audio.src = url; audio.preload = "metadata";
-    box.appendChild(audio);
-    box.appendChild(el("span", "attach-chip__meta", "Голос" + (seconds ? " · " + seconds + " c" : "")));
-    box.appendChild(removeBtn(function () { resetAttachment("voice"); }));
-    preview.appendChild(box);
+    clearURLs();
+    preview.textContent = "";
+    if (!selected.length) { preview.hidden = true; return; }
+    selected.forEach(function (f, i) { preview.appendChild(chipFor(f, i)); });
     preview.hidden = false;
   }
 
-  // ── Вложение файла (скрепка открывает скрытый file-input) ─────────────────
-  if (attachBtn && fileInput) {
-    attachBtn.addEventListener("click", function () { fileInput.click(); });
-    fileInput.addEventListener("change", function () {
-      var f = fileInput.files && fileInput.files[0];
-      if (!f) return;
-      if (recFile) { try { recFile.value = ""; } catch (e) {} }  // взаимоисключение с голосом
-      showFilePreview(f);
+  function addFiles(list) {
+    for (var i = 0; i < list.length; i++) {
+      if (selected.length >= MAX_FILES) {
+        if (status) status.textContent = "Можно не больше " + MAX_FILES + " вложений в одном ответе.";
+        break;
+      }
+      selected.push(list[i]);
+    }
+    rebuild();
+  }
+
+  // ── Скрепка → выбрать файлы (можно несколько раз, докидывая в список) ──────
+  if (attachBtn && picker) {
+    attachBtn.addEventListener("click", function () { picker.click(); });
+    picker.addEventListener("change", function () {
+      if (picker.files && picker.files.length) addFiles(picker.files);
+      try { picker.value = ""; } catch (e) {}   // повторный выбор того же файла снова триггерит change
     });
   }
 
-  // ── Авто-рост поля ввода (как в мессенджерах) ─────────────────────────────
+  // ── Авто-рост поля ввода ──────────────────────────────────────────────────
   if (textarea) {
     var grow = function () {
       textarea.style.height = "auto";
-      textarea.style.height = Math.min(textarea.scrollHeight, 140) + "px";
+      textarea.style.height = Math.min(textarea.scrollHeight, 168) + "px";
     };
     textarea.addEventListener("input", grow);
   }
 
-  // ── Запись голоса (MediaRecorder) ─────────────────────────────────────────
-  var hasSupport =
-    typeof window.MediaRecorder !== "undefined" &&
-    navigator.mediaDevices &&
-    typeof navigator.mediaDevices.getUserMedia === "function";
-
-  if (!recToggle || !recFile || !hasSupport) {
-    if (recToggle && !hasSupport) recToggle.hidden = true;  // нет записи в браузере — прячем микрофон
-    return;                                                  // текст и файл всё равно работают
-  }
+  // ── Запись голоса → ДОБАВЛЯЕТСЯ в список вложений ──────────────────────────
+  var hasSupport = typeof window.MediaRecorder !== "undefined" &&
+    navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function";
+  if (!recToggle || !hasSupport) { if (recToggle && !hasSupport) recToggle.hidden = true; return; }
 
   var maxSec = parseInt(composer.getAttribute("data-max-sec"), 10);
   if (!(maxSec > 0)) maxSec = 120;
-
   var recorder = null, stream = null, chunks = [], tickTimer = null, stopTimer = null, startedAt = 0;
 
   function pickMime() {
     var c = ["audio/ogg;codecs=opus", "audio/webm;codecs=opus"];
     if (typeof MediaRecorder.isTypeSupported === "function")
       for (var i = 0; i < c.length; i++) if (MediaRecorder.isTypeSupported(c[i])) return c[i];
-    return "";  // дефолт браузера (Safari → audio/mp4)
+    return "";
   }
   function extForMime(m) {
     if (m.indexOf("ogg") > -1) return "ogg";
@@ -162,21 +150,8 @@
     recToggle.title = on ? "Остановить запись (идёт запись)" : "Записать голос";
   }
 
-  function attachBlob(blob, mime, seconds) {
-    var file = new File([blob], "voice." + extForMime(mime), { type: mime || "audio/ogg" });
-    try {
-      var dt = new DataTransfer();
-      dt.items.add(file);
-      recFile.files = dt.files;
-    } catch (e) {
-      status.textContent = "Запись не поддержана этим браузером.";
-      return;
-    }
-    if (fileInput) { try { fileInput.value = ""; } catch (e) {} }  // взаимоисключение с файлом
-    showVoicePreview(blob, seconds);
-  }
-
   function start() {
+    if (selected.length >= MAX_FILES) { status.textContent = "Можно не больше " + MAX_FILES + " вложений."; return; }
     status.textContent = "Запрашиваю доступ к микрофону…";
     navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
       stream = s; chunks = [];
@@ -191,10 +166,10 @@
         clearTimers(); release(); setRecUI(false);
         var type = recorder.mimeType || mime || "audio/ogg";
         var blob = new Blob(chunks, { type: type }); chunks = [];
-        var secs = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
         if (blob.size === 0) { status.textContent = "Пустая запись — попробуйте ещё раз."; return; }
-        attachBlob(blob, type, secs);
-        status.textContent = "Голос записан — можно переслушать. Уйдёт при «Отправить».";
+        selected.push(new File([blob], "voice." + extForMime(type), { type: type }));
+        rebuild();
+        status.textContent = "Голос добавлен — можно переслушать. Уйдёт при «Отправить».";
       });
 
       recorder.start(); startedAt = Date.now(); setRecUI(true);
@@ -219,7 +194,7 @@
 
   recToggle.addEventListener("click", function () {
     if (recorder && recorder.state === "recording") stop();
-    else { resetAttachment("all"); start(); }  // новая запись затирает прошлое вложение
+    else start();
   });
   window.addEventListener("beforeunload", function () { clearTimers(); release(); });
 })();
