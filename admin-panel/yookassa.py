@@ -90,9 +90,17 @@ async def create_payment(
         "description": description[:128],
         "metadata": metadata or {},
     }
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _request, "POST", "/payments", body=body, idempotence_key=idempotence_key
     )
+    # --- ВРЕМЕННЫЙ DEBUG: что вернула ЮKassa (есть ли confirmation_url для редиректа) ---
+    import logging as _lg2
+    _conf = (result.get("confirmation") or {})
+    _lg2.getLogger("admin-panel").warning(
+        "YK-DEBUG2 resp id=%s status=%s paid=%s conf_keys=%s url=%r return_url=%r",
+        result.get("id"), result.get("status"), result.get("paid"),
+        list(_conf.keys()), _conf.get("confirmation_url"), return_url)
+    return result
 
 
 async def get_payment(payment_id: str) -> dict:
