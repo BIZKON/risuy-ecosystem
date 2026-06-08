@@ -719,10 +719,10 @@ select.field__input {
   50%      { box-shadow: 0 0 0 6px rgba(194, 59, 59, 0); }
 }
 .composer__input {
-  flex: 1 1 auto; min-width: 0; align-self: center;
+  flex: 1 1 auto; min-width: 0;
   border: none; background: transparent; resize: none;
-  font: inherit; color: var(--ink); line-height: 1.45;
-  padding: 8px 4px; max-height: 140px; overflow-y: auto;
+  font: inherit; font-size: 15px; color: var(--ink); line-height: 1.5;
+  padding: 10px 8px; min-height: 26px; max-height: 168px; overflow-y: auto;
 }
 .composer__input:focus { outline: none; }
 .composer__input::placeholder { color: var(--ink-faint); }

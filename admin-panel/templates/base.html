@@ -10,7 +10,7 @@
   <meta name="referrer" content="no-referrer">
   <title>{% block title %}Лиды{% endblock %} · Школа Лесова</title>
   {% block head_extra %}{% endblock %}
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
   {% block chrome %}

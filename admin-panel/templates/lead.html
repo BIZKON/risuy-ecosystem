@@ -10,8 +10,8 @@
    текст в форме ответа. Теперь /static/thread.js точечно обновляет #thread-box
    через GET /leads/{id}/thread; поле ввода вне этой области и не сбрасывается.
    Без JS — ручная кнопка «Обновить» (script-src 'self' разрешает /static/*). #}
-{% block head_extra %}<script src="/static/thread.js" defer></script>
-<script src="/static/reply.js" defer></script>{% endblock %}
+{% block head_extra %}<script src="/static/thread.js?v={{ asset_version }}" defer></script>
+<script src="/static/reply.js?v={{ asset_version }}" defer></script>{% endblock %}
 
 {% block content %}
 <nav class="crumbs" aria-label="Хлебные крошки">
@@ -168,13 +168,10 @@
             </button>
             <button class="composer__icon composer__icon--mic" type="button" id="rec-toggle"
                     title="Записать голос" aria-label="Записать голос">
-              <svg class="ic-mic" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
                    stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="9" y="2" width="6" height="11" rx="3"/>
                 <path d="M5 10a7 7 0 0 0 14 0M12 17v4"/>
-              </svg>
-              <svg class="ic-stop" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true" hidden>
-                <rect x="5" y="5" width="14" height="14" rx="3"/>
               </svg>
             </button>
           </div>

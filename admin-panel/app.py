@@ -97,6 +97,27 @@ app.add_middleware(
 templates = Jinja2Templates(directory="templates")
 # Шаблоны строго экранируют HTML (autoescape по умолчанию в Jinja2Templates).
 
+
+def _static_version() -> str:
+    """Версия статики для cache-busting (?v=…). Макс. mtime файлов в static/ —
+    меняется при каждом деплое (файлы пересобираются в образе), поэтому браузер
+    гарантированно тянет СВЕЖИЕ styles.css/reply.js/thread.js, а не закэшированные
+    (без этого после правок JS/CSS оператор видел бы старую версию: мёртвые кнопки,
+    несвёрстанный композер). Считаем один раз на старте процесса."""
+    import os
+    latest = 0.0
+    for root, _dirs, files in os.walk("static"):
+        for f in files:
+            try:
+                latest = max(latest, os.path.getmtime(os.path.join(root, f)))
+            except OSError:
+                pass
+    return str(int(latest))
+
+
+# Глобал шаблонов: доступен во ВСЕХ шаблонах как {{ asset_version }} без правки контекстов.
+templates.env.globals["asset_version"] = _static_version()
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

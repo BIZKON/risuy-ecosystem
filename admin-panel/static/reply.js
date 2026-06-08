@@ -129,9 +129,6 @@
     navigator.mediaDevices &&
     typeof navigator.mediaDevices.getUserMedia === "function";
 
-  var icMic = recToggle ? recToggle.querySelector(".ic-mic") : null;
-  var icStop = recToggle ? recToggle.querySelector(".ic-stop") : null;
-
   if (!recToggle || !recFile || !hasSupport) {
     if (recToggle && !hasSupport) recToggle.hidden = true;  // нет записи в браузере — прячем микрофон
     return;                                                  // текст и файл всё равно работают
@@ -162,9 +159,7 @@
   function release() { if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; } }
   function setRecUI(on) {
     composer.classList.toggle("is-recording", on);
-    recToggle.title = on ? "Остановить запись" : "Записать голос";
-    if (icMic) icMic.hidden = on;
-    if (icStop) icStop.hidden = !on;
+    recToggle.title = on ? "Остановить запись (идёт запись)" : "Записать голос";
   }
 
   function attachBlob(blob, mime, seconds) {
