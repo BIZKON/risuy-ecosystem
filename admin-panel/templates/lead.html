@@ -5,9 +5,12 @@
 {% block title %}Лид · {{ lead.name|e if lead.name else 'без имени' }}{% endblock %}
 {% block body_class %}page-lead{% endblock %}
 
-{# Авто-обновление треда без JS (CSP запрещает inline-script): перезагрузка карточки
-   раз в N секунд. Якорь #thread удерживает позицию на переписке после рефреша. #}
-{% block head_extra %}<meta http-equiv="refresh" content="{{ refresh_sec|default(15, true) }}; url=#thread">{% endblock %}
+{# Авто-обновление ТОЛЬКО ленты сообщений (не всей страницы). Прежний
+   <meta http-equiv="refresh"> перезагружал карточку целиком и СТИРАЛ набираемый
+   текст в форме ответа. Теперь /static/thread.js точечно обновляет #thread-box
+   через GET /leads/{id}/thread; поле ввода вне этой области и не сбрасывается.
+   Без JS — ручная кнопка «Обновить» (script-src 'self' разрешает /static/*). #}
+{% block head_extra %}<script src="/static/thread.js" defer></script>{% endblock %}
 
 {% block content %}
 <nav class="crumbs" aria-label="Хлебные крошки">
@@ -125,7 +128,12 @@
       <p class="hint hint--block">Бот в режиме «Авто»: он сам отвечает (Лия + прогрев). Ваш ответ уйдёт <b>в дополнение</b> к боту — чтобы вести диалог только руками, нажмите «На ручное».</p>
       {% endif %}
 
-      {{ thread_list(thread) }}
+      {# Лента обновляется точечно через /static/thread.js (data-* атрибуты), без
+         перезагрузки страницы — поле ответа НИЖЕ при этом не сбрасывается. #}
+      <div id="thread-box" data-thread-url="/leads/{{ lead.id }}/thread"
+           data-refresh="{{ refresh_sec|default(15, true) }}">
+        {{ thread_list(thread) }}
+      </div>
 
       {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот. #}
       {% if lead.tg_user_id is not none %}
