@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Базы знаний{% endblock %}
+{% block body_class %}page-knowledge{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Базы знаний — обучение Лии</h1>
+  <p class="page-head__hint">Главный рычаг обучения — <b>системный промпт</b> агента: впишите курсы, цены, расписание, правила и тон. Лия (ИИ-Агент Про) отвечает строго по нему. Это бесплатно и применяется сразу. Большие объёмы — через базы знаний (RAG, ниже).</p>
+</div>
+
+{% if saved %}{{ flash('Промпт агента обновлён. Лия учтёт его со следующего ответа.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+{% if tw_error %}{{ flash('Не удалось получить данные из ИИ-сервиса. Проверьте токен ИИ в окружении панели и повторите.', 'error') }}{% endif %}
+
+{% if not tw_enabled %}
+{# ── Нет токена управления → как включить ── #}
+<section class="card" aria-label="Подключение управления">
+  <h2 class="card__title">Управление агентом не подключено</h2>
+  <p class="card__note">Чтобы править промпт и видеть базы знаний прямо отсюда, панели нужен токен ИИ-сервиса (тот же, под которым бот вызывает агента).</p>
+  <p class="hint hint--block">Добавьте токен ИИ-сервиса в окружение <b>панели</b> скриптом деплоя (не через веб-UI). ⚠️ Это токен с полным доступом: лучше завести отдельный ключ и ротировать его.</p>
+</section>
+{% else %}
+
+{# ── Агенты: редактирование системного промпта ── #}
+{% if agents %}
+{% for a in agents %}
+<section class="card" aria-label="Агент {{ a.name|e }}">
+  <h2 class="card__title">
+    {{ a.name|e }}
+    <span class="pill pill--ok">{{ a.model|e }}</span>
+    {% if a.status == 'active' %}<span class="pill pill--ok">active</span>{% else %}<span class="pill pill--muted">{{ a.status|e }}</span>{% endif %}
+    {% if a.web_search %}<span class="pill">веб-поиск</span>{% endif %}
+  </h2>
+  <p class="card__note muted">
+    id {{ a.id }} · access …{{ a.access_tail|e }} ·
+    баз знаний: {{ a.kb_count }} ·
+    использовано токенов: {{ a.used_tokens if a.used_tokens is not none else '—' }}
+  </p>
+
+  <form method="post" action="/knowledge/prompt" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="agent_id" value="{{ a.id }}">
+    <label class="field">
+      <span class="field__label">Системный промпт <span class="field__hint">чему учим Лию</span></span>
+      <textarea class="field__input field__textarea field__textarea--lg" name="prompt"
+                maxlength="{{ prompt_max }}" rows="14"
+                placeholder="Ты — Лия, ассистент школы… Курсы: … Цены: … Расписание: … Правила: не выдумывай факты…">{{ a.prompt }}</textarea>
+    </label>
+    <p class="hint hint--block">Пишите конкретику: точные названия курсов, цены, дни/часы занятий, как записаться, что нельзя обещать. До {{ prompt_max }} символов. Меняется без редеплоя — Лия применит со следующего сообщения.</p>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Сохранить промпт</button>
+    </div>
+  </form>
+</section>
+{% endfor %}
+{% else %}
+<div class="empty">
+  <p class="empty__title">Агентов нет</p>
+  <p class="empty__text">Создайте cloud-ai агента (в разделе «ИИ-агенты» / по запросу) — здесь появится редактор его промпта.</p>
+</div>
+{% endif %}
+
+{# ── Базы знаний (RAG) — статус + честно про цену ── #}
+<section class="section" aria-label="Базы знаний">
+  <h2 class="section__title section__title--lg">Базы знаний (RAG)</h2>
+  {% if knowledge_bases %}
+  <ul class="kb-list">
+    {% for kb in knowledge_bases %}
+    <li class="card">
+      <strong>{{ kb.name|e if kb.name else ('KB #' ~ kb.id) }}</strong>
+      <span class="pill {% if kb.status == 'active' %}pill--ok{% else %}pill--muted{% endif %}">{{ kb.status|e if kb.status else '—' }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Баз знаний пока нет</p>
+    <p class="empty__text">Лия учится промптом выше — для школы этого обычно достаточно. База знаний нужна при больших объёмах документов и создаётся отдельно: каждая = <b>платная управляемая векторная БД</b> (~500 ₽/мес+) + пакет токенов на эмбеддинги. Скажите — заведу (платно).</p>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

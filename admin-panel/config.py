@@ -342,24 +342,37 @@ AI_ACTIVITY_WINDOW_DAYS = _opt_int("AI_ACTIVITY_WINDOW_DAYS", 30)  # окно м
 # Бэкенд ИИ: какой движок отвечает клиентам.
 #  • cloud_ai — агент Timeweb (Лия): нативный /call по AGENT_ID, есть RAG/MCP, контекст
 #    хранится на сервере (parent_message_id). Системный промпт настраивается на агенте.
-#  • gateway  — Timeweb AI Gateway: ПРЯМАЯ работа с моделью (DeepSeek и др.) по OpenAI-
+#  • gateway  — Timeweb AI Gateway: ПРЯМАЯ работа с моделью по OpenAI-
 #    совместимому /v1/chat/completions, БЕЗ агента/RAG. Системный промпт задаётся здесь.
 #    Ключ Gateway (отдельный, не аккаунт-токен) — ТОЛЬКО в env бота (AI_GATEWAY_TOKEN).
 AI_BACKEND_SETTING_KEY = "ai_backend"               # "cloud_ai" | "gateway"
-AI_MODEL_SETTING_KEY = "ai_model"                   # ID модели для gateway, напр. deepseek-v4-pro
+AI_MODEL_SETTING_KEY = "ai_model"                   # ID модели для gateway (из вашего AI Gateway)
 AI_GATEWAY_URL_SETTING_KEY = "ai_gateway_base_url"  # base URL OpenAI-совместимого шлюза
 AI_SYSTEM_PROMPT_SETTING_KEY = "ai_system_prompt"   # системный промпт (работает для gateway)
 
+# Белый ярлык движка для КЛИЕНТА — школа не должна знать конкретную модель «под капотом».
+# Везде в UI показываем это имя; реальная модель остаётся в API/env (model_id у провайдера).
+AI_BRAND_MODEL = "ИИ-Агент Про"
 AI_BACKENDS = {
-    "cloud_ai": "Агент Timeweb (Лия)",
-    "gateway": "AI Gateway · DeepSeek",
+    "cloud_ai": "Агент (Лия)",
+    "gateway": f"{AI_BRAND_MODEL} (прямой)",
 }
 AI_BACKEND_ORDER = ("cloud_ai", "gateway")
 AI_DEFAULT_BACKEND = "cloud_ai"   # дефолт сохраняет текущее поведение (бот жив)
-# Дефолты gateway. Точный base URL и ID моделей — из ЛК AI Gateway (вкладки «API-ключи»/модели);
-# «DeepSeek V4 Pro» обычно deepseek-v4-pro. Меняется в панели без редеплоя.
-AI_DEFAULT_GATEWAY_URL = "https://api.timeweb.ai/v1"
-AI_DEFAULT_MODEL = "deepseek-v4-pro"
+# Дефолты gateway. base URL и ID модели — из вашего AI Gateway; задаётся в панели без редеплоя.
+AI_DEFAULT_GATEWAY_URL = ""   # white-label: адрес платформы в UI не показываем (бот знает дефолт сам)
+AI_DEFAULT_MODEL = ""   # пусто → поле модели не пред-заполняем (white-label: не светим модель)
 AI_MODEL_MAX = 100
 AI_GATEWAY_URL_MAX = 300
 AI_SYSTEM_PROMPT_MAX = 4000
+
+# ── Управление cloud-ai АГЕНТОМ из панели (раздел «Базы знаний» = обучение Лии) ──
+# Панель ходит в Timeweb API под АККАУНТ-токеном (тем же, что у бота для вызова агента),
+# чтобы читать/править системный промпт агента и видеть базы знаний. Секрет — ТОЛЬКО env
+# панели (TIMEWEB_AI_TOKEN). Нет токена → раздел показывает подсказку, как его добавить.
+TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
+TIMEWEB_API_BASE = os.environ.get("TIMEWEB_API_BASE", "https://api.timeweb.cloud/api/v1")
+TIMEWEB_AI_ENABLED = bool(TIMEWEB_AI_TOKEN)
+# Промпт агента — главный рычаг «обучения» (курсы/цены/расписание/правила). Контекст
+# модели огромный, поэтому потолок щедрый (в отличие от gateway-фолбэка на 4000).
+AI_AGENT_PROMPT_MAX = _opt_int("AI_AGENT_PROMPT_MAX", 20000)

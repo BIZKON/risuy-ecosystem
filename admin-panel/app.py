@@ -36,6 +36,7 @@ import auth
 import config
 import db
 import security
+import timeweb_ai
 import yookassa
 
 
@@ -2366,10 +2367,10 @@ def _present_liya_msg(r) -> dict:
 def _agents_err_text(err: str | None) -> str | None:
     return {
         "bad_agent_id": "ID агента содержит пробелы или непечатаемые символы. "
-                        "Скопируйте его из консоли Timeweb без правок.",
+                        "Скопируйте его из админки провайдера без правок.",
         "bad_backend": "Неизвестный бэкенд ИИ.",
         "bad_model": "ID модели содержит пробелы или непечатаемые символы. "
-                     "Возьмите его из списка моделей AI Gateway (напр. deepseek-v4-pro).",
+                     "Возьмите его из списка моделей вашего шлюза.",
         "bad_gateway_url": "Базовый URL шлюза должен начинаться с http:// или https:// и "
                            "не содержать пробелов (напр. https://api.timeweb.ai/v1).",
     }.get(err or "")
@@ -2461,6 +2462,99 @@ async def agents_save(
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/agents?saved=1", status_code=303)
+
+
+# =========================================================================== #
+# Раздел «Базы знаний» (/knowledge) — ОБУЧЕНИЕ Лии: правка системного промпта ЖИВОГО
+# cloud-ai агента (главный бесплатный рычаг) + статус баз знаний (RAG, платная вектор-БД).
+# Панель ходит в Timeweb API под аккаунт-токеном (config.TIMEWEB_AI_TOKEN, env панели).
+# Нет токена → раздел показывает подсказку. Базы знаний здесь НЕ провижионим (платно).
+# =========================================================================== #
+def _present_agent(a: dict) -> dict:
+    settings = a.get("settings") or {}
+    aid_full = a.get("access_id") or ""
+    return {
+        "id": a.get("id"),
+        "name": (a.get("name") or "").strip() or f"Агент {a.get('id')}",
+        # White-label: клиент видит брендовое имя движка, а не реальную модель «под капотом».
+        "model": config.AI_BRAND_MODEL,
+        "status": a.get("status"),
+        "prompt": settings.get("system_prompt") or "",
+        "access_tail": aid_full[-6:] if aid_full else "—",
+        "kb_count": len(a.get("knowledge_bases_ids") or []),
+        "web_search": bool(a.get("is_web_search_enabled")),
+        "used_tokens": a.get("used_tokens"),
+    }
+
+
+def _knowledge_err_text(err: str | None) -> str | None:
+    return {
+        "tw": "Не удалось обратиться к ИИ-сервису. Проверьте токен ИИ в окружении панели и повторите.",
+        "no_agent": "Агент не найден.",
+        "empty": "Системный промпт не может быть пустым.",
+    }.get(err or "")
+
+
+@app.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    err: str | None = None,
+):
+    agents, kbs, tw_error = [], [], False
+    if config.TIMEWEB_AI_ENABLED:
+        try:
+            raw_agents = await timeweb_ai.list_agents()
+            agents = [_present_agent(a) for a in raw_agents]
+            kbs = await timeweb_ai.list_knowledge_bases()
+        except timeweb_ai.TimewebAIError:
+            tw_error = True
+    return templates.TemplateResponse(
+        request,
+        "knowledge.html",
+        {
+            "tw_enabled": config.TIMEWEB_AI_ENABLED,
+            "tw_error": tw_error,
+            "agents": agents,
+            "knowledge_bases": kbs,
+            "prompt_max": config.AI_AGENT_PROMPT_MAX,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "knowledge",
+            "saved": bool(saved),
+            "err": _knowledge_err_text(err),
+        },
+    )
+
+
+@app.post("/knowledge/prompt")
+async def knowledge_set_prompt(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    agent_id: str = Form(""),
+    prompt: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    agent_id = agent_id.strip()
+    prompt = prompt.strip()[: config.AI_AGENT_PROMPT_MAX]
+    if not agent_id.isdigit():
+        return RedirectResponse(url="/knowledge?err=no_agent", status_code=303)
+    if not prompt:
+        return RedirectResponse(url="/knowledge?err=empty", status_code=303)
+    try:
+        await timeweb_ai.set_system_prompt(int(agent_id), prompt)
+    except timeweb_ai.TimewebAIError:
+        import logging
+        logging.getLogger("admin-panel").exception("timeweb set_system_prompt failed")
+        return RedirectResponse(url="/knowledge?err=tw", status_code=303)
+    await db.audit(
+        actor=session.actor, action="agent_prompt_set",
+        ip=_ip(request), user_agent=_ua(request),
+        detail={"agent_id": agent_id, "prompt_len": len(prompt)},
+    )
+    return RedirectResponse(url="/knowledge?saved=1", status_code=303)
 
 
 # =========================================================================== #
