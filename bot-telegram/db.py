@@ -741,6 +741,48 @@ async def get_active_lead_magnet_product() -> dict | None:
     return prod
 
 
+# ── app_settings: настройки ИИ (бот ЧИТАЕТ; пишет панель, раздел «ИИ-агенты») ──
+_AI_SETTING_KEYS = (
+    "ai_enabled", "ai_backend", "ai_agent_id", "ai_model",
+    "ai_gateway_base_url", "ai_system_prompt", "ai_fallback_text",
+)
+_AI_BACKENDS = ("cloud_ai", "gateway")
+
+
+async def get_ai_overrides() -> dict:
+    """Настройки ИИ из app_settings ПОВЕРХ env (пишет панель). Одним запросом.
+    Отсутствие строки → дефолт: enabled=True (сохранить поведение «только env»),
+    backend='cloud_ai', agent_id='' (→ config.AGENT_ID), model/gateway_base_url='' (→
+    дефолты ai.py), system_prompt='', fallback='' (→ хардкод ai._FALLBACK). Ключи доступа
+    (TIMEWEB_AI_TOKEN / AI_GATEWAY_TOKEN) в app_settings НЕ лежат (секреты) — только env.
+    Любой сбой чтения трактуем как «нет переопределений»: ИИ не должен молчать из-за БД.
+    Логика/дефолты ДОЛЖНЫ совпадать с панелью (admin-panel/db.py::get_ai_settings)."""
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "select key, value from app_settings where key = any($1::text[])",
+                list(_AI_SETTING_KEYS),
+            )
+    except Exception as e:  # noqa: BLE001 — сбой чтения не должен ломать авто-ответ
+        logging.getLogger(__name__).warning("Не удалось прочитать настройки ИИ: %s", e)
+        return {"enabled": True, "backend": "cloud_ai", "agent_id": "", "model": "",
+                "gateway_base_url": "", "system_prompt": "", "fallback": ""}
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    enabled_raw = kv.get("ai_enabled")  # None=нет строки; ''=выключено явно
+    backend = (kv.get("ai_backend") or "").strip()
+    if backend not in _AI_BACKENDS:
+        backend = "cloud_ai"
+    return {
+        "enabled": True if enabled_raw is None else bool(enabled_raw.strip()),
+        "backend": backend,
+        "agent_id": (kv.get("ai_agent_id") or "").strip(),
+        "model": (kv.get("ai_model") or "").strip(),
+        "gateway_base_url": (kv.get("ai_gateway_base_url") or "").strip(),
+        "system_prompt": kv.get("ai_system_prompt") or "",
+        "fallback": kv.get("ai_fallback_text") or "",
+    }
+
+
 # ── Трекинг /r/<token>: чтение токена + лог клика (пишет БОТ) ─────────────────
 async def get_link_token(token: str) -> dict | None:
     """target_url + контекст по токену. None если нет. Вызывается обработчиком /r."""

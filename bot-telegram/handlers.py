@@ -195,12 +195,17 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # залогировано middleware; просто не запускаем авто-ответ.
     if await db.is_bot_paused(message.from_user.id):
         return
+    # Глобальный тумблер Лии (раздел «ИИ-агенты» панели): выключена → молчим, как при
+    # паузе (оператор ответит руками). agent_id/fallback берём поверх env из тех же настроек.
+    ai_cfg = await db.get_ai_overrides()
+    if not ai_cfg["enabled"]:
+        return
     try:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:
         pass
     data = await state.get_data()
-    answer, msg_id = await ai.ask_liya(message.text, data.get("ai_parent_id"))
+    answer, msg_id = await ai.ask_ai(message.text, data.get("ai_parent_id"), ai_cfg)
     if msg_id:
         await state.update_data(ai_parent_id=msg_id)
     # Гонка Лии (§4): ask_liya мог идти до 30с — оператор мог включить паузу за это

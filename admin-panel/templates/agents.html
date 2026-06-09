@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat_card, flash %}
+
+{% block title %}ИИ-агенты{% endblock %}
+{% block body_class %}page-agents{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">ИИ-агенты</h1>
+  <p class="page-head__hint">Лия — ИИ-ассистент: сама отвечает клиентам в свободном чате (вне воронки). Управляется отсюда <b>без перезапуска бота</b> — настройки подхватываются со следующего сообщения.</p>
+</div>
+
+{% if saved %}{{ flash('Настройки ИИ сохранены. Бот применит их со следующего сообщения.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Статус-карточки ── #}
+<div class="stats stats--funnel">
+  {{ stat_card('Авто-ответы',
+       'Включены' if ai.enabled else 'Выключены',
+       '', 'accent' if ai.enabled else 'muted') }}
+  {{ stat_card('Движок', 'DeepSeek' if ai.backend == 'gateway' else 'Лия', '', 'accent') }}
+  {{ stat_card('Ответов за ' ~ window_days ~ ' дн.', activity.recent) }}
+  {{ stat_card('Всего ответов', activity.total) }}
+  {{ stat_card('Последний ответ',
+       activity.last_at.strftime('%d.%m %H:%M') if activity.last_at else '—', '', 'muted') }}
+</div>
+
+{# ── Настройки ИИ (форма → app_settings) ── #}
+<section class="card" aria-label="Настройки ИИ">
+  <h2 class="card__title">Настройки</h2>
+  <p class="card__note">Эти параметры пишутся в общие настройки и читаются ботом поверх его окружения. Ключи доступа (токен агента и ключ AI Gateway) здесь <b>не</b> хранятся и не показываются — это секреты в окружении бота.</p>
+
+  <form method="post" action="/agents" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label class="field field--check">
+      <input type="checkbox" name="enabled" value="1"{% if ai.enabled %} checked{% endif %}>
+      <span class="field__label">ИИ отвечает автоматически</span>
+    </label>
+    <p class="hint hint--block">Если выключить — ИИ молчит, и клиентам в свободном чате отвечает оператор вручную (как при паузе диалога). Выдачу воронки это не затрагивает.</p>
+
+    <label class="field">
+      <span class="field__label">Бэкенд ИИ</span>
+      <select class="field__input" name="backend">
+        {% for b in backends %}
+        <option value="{{ b.key }}"{% if b.is_current %} selected{% endif %}>{{ b.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="hint hint--block"><b>Агент Timeweb (Лия)</b> — нативный агент с базой знаний (RAG), контекст диалога хранится на сервере. <b>AI Gateway · DeepSeek</b> — прямой вызов модели по OpenAI-совместимому API (системный промпт ниже работает; RAG/контекст не сохраняются).</p>
+
+    {# ── Поля для «Агент Timeweb (Лия)» ── #}
+    <label class="field">
+      <span class="field__label">ID агента Timeweb <span class="field__hint">для бэкенда «Агент Timeweb (Лия)»</span></span>
+      <input class="field__input mono" type="text" name="agent_id"
+             value="{{ ai.agent_id|e }}" maxlength="{{ agent_id_max }}"
+             placeholder="например, 1a2b3c4d-… (консоль Timeweb → AI-агенты)">
+    </label>
+    <p class="hint hint--block">Пусто — берётся <code class="mono">AGENT_ID</code> из окружения бота. Токен агента — <code class="mono">TIMEWEB_AI_TOKEN</code> в env бота (секрет).</p>
+
+    {# ── Поля для «AI Gateway · DeepSeek» ── #}
+    <label class="field">
+      <span class="field__label">Модель <span class="field__hint">для бэкенда «AI Gateway · DeepSeek»</span></span>
+      <input class="field__input mono" type="text" name="model"
+             value="{{ ai.model|e }}" maxlength="{{ model_max }}"
+             placeholder="{{ default_model }}">
+    </label>
+    <p class="hint hint--block">ID из списка моделей AI Gateway: DeepSeek V4 Pro — <code class="mono">deepseek-v4-pro</code>, Flash — <code class="mono">deepseek-v4-flash</code>. Ключ шлюза — <code class="mono">AI_GATEWAY_TOKEN</code> в env бота (отдельный ключ из ЛК AI Gateway, не аккаунт-токен).</p>
+
+    <label class="field">
+      <span class="field__label">Базовый URL шлюза <span class="field__hint">для бэкенда «AI Gateway · DeepSeek»</span></span>
+      <input class="field__input mono" type="text" name="gateway_base_url"
+             value="{{ ai.gateway_base_url|e }}" maxlength="{{ gateway_url_max }}"
+             placeholder="{{ default_gateway_url }}">
+    </label>
+    <p class="hint hint--block">Пусто — <code class="mono">{{ default_gateway_url }}</code>. OpenAI-совместимый эндпоинт; бот добавит <code class="mono">/chat/completions</code>.</p>
+
+    <label class="field">
+      <span class="field__label">Системный промпт <span class="field__hint">для бэкенда «AI Gateway · DeepSeek»</span></span>
+      <textarea class="field__input field__textarea field__textarea--lg" name="system_prompt"
+                maxlength="{{ system_prompt_max }}" rows="5"
+                placeholder="Кто такая Лия, тон общения, что можно и чего нельзя…">{{ ai.system_prompt }}</textarea>
+    </label>
+    <p class="hint hint--block">Задаёт характер и правила модели. Для «Агент Timeweb (Лия)» промпт настраивается на самом агенте в консоли Timeweb — тогда это поле не применяется.</p>
+
+    {# ── Общий фолбэк ── #}
+    <label class="field">
+      <span class="field__label">Текст-фолбэк <span class="field__hint">когда ИИ недоступен</span></span>
+      <textarea class="field__input field__textarea" name="fallback"
+                maxlength="{{ fallback_max }}" rows="3"
+                placeholder="Своё сообщение на случай сбоя ИИ…">{{ ai.fallback }}</textarea>
+    </label>
+    <p class="hint hint--block">Пусто — бот отвечает значением по умолчанию:<br><code class="mono">{{ default_fallback }}</code></p>
+
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Сохранить</button>
+    </div>
+  </form>
+
+  {% if ai.enabled and activity.recent == 0 %}
+    {% if ai.backend == 'gateway' %}
+    <p class="hint hint--block">⚠️ Авто-ответы включены (бэкенд <b>AI Gateway · DeepSeek</b>), но за {{ window_days }} дн. ответов не было. Проверьте, что задана <b>модель</b> (здесь) и <code class="mono">AI_GATEWAY_TOKEN</code> в окружении бота (секрет — добавляется скриптом, не через UI).</p>
+    {% else %}
+    <p class="hint hint--block">⚠️ Авто-ответы включены (бэкенд <b>Агент Timeweb (Лия)</b>), но за {{ window_days }} дн. ответов не было. Проверьте, что задан <b>ID агента</b> (здесь) и <code class="mono">TIMEWEB_AI_TOKEN</code> в окружении бота (секрет — добавляется скриптом, не через UI).</p>
+    {% endif %}
+  {% endif %}
+</section>
+
+{# ── Лента последних ответов ИИ (read-only) ── #}
+<section class="section" aria-label="Ответы ИИ">
+  <h2 class="section__title section__title--lg">Что отвечает ИИ</h2>
+  {% if recent_messages %}
+  <ol class="thread" aria-label="Последние ответы ИИ">
+    {% for m in recent_messages %}
+    <li class="msg msg--out" data-source="liya">
+      <div class="msg__head">
+        <span class="msg__who">
+          {%- if m.lead_id %}<a href="/dialogs/{{ m.lead_id }}">{{ m.lead_name|e }}</a>
+          {%- else %}{{ m.lead_name|e }}{% endif -%}
+        </span>
+        <span class="msg__when">{{ m.created_at.strftime('%d.%m %H:%M') if m.created_at else '' }}</span>
+      </div>
+      <div class="msg__body"><span class="msg__text">{{ m.text|e }}</span></div>
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="hint hint--block">Показаны последние {{ recent_messages|length }} ответ(ов). Полная переписка — в разделе «Диалоги».</p>
+  {% else %}
+  <div class="empty">
+    <p class="empty__title">ИИ пока не отвечал</p>
+    <p class="empty__text">Ответы появятся, когда клиент напишет боту в свободном чате (вне воронки) и ИИ ответит.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

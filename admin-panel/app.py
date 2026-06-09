@@ -2347,6 +2347,123 @@ async def yookassa_webhook(request: Request):
 
 
 # =========================================================================== #
+# Раздел «ИИ-агенты» (/agents): управление авто-ответами Лии БЕЗ редеплоя бота.
+# Панель пишет настройки в app_settings (ai_enabled/ai_agent_id/ai_fallback_text),
+# бот читает их поверх env. Токен Timeweb AI остаётся в env бота (секрет, не в БД),
+# поэтому тест-вызов из панели здесь не делаем — у панели токена нет (см. handoff).
+# =========================================================================== #
+def _present_liya_msg(r) -> dict:
+    text = (r["text"] or "").strip()
+    return {
+        "id": r["id"],
+        "lead_id": r["lead_id"],
+        "lead_name": (r["lead_name"] or "").strip() or "Без имени",
+        "text": text or "—",
+        "created_at": r["created_at"],
+    }
+
+
+def _agents_err_text(err: str | None) -> str | None:
+    return {
+        "bad_agent_id": "ID агента содержит пробелы или непечатаемые символы. "
+                        "Скопируйте его из консоли Timeweb без правок.",
+        "bad_backend": "Неизвестный бэкенд ИИ.",
+        "bad_model": "ID модели содержит пробелы или непечатаемые символы. "
+                     "Возьмите его из списка моделей AI Gateway (напр. deepseek-v4-pro).",
+        "bad_gateway_url": "Базовый URL шлюза должен начинаться с http:// или https:// и "
+                           "не содержать пробелов (напр. https://api.timeweb.ai/v1).",
+    }.get(err or "")
+
+
+@app.get("/agents", response_class=HTMLResponse)
+async def agents_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    err: str | None = None,
+):
+    ai = await db.get_ai_settings()
+    since = datetime.now(timezone.utc) - timedelta(days=config.AI_ACTIVITY_WINDOW_DAYS)
+    act = await db.ai_activity_summary(since)
+    recent = [_present_liya_msg(r) for r in await db.list_liya_messages(limit=20)]
+    backends = [
+        {"key": k, "label": config.AI_BACKENDS[k], "is_current": k == ai["backend"]}
+        for k in config.AI_BACKEND_ORDER
+    ]
+    return templates.TemplateResponse(
+        request,
+        "agents.html",
+        {
+            "ai": ai,
+            "backends": backends,
+            "default_fallback": config.AI_DEFAULT_FALLBACK,
+            "default_model": config.AI_DEFAULT_MODEL,
+            "default_gateway_url": config.AI_DEFAULT_GATEWAY_URL,
+            "activity": {"total": act["total"], "recent": act["recent"],
+                         "last_at": act["last_at"]},
+            "window_days": config.AI_ACTIVITY_WINDOW_DAYS,
+            "agent_id_max": config.AI_AGENT_ID_MAX,
+            "fallback_max": config.AI_FALLBACK_MAX,
+            "model_max": config.AI_MODEL_MAX,
+            "gateway_url_max": config.AI_GATEWAY_URL_MAX,
+            "system_prompt_max": config.AI_SYSTEM_PROMPT_MAX,
+            "recent_messages": recent,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "agents",
+            "saved": bool(saved),
+            "err": _agents_err_text(err),
+        },
+    )
+
+
+def _is_token_like(s: str) -> bool:
+    """Идентификатор без пробелов и непечатаемого (agent_id / model). Точную валидность
+    проверит провайдер при вызове (ошибка → фолбэк); тут режем явный мусор."""
+    return s.isascii() and not any(c.isspace() for c in s)
+
+
+@app.post("/agents")
+async def agents_save(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    enabled: str = Form(""),
+    backend: str = Form(""),
+    agent_id: str = Form(""),
+    model: str = Form(""),
+    gateway_base_url: str = Form(""),
+    system_prompt: str = Form(""),
+    fallback: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    backend = backend.strip()
+    if backend not in config.AI_BACKENDS:
+        return RedirectResponse(url="/agents?err=bad_backend", status_code=303)
+    agent_id = agent_id.strip()[: config.AI_AGENT_ID_MAX]
+    model = model.strip()[: config.AI_MODEL_MAX]
+    gateway_base_url = gateway_base_url.strip()[: config.AI_GATEWAY_URL_MAX]
+    system_prompt = system_prompt.strip()[: config.AI_SYSTEM_PROMPT_MAX]
+    fallback = fallback.strip()[: config.AI_FALLBACK_MAX]
+    if agent_id and not _is_token_like(agent_id):
+        return RedirectResponse(url="/agents?err=bad_agent_id", status_code=303)
+    if model and not _is_token_like(model):
+        return RedirectResponse(url="/agents?err=bad_model", status_code=303)
+    # gateway URL (если задан) — http(s) без пробелов; пусто → бот возьмёт дефолт.
+    if gateway_base_url and (
+        not gateway_base_url.startswith(("http://", "https://"))
+        or any(c.isspace() for c in gateway_base_url)
+    ):
+        return RedirectResponse(url="/agents?err=bad_gateway_url", status_code=303)
+    await db.set_ai_settings(
+        enabled=bool(enabled), backend=backend, agent_id=agent_id, model=model,
+        gateway_base_url=gateway_base_url, system_prompt=system_prompt, fallback=fallback,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/agents?saved=1", status_code=303)
+
+
+# =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #
 @app.exception_handler(AuthRedirect)

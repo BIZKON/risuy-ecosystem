@@ -320,3 +320,46 @@ YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_API_BASE = os.environ.get("YOOKASSA_API_BASE", "https://api.yookassa.ru/v3")
 YOOKASSA_ENABLED = bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+
+# ── ИИ-ассистент Лия (раздел «ИИ-агенты») — настройки в app_settings ──────────
+# Панель ПИШЕТ ключи, бот ЧИТАЕТ их ПОВЕРХ env (bot-telegram/ai.py). Управление БЕЗ
+# редеплоя: тумблер авто-ответов, id агента Timeweb, текст фолбэка. Токен Timeweb AI
+# НИКОГДА не в app_settings/БД (секрет) — остаётся в env бота; панель его не видит и
+# не хранит. Дефолты ниже — для показа «эффективного» значения, когда строки ещё нет.
+AI_ENABLED_SETTING_KEY = "ai_enabled"         # ""/"1": глобальный тумблер авто-ответов Лии
+AI_AGENT_ID_SETTING_KEY = "ai_agent_id"       # переопределяет env AGENT_ID бота
+AI_FALLBACK_SETTING_KEY = "ai_fallback_text"  # переопределяет хардкод-фолбэк бота
+# Дефолт фолбэка ДОЛЖЕН совпадать с bot-telegram/ai.py::_FALLBACK (показываем как
+# «эффективный», если своя строка не задана). Меняешь тут — поправь и там.
+AI_DEFAULT_FALLBACK = (
+    "Ой, сейчас не получается ответить 🌷\n"
+    "Напиши, пожалуйста, менеджеру: lesovschool@yandex.ru"
+)
+AI_AGENT_ID_MAX = 200   # потолок длины agent_id (UUID-подобный идентификатор Timeweb)
+AI_FALLBACK_MAX = 600   # потолок длины своего фолбэка
+AI_ACTIVITY_WINDOW_DAYS = _opt_int("AI_ACTIVITY_WINDOW_DAYS", 30)  # окно метрики «ответов Лии»
+
+# Бэкенд ИИ: какой движок отвечает клиентам.
+#  • cloud_ai — агент Timeweb (Лия): нативный /call по AGENT_ID, есть RAG/MCP, контекст
+#    хранится на сервере (parent_message_id). Системный промпт настраивается на агенте.
+#  • gateway  — Timeweb AI Gateway: ПРЯМАЯ работа с моделью (DeepSeek и др.) по OpenAI-
+#    совместимому /v1/chat/completions, БЕЗ агента/RAG. Системный промпт задаётся здесь.
+#    Ключ Gateway (отдельный, не аккаунт-токен) — ТОЛЬКО в env бота (AI_GATEWAY_TOKEN).
+AI_BACKEND_SETTING_KEY = "ai_backend"               # "cloud_ai" | "gateway"
+AI_MODEL_SETTING_KEY = "ai_model"                   # ID модели для gateway, напр. deepseek-v4-pro
+AI_GATEWAY_URL_SETTING_KEY = "ai_gateway_base_url"  # base URL OpenAI-совместимого шлюза
+AI_SYSTEM_PROMPT_SETTING_KEY = "ai_system_prompt"   # системный промпт (работает для gateway)
+
+AI_BACKENDS = {
+    "cloud_ai": "Агент Timeweb (Лия)",
+    "gateway": "AI Gateway · DeepSeek",
+}
+AI_BACKEND_ORDER = ("cloud_ai", "gateway")
+AI_DEFAULT_BACKEND = "cloud_ai"   # дефолт сохраняет текущее поведение (бот жив)
+# Дефолты gateway. Точный base URL и ID моделей — из ЛК AI Gateway (вкладки «API-ключи»/модели);
+# «DeepSeek V4 Pro» обычно deepseek-v4-pro. Меняется в панели без редеплоя.
+AI_DEFAULT_GATEWAY_URL = "https://api.timeweb.ai/v1"
+AI_DEFAULT_MODEL = "deepseek-v4-pro"
+AI_MODEL_MAX = 100
+AI_GATEWAY_URL_MAX = 300
+AI_SYSTEM_PROMPT_MAX = 4000

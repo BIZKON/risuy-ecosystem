@@ -41,6 +41,12 @@ TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
 AGENT_ID = os.environ.get("AGENT_ID", "")
 TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
 
+# Ключ Timeweb AI Gateway (OpenAI-совместимый шлюз к моделям, напр. DeepSeek). ОТДЕЛЬНЫЙ
+# ключ из ЛК AI Gateway (вкладка «API-ключи»), НЕ аккаунт-токен и НЕ ключ агента. Нужен,
+# только если бэкенд ИИ переключён на «gateway» в панели (app_settings['ai_backend']).
+# base URL и модель берутся из app_settings (панель), ключ — секрет, только из env.
+AI_GATEWAY_TOKEN = os.environ.get("AI_GATEWAY_TOKEN", "")
+
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
 

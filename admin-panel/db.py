@@ -1569,6 +1569,123 @@ async def list_lead_magnet_products() -> list[asyncpg.Record]:
 
 
 # =========================================================================== #
+# Блок ИИ-АГЕНТЫ (раздел «ИИ-агенты»): настройки Лии в app_settings (KV) +
+# просмотр её ответов. Панель ПИШЕТ ключи (ai_enabled/ai_agent_id/ai_fallback_text),
+# бот ЧИТАЕТ их ПОВЕРХ env (bot-telegram/db.py::get_ai_overrides). Токен Timeweb AI
+# здесь НЕ хранится (секрет → env бота). Грант — select/insert/update on app_settings
+# (panel_role.sql), как у лид-магнита/флага отмены; delete не грантован → «выключено»/
+# пусто пишем пустым value. Метрика «ответов Лии» = messages.source='liya' (тот же
+# источник, что и счётчик тарифа в «Подписке»).
+# =========================================================================== #
+
+_AI_SETTING_KEYS = (
+    config.AI_ENABLED_SETTING_KEY,
+    config.AI_BACKEND_SETTING_KEY,
+    config.AI_AGENT_ID_SETTING_KEY,
+    config.AI_MODEL_SETTING_KEY,
+    config.AI_GATEWAY_URL_SETTING_KEY,
+    config.AI_SYSTEM_PROMPT_SETTING_KEY,
+    config.AI_FALLBACK_SETTING_KEY,
+)
+
+
+async def get_ai_settings() -> dict:
+    """Текущие настройки ИИ из app_settings (одним запросом). Отсутствие строки → дефолт:
+    enabled=True (сохранить текущее поведение env-только), backend='cloud_ai', agent_id=''
+    (→ env AGENT_ID), model/gateway_base_url → дефолты config, system_prompt='', fallback=''
+    (→ хардкод-фолбэк бота). Зеркалит чтение бота (get_ai_overrides) — логика и дефолты
+    ДОЛЖНЫ совпадать с ним."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select key, value from app_settings where key = any($1::text[])",
+            list(_AI_SETTING_KEYS),
+        )
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    enabled_raw = kv.get(config.AI_ENABLED_SETTING_KEY)  # None=нет строки; ''=выключено явно
+    backend = (kv.get(config.AI_BACKEND_SETTING_KEY) or "").strip()
+    if backend not in config.AI_BACKENDS:
+        backend = config.AI_DEFAULT_BACKEND
+    return {
+        "enabled": True if enabled_raw is None else bool(enabled_raw.strip()),
+        "backend": backend,
+        "agent_id": (kv.get(config.AI_AGENT_ID_SETTING_KEY) or "").strip(),
+        "model": (kv.get(config.AI_MODEL_SETTING_KEY) or "").strip() or config.AI_DEFAULT_MODEL,
+        "gateway_base_url": (kv.get(config.AI_GATEWAY_URL_SETTING_KEY) or "").strip()
+                            or config.AI_DEFAULT_GATEWAY_URL,
+        "system_prompt": kv.get(config.AI_SYSTEM_PROMPT_SETTING_KEY) or "",
+        "fallback": kv.get(config.AI_FALLBACK_SETTING_KEY) or "",
+    }
+
+
+async def set_ai_settings(
+    *, enabled: bool, backend: str, agent_id: str, model: str,
+    gateway_base_url: str, system_prompt: str, fallback: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Сохранить настройки ИИ (upsert ключей app_settings) + аудит — в ОДНОЙ транзакции
+    (паттерн остальных мутаций). «Выключено»/пустые поля пишем пустым value (delete на
+    app_settings панели не грантован, как у лид-магнита/флага отмены). Длины/валидность
+    уже проверены вызывающим (app.py). Аудит — без текстов промпта/фолбэка (только флаги)."""
+    pairs = (
+        (config.AI_ENABLED_SETTING_KEY, "1" if enabled else ""),
+        (config.AI_BACKEND_SETTING_KEY, backend),
+        (config.AI_AGENT_ID_SETTING_KEY, agent_id),
+        (config.AI_MODEL_SETTING_KEY, model),
+        (config.AI_GATEWAY_URL_SETTING_KEY, gateway_base_url),
+        (config.AI_SYSTEM_PROMPT_SETTING_KEY, system_prompt),
+        (config.AI_FALLBACK_SETTING_KEY, fallback),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into app_settings (key, value) values ($1, $2)
+                    on conflict (key) do update set value = excluded.value
+                    """,
+                    key, value,
+                )
+            await _insert_audit(
+                c, actor=actor, action="ai_settings_set", ip=ip, user_agent=user_agent,
+                detail={"enabled": enabled, "backend": backend,
+                        "agent_id": agent_id or None, "model": model or None,
+                        "system_prompt_set": bool(system_prompt),
+                        "fallback_set": bool(fallback)},
+            )
+
+
+async def ai_activity_summary(since) -> asyncpg.Record:
+    """Сводка активности Лии для статус-карточек: всего ответов, за окно [since, now),
+    и время последнего. Один проход по messages (source='liya', direction='out')."""
+    q = """
+        select
+            count(*)                                  as total,
+            count(*) filter (where created_at >= $1)  as recent,
+            max(created_at)                           as last_at
+        from messages
+        where source = 'liya' and direction = 'out'
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(q, since)
+
+
+async def list_liya_messages(*, limit: int = 20) -> list[asyncpg.Record]:
+    """Последние ответы Лии (лента «Что отвечает Лия»): текст + лид (имя/id) + время.
+    Read-only; грант select on messages/leads у panel_rw есть (как в «Диалогах»). Текст —
+    ПДн-поток (retention-cron его чистит), показываем в закрытой сессией панели."""
+    q = """
+        select m.id, m.lead_id, m.text, m.created_at, l.name as lead_name
+        from messages m
+        left join leads l on l.id = m.lead_id
+        where m.source = 'liya' and m.direction = 'out'
+        order by m.created_at desc, m.id desc
+        limit $1
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q, limit)
+
+
+# =========================================================================== #
 # ПЛАТЕЖИ / ЗАКАЗЫ (раздел «Платежи», schema_orders.sql). Phase 1A: панель
 # фиксирует продажи руками (source='manual'), читает для дашборда. Бот в 1A не
 # участвует. panel_rw: SELECT + INSERT/UPDATE на колонках (provider_payment_id —
