@@ -321,6 +321,26 @@ YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_API_BASE = os.environ.get("YOOKASSA_API_BASE", "https://api.yookassa.ru/v3")
 YOOKASSA_ENABLED = bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
 
+# ── ЮKassa МАГАЗИНА ШКОЛЫ (Phase 1B: продажи лидам) — ОТДЕЛЬНАЯ пара ключей ──
+# Деньги лидов идут ШКОЛЕ, биллинг сервиса — агентству: это разные магазины ЮKassa.
+# Панели ключи нужны для (а) перепроверки платежа заказа в вебхуке, (б) «счёта из
+# диалога». Те же ключи — в env БОТА (кнопка «Купить» создаёт платёж там). Вписывает
+# владелец через twc-set-env.sh в ОБА приложения. Нет ключей → онлайн-продажи выключены.
+SHOP_YOOKASSA_SHOP_ID = os.environ.get("SHOP_YOOKASSA_SHOP_ID", "")
+SHOP_YOOKASSA_SECRET_KEY = os.environ.get("SHOP_YOOKASSA_SECRET_KEY", "")
+SHOP_PAYMENTS_CONFIGURED = bool(SHOP_YOOKASSA_SHOP_ID and SHOP_YOOKASSA_SECRET_KEY)
+# Чек 54-ФЗ (если у боевого магазина школы включена фискализация) — зеркало env бота.
+SHOP_RECEIPT_ENABLED = os.environ.get("SHOP_RECEIPT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+SHOP_VAT_CODE = _opt_int("SHOP_VAT_CODE", 1)
+# Тумблер «принимать оплату в боте» (app_settings; панель пишет, бот читает). Дефолт ВЫКЛ.
+ONLINE_PAYMENTS_SETTING_KEY = "online_payments_enabled"
+# Текст, который бот отправит лиду после успешной оплаты (вебхук кладёт его в outbox).
+ORDER_PAID_MESSAGE = (
+    "Оплата получена ✅ Спасибо! 🌷\n"
+    "Мы уже видим твой заказ — скоро напишем со всеми деталями. "
+    "Если есть вопросы — просто ответь на это сообщение."
+)
+
 # ── ИИ-ассистент Лия (раздел «ИИ-агенты») — настройки в app_settings ──────────
 # Панель ПИШЕТ ключи, бот ЧИТАЕТ их ПОВЕРХ env (bot-telegram/ai.py). Управление БЕЗ
 # редеплоя: тумблер авто-ответов, id агента Timeweb, текст фолбэка. Токен Timeweb AI
@@ -397,6 +417,7 @@ RUNTIME_PROXY_SET_KEY = "bot_proxy_set"
 RUNTIME_AGENT_TOKEN_KEY = "bot_agent_token_set"
 RUNTIME_GATEWAY_TOKEN_KEY = "bot_gateway_token_set"
 RUNTIME_PUBLIC_BASE_KEY = "bot_public_base_url"
+RUNTIME_SHOP_YK_KEY = "bot_shop_yookassa_set"   # ключи ЮKassa магазина школы в env БОТА (1B)
 
 # ── Раздел «Команда» (мульти-оператор + роли, schema_team.sql) ────────────────
 # env-админ (ADMIN_USERNAME/ADMIN_PASSWORD_HASH) — bootstrap-СУПЕРЮЗЕР, работает ВСЕГДА

@@ -50,3 +50,10 @@ async def _tick() -> None:
     purged = await db.purge_old_message_text(config.MESSAGES_TTL_DAYS)
     if purged:
         logger.info("TTL переписки: обнулено содержимое у %s сообщений", purged)
+
+    # 3) Просроченные pending-заказы онлайн-оплаты → failed (платёж в ЮKassa давно
+    # истёк; лента «Платежей» не копит вечный pending). Не ПДн-чистка, но тот же
+    # часовой househeeping-цикл — отдельный воркер ради одной строки не заводим.
+    stale = await db.mark_stale_yookassa_orders_failed(config.ORDER_STALE_HOURS)
+    if stale:
+        logger.info("Онлайн-оплата: %s просроченных pending-заказов → failed", stale)

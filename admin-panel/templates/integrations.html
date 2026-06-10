@@ -64,6 +64,11 @@
           <td>{% if runtime.public_base_url %}<span class="pill pill--ok">Включён</span>{% else %}<span class="pill pill--muted">—</span>{% endif %}</td>
           <td class="muted">{{ runtime.public_base_url|e if runtime.public_base_url else 'публичный адрес бота не задан' }}</td>
         </tr>
+        <tr>
+          <td>Онлайн-оплата покупок (касса)</td>
+          <td>{% if pay_enabled and pay_panel_keys and pay_bot_keys %}<span class="pill pill--ok">Включена</span>{% elif pay_enabled %}<span class="pill pill--bad">Нет ключей</span>{% else %}<span class="pill pill--muted">Выключена</span>{% endif %}</td>
+          <td class="muted">Ключи кассы: панель {{ '✓' if pay_panel_keys else '—' }} · бот {{ '✓' if pay_bot_keys else '—' }} · управление — ниже</td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -93,5 +98,28 @@
       <button class="btn btn--dark" type="submit">Сохранить</button>
     </div>
   </form>
+</section>
+
+{# ── Онлайн-оплата покупок (Phase 1B): тумблер + статус ключей кассы ── #}
+<section class="card" aria-label="Онлайн-оплата покупок">
+  <h2 class="card__title">Онлайн-оплата покупок</h2>
+  <p class="card__note">Покупатель платит картой прямо из бота: кнопка «Купить» под рассылкой-офером и «Выставить счёт» в диалоге. После оплаты заказ сам становится «Оплачен», лид — «Купил», человеку уходит подтверждение.</p>
+
+  {% if not (pay_panel_keys and pay_bot_keys) %}
+  <p class="hint hint--block">⚠️ Ключи кассы заданы не везде: панель {{ '✓' if pay_panel_keys else '✗' }}, бот {{ '✗' if not pay_bot_keys else '✓' }}. Добавьте ключи кассы (shopId + секретный ключ) в окружение <b>обоих</b> приложений скриптом деплоя — без них кнопки покупки не появятся, даже если включить ниже.</p>
+  {% endif %}
+
+  <form method="post" action="/integrations/payments" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field field--check">
+      <input type="checkbox" name="enabled" value="1"{% if pay_enabled %} checked{% endif %}>
+      <span class="field__label">Принимать оплату в боте</span>
+    </label>
+    <p class="hint hint--block">Выключено — кнопок покупки нет, всё остальное работает как раньше. Включается без перезапуска: рассылки подхватят со следующей отправки.</p>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Сохранить</button>
+    </div>
+  </form>
+  <p class="hint hint--block">Уведомление об оплате (вебхук в кабинете кассы): <code class="mono">https://bizkon-risuy-ecosystem-a48b.twc1.net/webhooks/yookassa</code> — событие «платёж успешен».</p>
 </section>
 {% endblock %}

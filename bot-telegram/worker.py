@@ -458,9 +458,19 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
     # «Кому слать»/материализация/статусы ниже — общий путь, НЕ дублируется и НЕ меняется.
     kind, template, tg_file_id = _delivery_for_broadcast(bc)
     use_link = _has_link(template)
-    # Футер «Отписаться» прикрепляется к КАЖДОМУ рассылочному сообщению (152-ФЗ/38-ФЗ —
-    # простой отказ в самом сообщении, §5.8). on_unsub обрабатывает его идемпотентно.
-    unsub_kb = messaging.unsubscribe_markup()
+    # Клавиатура (раз на батч): обязательный футер «Отписаться» (152-ФЗ/38-ФЗ, §5.8;
+    # on_unsub идемпотентен) + опциональный ряд «Купить за X ₽» (Phase 1B) — ТОЛЬКО для
+    # рассылки-продукта с рублёвой ценой при включённом тумблере панели и вписанных
+    # SHOP-ключах. Выключено/не продукт → ровно прежняя клавиатура из одной «Отписаться».
+    buy_id, buy_label = None, None
+    product = bc.get("_product")
+    if (product and product.get("price") and product["price"] > 0
+            and (product.get("currency") or "RUB") == "RUB"
+            and config.SHOP_PAYMENTS_CONFIGURED
+            and await db.is_online_payments_enabled()):
+        buy_id = product["id"]
+        buy_label = texts.buy_button(product["price"], product.get("currency"))
+    unsub_kb = messaging.broadcast_markup(buy_product_id=buy_id, buy_label=buy_label)
     # Целевой URL для {link}. Источник: единая трекинг-ссылка рассылки (link_tokens,
     # click_token=null, регистрирует панель из поля target_url композера). Для рассылки-
     # ПРОДУКТА, если панель не зарегистрировала собственный target_url, берём ссылку из

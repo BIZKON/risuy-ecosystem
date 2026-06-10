@@ -722,6 +722,18 @@ async def get_effective_guide_url() -> str:
     return config.GUIDE_URL
 
 
+async def is_online_payments_enabled() -> bool:
+    """Тумблер онлайн-оплаты (пишет панель, «Интеграции»). Дефолт и любой сбой → ВЫКЛ:
+    кнопка «Купить» не появляется, пока владелец явно не включил (консервативно —
+    деплой кода безопасен до вписывания ключей и включения)."""
+    try:
+        raw = await get_app_setting("online_payments_enabled")
+    except Exception as e:  # noqa: BLE001 — сбой чтения не должен ломать рассылку
+        logging.getLogger(__name__).warning("Не удалось прочитать тумблер оплаты: %s", e)
+        return False
+    return bool((raw or "").strip())
+
+
 async def get_active_lead_magnet_product() -> dict | None:
     """Офер-лид-магнит для ЗАМЕНЫ GUIDE_URL-заглушки в выдаче воронки, или None (фолбэк).
 
@@ -809,13 +821,14 @@ async def get_ai_overrides() -> dict:
 _RUNTIME_STATUS_KEYS = (
     "bot_username", "gate_channel_url", "bot_guide_url_env", "bot_proxy_set",
     "bot_agent_token_set", "bot_gateway_token_set", "bot_public_base_url",
+    "bot_shop_yookassa_set",
 )
 
 
 async def publish_runtime_status(
     *, bot_username: str, gate_channel_url: str, guide_url_env: str,
     proxy_set: bool, agent_token_set: bool, gateway_token_set: bool,
-    public_base_url: str,
+    public_base_url: str, shop_yookassa_set: bool = False,
 ) -> None:
     """Публикует НЕ-секретный снимок конфигурации бота в app_settings, чтобы панель честно
     показывала статус интеграций и строила deep-link'и (t.me/<bot_username>?start=<source>).
@@ -830,6 +843,7 @@ async def publish_runtime_status(
         ("bot_agent_token_set", "1" if agent_token_set else ""),
         ("bot_gateway_token_set", "1" if gateway_token_set else ""),
         ("bot_public_base_url", public_base_url or ""),
+        ("bot_shop_yookassa_set", "1" if shop_yookassa_set else ""),
     )
     async with pool.acquire() as c:
         async with c.transaction():
@@ -944,3 +958,102 @@ def _affected(status: str) -> int:
         return int(status.split()[-1])
     except (ValueError, IndexError, AttributeError):
         return 0
+
+
+# ── Заказы: онлайн-оплата продаж школы (Phase 1B, бот пишет owner-ролью) ──────
+# Поток: клик «Купить» → pending-заказ + платёж ЮKassa (handlers.on_buy) → лид платит →
+# вебхук ПАНЕЛИ матчит заказ по provider_payment_id и отмечает paid + converted.
+# Бот заказы только создаёт/связывает с платежом; «оплачено» он НЕ проставляет.
+
+async def get_lead_for_purchase(tg_user_id: int) -> dict | None:
+    """Лид для оформления заказа: id (FK заказа), name (описание платежа), phone (чек
+    54-ФЗ, если включён). None — лида нет (заказ без лида не оформляем)."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select id, name, phone from leads where tg_user_id = $1", tg_user_id
+        )
+    return dict(row) if row else None
+
+
+async def create_or_reuse_pending_order(
+    lead_id, product_id: int, amount, currency: str, *, reuse_minutes: int,
+) -> dict:
+    """Pending-заказ под клик «Купить»: вернуть НЕДАВНИЙ существующий или создать новый.
+
+    Анти-двойное-списание: повторный клик в пределах reuse_minutes возвращает ТОТ ЖЕ
+    заказ с той же ссылкой на оплату (payment_url) — новый платёж не создаётся, два
+    окна оплаты не живут одновременно. Более старые pending этого лида на этот же
+    продукт помечаем failed (их платежи в ЮKassa истекают сами, ~1 час) — лента
+    «Платежей» не копит вечный pending. Возвращает
+    {id, payment_url, reused}: reused=True → звонящий шлёт payment_url как есть.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            fresh = await c.fetchrow(
+                """
+                select id, payment_url from orders
+                where lead_id = $1 and product_id = $2
+                  and status = 'pending' and source = 'yookassa'
+                  and payment_url is not null
+                  and created_at >= now() - make_interval(mins => $3)
+                order by created_at desc
+                limit 1
+                for update
+                """,
+                lead_id, product_id, reuse_minutes,
+            )
+            if fresh is not None:
+                return {"id": fresh["id"], "payment_url": fresh["payment_url"], "reused": True}
+            # Протухшие pending на тот же продукт → failed (новый клик = новый платёж).
+            await c.execute(
+                """
+                update orders set status = 'failed', note = coalesce(note, 'просрочен (повторный клик)')
+                where lead_id = $1 and product_id = $2
+                  and status = 'pending' and source = 'yookassa'
+                """,
+                lead_id, product_id,
+            )
+            row = await c.fetchrow(
+                """
+                insert into orders (lead_id, product_id, amount, currency, status, source, created_by)
+                values ($1, $2, $3, $4, 'pending', 'yookassa', 'bot')
+                returning id
+                """,
+                lead_id, product_id, amount, currency,
+            )
+            return {"id": row["id"], "payment_url": None, "reused": False}
+
+
+async def set_order_payment(order_id, payment_id: str, payment_url: str) -> None:
+    """Связать заказ с платежом ЮKassa (id для матча в вебхуке + ссылка для повтор-клика)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update orders set provider_payment_id = $2, payment_url = $3 where id = $1",
+            order_id, payment_id, payment_url,
+        )
+
+
+async def mark_order_failed(order_id, note: str) -> None:
+    """Пометить заказ failed (платёж не создался: ЮKassa недоступна/отвергла). Лид уже
+    получил мягкий фолбэк-текст; нота — для ленты «Платежей» оператора."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update orders set status = 'failed', note = $2 where id = $1 and status = 'pending'",
+            order_id, note[:300],
+        )
+
+
+async def mark_stale_yookassa_orders_failed(hours: int) -> int:
+    """Просроченные pending-заказы онлайн-оплаты → failed (retention-цикл, раз в час).
+    Платёж в ЮKassa к этому моменту давно истёк; вебхук paid таких заказов не тронет
+    (он матчит по provider_payment_id и идемпотентен по статусу)."""
+    async with pool.acquire() as c:
+        res = await c.execute(
+            """
+            update orders set status = 'failed', note = coalesce(note, 'не оплачен (истёк срок)')
+            where status = 'pending' and source = 'yookassa'
+              and created_at < now() - make_interval(hours => $1)
+            """,
+            hours,
+        )
+    return _affected(res)

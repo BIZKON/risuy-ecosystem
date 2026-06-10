@@ -528,6 +528,8 @@ async def _render_dialogs(
     replied: bool = False,
     paused_flash: bool = False,
     reply_err: str | None = None,
+    invoiced: bool = False,
+    invoice_err: str | None = None,
 ):
     """Единый рендер раздела «Диалоги»: список слева + (опц.) выбранный чат справа.
     rec=None → правая панель пустая (приглашение выбрать диалог)."""
@@ -564,6 +566,20 @@ async def _render_dialogs(
             "max_file_mb": config.MAX_PRODUCT_FILE_MB,
             "chat_from": "dialog",   # композер вернёт PRG на /dialogs/{id}
         })
+        # «Выставить счёт» (1B): селектор оферов с ценой — только когда онлайн-оплата
+        # реально работоспособна (ключи магазина школы у панели + тумблер включён).
+        invoice_products = []
+        if config.SHOP_PAYMENTS_CONFIGURED and await db.get_online_payments_enabled():
+            invoice_products = [
+                {"id": p["id"], "name": p["name"],
+                 "label": f"{p['name']} — {_fmt_price(p['price'], p['currency'])}"}
+                for p in await db.list_priced_products_for_invoice()
+            ]
+        ctx.update({
+            "invoice_products": invoice_products,
+            "invoiced": invoiced,
+            "invoice_err": _invoice_err_text(invoice_err),
+        })
     return templates.TemplateResponse(request, "dialogs.html", ctx)
 
 
@@ -582,6 +598,8 @@ async def dialogs_detail(
     replied: int = 0,
     paused: int = 0,
     err: str | None = None,
+    invoiced: int = 0,
+    inv_err: str | None = None,
 ):
     rec = await db.get_lead(lead_id)
     if rec is None:
@@ -593,6 +611,7 @@ async def dialogs_detail(
     return await _render_dialogs(
         request, session, selected_id=lead_id, rec=rec, thread=thread,
         replied=bool(replied), paused_flash=bool(paused), reply_err=err,
+        invoiced=bool(invoiced), invoice_err=inv_err,
     )
 
 
@@ -917,6 +936,96 @@ async def lead_reply(
             status_code=400, detail="Лиду нельзя написать (нет Telegram-адреса)"
         )
     return _chat_return(lead_id, from_, replied=True)
+
+
+# ---- /leads/{id}/invoice — «счёт из диалога» (Phase 1B) -------------------- #
+def _invoice_err_text(err: str | None) -> str | None:
+    return {
+        "pay_off": "Онлайн-оплата выключена или не настроена (раздел «Интеграции»).",
+        "bad_product": "Выберите офер с ценой в рублях (активный, из каталога).",
+        "no_tg": "У лида нет Telegram-адреса — счёт некому доставить.",
+        "yk_failed": "Не удалось создать платёж. Попробуйте ещё раз или проверьте ключи оплаты.",
+    }.get(err or "")
+
+
+def _invoice_return(lead_id, *, invoiced: bool = False, err: str | None = None) -> RedirectResponse:
+    params = {}
+    if invoiced:
+        params["invoiced"] = "1"
+    if err:
+        params["inv_err"] = err
+    qs = urlencode(params)
+    return RedirectResponse(url=f"/dialogs/{lead_id}{'?' + qs if qs else ''}#thread",
+                            status_code=303)
+
+
+@app.post("/leads/{lead_id}/invoice")
+async def lead_invoice(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    product_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Оператор выставляет лиду счёт на офер: pending-заказ → платёж ЮKassa (МАГАЗИН
+    ШКОЛЫ) → лиду сообщение со ссылкой на оплату через outbox (доставит БОТ — панель в
+    Telegram не пишет). Подтверждение оплаты — единый вебхук (paid + converted)."""
+    await _enforce_csrf(request, session, csrf_token)
+    if not (config.SHOP_PAYMENTS_CONFIGURED and await db.get_online_payments_enabled()):
+        return _invoice_return(lead_id, err="pay_off")
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
+        return _invoice_return(lead_id, err="bad_product")
+    product = await db.get_product(pid)
+    if (product is None or product["status"] != "active" or not product["price"]
+            or product["price"] <= 0 or (product["currency"] or "RUB") != "RUB"):
+        return _invoice_return(lead_id, err="bad_product")
+
+    order = await db.create_invoice_order_with_audit(
+        lead_id, pid, product["price"], "RUB",
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if order is None:
+        return _invoice_return(lead_id, err="no_tg")
+
+    # Телефон лида — ТОЛЬКО для чека 54-ФЗ (если фискализация включена флагом env);
+    # без чека сырой номер из БД не достаём вовсе (данные-минимизация).
+    lead_phone = await db.reveal_phone(lead_id) if config.SHOP_RECEIPT_ENABLED else None
+    runtime = await db.get_runtime_status()
+    return_url = (f"https://t.me/{runtime['bot_username']}"
+                  if runtime.get("bot_username") else "https://t.me")
+    try:
+        payment = await yookassa.create_shop_payment(
+            amount=product["price"], currency="RUB",
+            description=f"{product['name']} — Школа Лесова",
+            return_url=return_url,
+            idempotence_key=str(order["id"]),
+            metadata={"kind": "order", "order_id": str(order["id"])},
+            lead_phone=lead_phone,
+        )
+        pay_url = (payment.get("confirmation") or {}).get("confirmation_url")
+        payment_id = payment.get("id")
+        if not pay_url or not payment_id:
+            raise yookassa.YooKassaError("нет confirmation_url/id в ответе")
+    except yookassa.YooKassaError:
+        import logging
+        logging.getLogger("admin-panel").exception("invoice create_shop_payment failed")
+        await db.set_order_status_with_audit(
+            order["id"], new_status="failed",
+            actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+        )
+        return _invoice_return(lead_id, err="yk_failed")
+
+    await db.set_order_payment_panel(order["id"], payment_id, pay_url)
+    price_str = _fmt_price(product["price"], "RUB")
+    await db.enqueue_invoice_message(
+        lead_id, order["tg_user_id"],
+        f"Счёт на оплату 🌷\n{product['name']} — {price_str}\n\n"
+        f"Оплатить по ссылке (действует около часа):\n{pay_url}",
+        actor=session.actor,
+    )
+    return _invoice_return(lead_id, invoiced=True)
 
 
 # ---- /export.csv — POST, маска, аудит ДО стрима, row-cap (§3.11) ---------- #
@@ -2326,17 +2435,28 @@ async def subscription_cancel(
 # ---- /webhooks/yookassa — публичный вебхук (без сессии/CSRF) --------------- #
 @app.post("/webhooks/yookassa")
 async def yookassa_webhook(request: Request):
-    """Вебхук ЮKassa. НЕ доверяем телу: берём только id платежа, ПЕРЕПРОВЕРЯЕМ через
-    API ЮKassa (status=succeeded & paid) и лишь тогда отмечаем счёт оплаченным (+карта).
-    Оплата возобновляет подписку — снимаем флаг отмены. Всегда 200 (иначе ретраи)."""
+    """ЕДИНЫЙ вебхук ЮKassa для ОБОИХ магазинов (подписка агентства + продажи школы, 1B):
+    оба ЛК шлют payment.succeeded на этот URL. НЕ доверяем телу: берём только id платежа,
+    ветку выбираем матчем по СВОЕЙ БД (id среди orders.provider_payment_id → заказ школы,
+    иначе → счёт подписки) и ПЕРЕПРОВЕРЯЕМ платёж через API кредами СВОЕГО магазина
+    (status=succeeded & paid). Заказ: paid + лид converted + «спасибо» через outbox
+    (доставит бот). Подписка: как раньше. Всегда 200 (иначе провайдер ретраит)."""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
     obj = (body or {}).get("object") or {}
     payment_id = obj.get("id")
-    if payment_id and config.YOOKASSA_ENABLED:
-        try:
+    if not payment_id:
+        return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+    try:
+        if config.SHOP_PAYMENTS_CONFIGURED and await db.order_exists_for_payment(payment_id):
+            # Ветка ЗАКАЗА школы (платёж создан ботом-кнопкой или панелью-«счётом»).
+            payment = await yookassa.get_shop_payment(payment_id)
+            if payment.get("status") == "succeeded" and payment.get("paid"):
+                await db.mark_order_paid_by_payment(payment_id)
+        elif config.YOOKASSA_ENABLED:
+            # Ветка СЧЁТА ПОДПИСКИ (поведение до 1B, без изменений).
             payment = await yookassa.get_payment(payment_id)
             if payment.get("status") == "succeeded" and payment.get("paid"):
                 card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
@@ -2345,9 +2465,9 @@ async def yookassa_webhook(request: Request):
                 if row is not None and await db.is_subscription_canceled():
                     await db.set_subscription_canceled(False, actor="yookassa-webhook",
                                                        ip=None, user_agent=None)
-        except Exception:
-            import logging
-            logging.getLogger("admin-panel").exception("yookassa webhook verify failed")
+    except Exception:
+        import logging
+        logging.getLogger("admin-panel").exception("yookassa webhook verify failed")
     return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
 
 
@@ -2600,6 +2720,10 @@ async def integrations_page(
             "guide_override": guide_override,
             "guide_effective": guide_effective,
             "guide_url_max": config.GUIDE_URL_MAX,
+            # Онлайн-оплата продаж (1B): ключи магазина школы нужны ОБОИМ концам.
+            "pay_enabled": await db.get_online_payments_enabled(),
+            "pay_panel_keys": config.SHOP_PAYMENTS_CONFIGURED,
+            "pay_bot_keys": runtime.get("shop_yookassa_set", False),
             "csrf_token": session.csrf_token,
             "session": session,
             "active": "integrations",
@@ -2624,6 +2748,22 @@ async def integrations_set_guide_url(
     )
     if result == "bad_url":
         return RedirectResponse(url="/integrations?err=bad_url", status_code=303)
+    return RedirectResponse(url="/integrations?saved=1", status_code=303)
+
+
+@app.post("/integrations/payments")
+async def integrations_set_payments(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    enabled: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Тумблер онлайн-оплаты (1B): app_settings['online_payments_enabled'] — бот гейтит
+    кнопку «Купить», панель — «счёт из диалога». Дефолт ВЫКЛ (включается явно)."""
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_online_payments_with_audit(
+        bool(enabled), actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
     return RedirectResponse(url="/integrations?saved=1", status_code=303)
 
 

@@ -200,6 +200,7 @@ async def main() -> None:
                 agent_token_set=bool(config.TIMEWEB_AI_TOKEN),
                 gateway_token_set=bool(config.AI_GATEWAY_TOKEN),
                 public_base_url=config.BOT_PUBLIC_BASE_URL,
+                shop_yookassa_set=config.SHOP_PAYMENTS_CONFIGURED,
             )
             logger.info("Статус рантайма опубликован в app_settings (bot @%s)", me.username)
         except Exception as e:  # noqa: BLE001 — публикация статуса не должна валить старт

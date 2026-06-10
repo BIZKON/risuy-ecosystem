@@ -49,3 +49,12 @@ create index if not exists orders_created_idx on orders (created_at desc);
 create index if not exists orders_lead_idx    on orders (lead_id);
 create index if not exists orders_status_idx  on orders (status);
 -- UUID-PK с default gen_random_uuid() → секвенса нет, грант usage on sequence не нужен.
+
+-- ── Phase 1B: онлайн-оплата ЮKassa (магазин ШКОЛЫ, отдельный от магазина подписки) ──
+-- payment_url — confirmation_url платежа: повторный клик «Купить» в течение TTL
+-- переиспользует ТОТ ЖЕ заказ и ссылку (анти-двойное списание). Пишут бот (owner,
+-- кнопка в рассылке) И панель («выставить счёт» из диалога — грант в panel_role.sql).
+alter table orders add column if not exists payment_url text;
+-- Вебхук панели матчит заказ ПО id платежа провайдера (телу вебхука не доверяем).
+create index if not exists orders_provider_payment_idx on orders (provider_payment_id)
+    where provider_payment_id is not null;

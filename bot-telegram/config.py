@@ -47,6 +47,28 @@ TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
 # base URL и модель берутся из app_settings (панель), ключ — секрет, только из env.
 AI_GATEWAY_TOKEN = os.environ.get("AI_GATEWAY_TOKEN", "")
 
+# ── Онлайн-оплата продаж школы — ЮKassa, МАГАЗИН ШКОЛЫ (Phase 1B) ────────────
+# ОТДЕЛЬНАЯ пара ключей от магазина подписки в панели (деньги лидов идут ШКОЛЕ,
+# биллинг сервиса — агентству; это разные магазины ЮKassa). Бот создаёт платёж по
+# клику «Купить»; подтверждение ловит вебхук ПАНЕЛИ (единый URL в ЛК обоих магазинов).
+# Ключи не заданы → онлайн-оплата выключена: кнопка «Купить» не показывается,
+# «счёт из диалога» в панели недоступен. Те же ключи добавляются и в env панели
+# (перепроверка платежа в вебхуке). Вписывает ВЛАДЕЛЕЦ через twc-set-env.sh.
+SHOP_YOOKASSA_SHOP_ID = os.environ.get("SHOP_YOOKASSA_SHOP_ID", "")
+SHOP_YOOKASSA_SECRET_KEY = os.environ.get("SHOP_YOOKASSA_SECRET_KEY", "")
+SHOP_PAYMENTS_CONFIGURED = bool(SHOP_YOOKASSA_SHOP_ID and SHOP_YOOKASSA_SECRET_KEY)
+YOOKASSA_API_BASE = os.environ.get("YOOKASSA_API_BASE", "https://api.yookassa.ru/v3")
+# Чек 54-ФЗ: включать, если у боевого магазина школы включена фискализация (иначе
+# create_payment без receipt отвергается). Дефолт ВЫКЛ. vat_code 1 = без НДС (УСН/НПД).
+SHOP_RECEIPT_ENABLED = os.environ.get("SHOP_RECEIPT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+SHOP_VAT_CODE = int(os.environ.get("SHOP_VAT_CODE", "1"))
+# TTL переиспользования pending-заказа при повторном клике «Купить», минуты: та же
+# ссылка на оплату вместо нового платежа (анти-двойное списание). Платёж ЮKassa
+# живёт ~1 час — TTL держим заметно меньше.
+ORDER_REUSE_MINUTES = int(os.environ.get("ORDER_REUSE_MINUTES", "30"))
+# Просроченные pending-заказы онлайн-оплаты → failed (часов; чистит retention-цикл).
+ORDER_STALE_HOURS = int(os.environ.get("ORDER_STALE_HOURS", "24"))
+
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
 

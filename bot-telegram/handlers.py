@@ -18,6 +18,7 @@ import config
 import db
 import messaging
 import texts
+import yookassa
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -179,6 +180,79 @@ async def on_check_sub_fallback(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await _deliver(cb.from_user.id, cb.message, state, bot)
     else:
         await cb.answer(texts.NOT_SUBSCRIBED_ALERT, show_alert=True)
+
+
+@router.callback_query(F.data.startswith("buy:"))
+async def on_buy(cb: CallbackQuery, bot: Bot):
+    """Клик «Купить» под рассылкой-офером (Phase 1B): pending-заказ + платёж ЮKassa
+    (магазин школы) → лиду сообщение с URL-кнопкой «Перейти к оплате».
+
+    Подтверждение оплаты ловит ВЕБХУК ПАНЕЛИ (paid + converted + «спасибо» через outbox) —
+    бот здесь только выставляет счёт. Повторный клик в пределах ORDER_REUSE_MINUTES отдаёт
+    ТУ ЖЕ ссылку (анти-двойное списание, db.create_or_reuse_pending_order). Паузу диалога
+    НЕ гейтим: клик — явное действие лида, ссылка на оплату не «авто-болтовня» Лии.
+    Любой сбой → мягкий PAY_UNAVAILABLE, заказ помечается failed (виден в «Платежах»)."""
+    # Тумблер панели + ключи магазина в env: что-то выключено → кнопка из старой
+    # рассылки могла пережить выключение — отвечаем мягким алертом, не молчим.
+    if not (config.SHOP_PAYMENTS_CONFIGURED and await db.is_online_payments_enabled()):
+        await cb.answer("Оплата временно недоступна 🥲 Напишите нам — поможем.", show_alert=True)
+        return
+    try:
+        product_id = int((cb.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    lead = await db.get_lead_for_purchase(cb.from_user.id)
+    product = await db.get_product(product_id)
+    # Продаём только живой офер с ценой в рублях (ЮKassa-магазин рублёвый; цена могла
+    # обнулиться/офер уйти в архив после отправки рассылки — кнопка переживает рассылку).
+    if (lead is None or product is None or product.get("status") != "active"
+            or not product.get("price") or product["price"] <= 0
+            or (product.get("currency") or "RUB") != "RUB"):
+        await cb.answer("Этот товар сейчас недоступен 🥲", show_alert=True)
+        return
+
+    order = await db.create_or_reuse_pending_order(
+        lead["id"], product_id, product["price"], "RUB",
+        reuse_minutes=config.ORDER_REUSE_MINUTES,
+    )
+    if order["reused"]:
+        pay_url = order["payment_url"]
+    else:
+        # return_url — вернуть человека в чат бота после оплаты; имя бота берём из
+        # runtime-снимка (бот сам публикует его на старте), фолбэк — просто t.me.
+        username = await db.get_app_setting("bot_username")
+        return_url = f"https://t.me/{username}" if username else "https://t.me"
+        try:
+            payment = await yookassa.create_payment(
+                amount=product["price"], currency="RUB",
+                description=f"{product.get('name') or 'Заказ'} — Школа Лесова",
+                return_url=return_url,
+                idempotence_key=str(order["id"]),
+                metadata={"kind": "order", "order_id": str(order["id"])},
+                lead_phone=lead.get("phone"),
+            )
+            pay_url = (payment.get("confirmation") or {}).get("confirmation_url")
+            payment_id = payment.get("id")
+            if not pay_url or not payment_id:
+                raise yookassa.YooKassaError("нет confirmation_url/id в ответе")
+            await db.set_order_payment(order["id"], payment_id, pay_url)
+        except yookassa.YooKassaError as e:
+            logger.warning("Платёж по заказу %s не создался: %s", order["id"], e)
+            await db.mark_order_failed(order["id"], "платёж не создан (сбой ЮKassa)")
+            await cb.answer()
+            await messaging.send_text(
+                bot, cb.from_user.id, texts.PAY_UNAVAILABLE, source="system"
+            )
+            return
+
+    await cb.answer()
+    pay_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=texts.PAY_BTN, url=pay_url)],
+    ])
+    await messaging.send_text(
+        bot, cb.from_user.id, texts.pay_message(product), source="system", reply_markup=pay_kb
+    )
 
 
 @router.message(StateFilter(None), F.text)

@@ -43,6 +43,18 @@ def unsubscribe_markup() -> InlineKeyboardMarkup:
     ])
 
 
+def broadcast_markup(*, buy_product_id: int | None = None,
+                     buy_label: str | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура рассылочного сообщения: опциональный ряд «Купить» (Phase 1B, рассылка-
+    продукт с ценой при включённой онлайн-оплате) НАД обязательным футером «Отписаться»
+    (152-ФЗ/38-ФЗ — никогда не выпадает). callback 'buy:<product_id>' → handlers.on_buy."""
+    rows = []
+    if buy_product_id is not None and buy_label:
+        rows.append([InlineKeyboardButton(text=buy_label, callback_data=f"buy:{buy_product_id}")])
+    rows.append([InlineKeyboardButton(text=texts.UNSUBSCRIBE_BTN, callback_data="unsub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # ── Process-wide token-bucket с приоритетом интерактиву ──────────────────────
 # Приоритеты acquire(): чем меньше число — тем раньше обслуживается при нехватке
 # токенов. Интерактив (воронка/Лия/служебка) обгоняет фон (рассылка/outbox), даже

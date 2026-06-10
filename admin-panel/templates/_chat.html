@@ -73,6 +73,28 @@
   <input type="file" id="file-picker" accept="{{ accept_attr }}" multiple hidden>
   <input type="file" id="attachments" name="files" multiple hidden>
 </form>
+
+{# ── «Выставить счёт» (Phase 1B). Блок виден только в «Диалогах» и только при
+   включённой онлайн-оплате (invoice_products кладёт _render_dialogs). После оплаты
+   заказ сам станет «Оплачен», лид — «Купил». ── #}
+{% if invoice_products is defined and invoice_products %}
+{% if invoiced %}<div class="flash flash--ok" role="status">Счёт отправлен 🌷 Лид получит ссылку на оплату от бота.</div>{% endif %}
+{% if invoice_err %}<div class="flash flash--error" role="alert">{{ invoice_err }}</div>{% endif %}
+<form class="inline-form invoice-form" method="post" action="/leads/{{ lead.id }}/invoice" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label class="field">
+    <span class="field__label">Выставить счёт <span class="field__hint">лид получит ссылку на оплату</span></span>
+    <select class="field__input" name="product_id">
+      {% for p in invoice_products %}
+      <option value="{{ p.id }}">{{ p.label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="form-actions">
+    <button class="btn btn--secondary" type="submit">Отправить счёт</button>
+  </div>
+</form>
+{% endif %}
 {% else %}
 <p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>
 {% endif %}

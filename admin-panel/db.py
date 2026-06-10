@@ -1739,7 +1739,7 @@ _RUNTIME_STATUS_KEYS = (
     config.RUNTIME_BOT_USERNAME_KEY, config.RUNTIME_GATE_CHANNEL_KEY,
     config.RUNTIME_GUIDE_ENV_KEY, config.RUNTIME_PROXY_SET_KEY,
     config.RUNTIME_AGENT_TOKEN_KEY, config.RUNTIME_GATEWAY_TOKEN_KEY,
-    config.RUNTIME_PUBLIC_BASE_KEY,
+    config.RUNTIME_PUBLIC_BASE_KEY, config.RUNTIME_SHOP_YK_KEY,
 )
 
 
@@ -1770,6 +1770,7 @@ async def get_runtime_status() -> dict:
         "agent_token_set": _val(config.RUNTIME_AGENT_TOKEN_KEY) == "1",
         "gateway_token_set": _val(config.RUNTIME_GATEWAY_TOKEN_KEY) == "1",
         "public_base_url": _val(config.RUNTIME_PUBLIC_BASE_KEY),
+        "shop_yookassa_set": _val(config.RUNTIME_SHOP_YK_KEY) == "1",
         "heartbeat_at": hb_row["updated_at"] if hb_row else None,
     }
 
@@ -2089,6 +2090,155 @@ async def set_order_status_with_audit(
                         "status": {"old": old["status"], "new": new_status}},
             )
             return row
+
+
+# ── Phase 1B: онлайн-оплата продаж школы (вебхук + «счёт из диалога») ─────────
+
+async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
+    """Отметить ЗАКАЗ оплаченным по id платёжа ЮKassa (вебхук-ветка заказов). Идемпотентно;
+    None — заказа с таким provider_payment_id нет (значит платёж не наш / уже не матчится).
+
+    В ОДНОЙ транзакции: orders.status='paid' (+paid_at) → лид в 'converted' (смысл 1B:
+    онлайн-оплата сама двигает воронку) → лиду «спасибо» через outbox (его доставит БОТ —
+    панель в Telegram не пишет, инвариант сохраняется) → аудит. Гранты panel_rw на каждый
+    шаг уже есть (update orders/leads.status, insert outbox, insert admin_audit)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "select id, lead_id, status from orders where provider_payment_id = $1 for update",
+                payment_id,
+            )
+            if row is None:
+                return None
+            if row["status"] == "paid":
+                return row  # повторный вебхук — no-op
+            upd = await c.fetchrow(
+                """
+                update orders
+                set status = 'paid', paid_at = coalesce(paid_at, now())
+                where id = $1
+                returning id, lead_id, product_id, amount, currency
+                """,
+                row["id"],
+            )
+            lead = None
+            if upd["lead_id"] is not None:
+                lead = await c.fetchrow(
+                    "update leads set status = 'converted' where id = $1 returning tg_user_id",
+                    upd["lead_id"],
+                )
+                if lead is not None and lead["tg_user_id"] is not None:
+                    await c.execute(
+                        "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by) "
+                        "values ($1, $2, 'text', $3, 'queued', 'yookassa-webhook')",
+                        upd["lead_id"], lead["tg_user_id"], config.ORDER_PAID_MESSAGE,
+                    )
+            await _insert_audit(
+                c, actor="yookassa-webhook", action="order_paid",
+                detail={"order_id": str(upd["id"]), "payment_id": payment_id,
+                        "amount": str(upd["amount"]), "lead_converted": lead is not None},
+            )
+            return upd
+
+
+async def order_exists_for_payment(payment_id: str) -> bool:
+    """Есть ли заказ с таким платежом (выбор ветки вебхука: заказ vs счёт подписки)."""
+    async with pool.acquire() as c:
+        return bool(await c.fetchval(
+            "select 1 from orders where provider_payment_id = $1", payment_id
+        ))
+
+
+async def create_invoice_order_with_audit(
+    lead_id, product_id: int, amount, currency: str,
+    *, actor: str, ip: str | None, user_agent: str | None,
+) -> asyncpg.Record | None:
+    """Pending-заказ для «счёта из диалога» (оператор выставляет лиду счёт). None — лид
+    не найден / без tg_user_id (счёт некому доставить). Возвращает (id, tg_user_id).
+    Платёж создаёт вызывающий (app.py, create_shop_payment) ПОСЛЕ записи заказа —
+    Idempotence-Key = id заказа; затем set_order_payment_panel + outbox-сообщение."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            lead = await c.fetchrow(
+                "select tg_user_id from leads where id = $1 for update", lead_id
+            )
+            if lead is None or lead["tg_user_id"] is None:
+                return None
+            row = await c.fetchrow(
+                """
+                insert into orders (lead_id, product_id, amount, currency, status, source, created_by)
+                values ($1, $2, $3, $4, 'pending', 'yookassa', $5)
+                returning id
+                """,
+                lead_id, product_id, amount, currency, actor,
+            )
+            await _insert_audit(
+                c, actor=actor, action="order_invoice_create", ip=ip, user_agent=user_agent,
+                lead_id=lead_id,
+                detail={"order_id": str(row["id"]), "product_id": product_id,
+                        "amount": str(amount)},
+            )
+            return await c.fetchrow(
+                "select id, $1::bigint as tg_user_id from orders where id = $2",
+                lead["tg_user_id"], row["id"],
+            )
+
+
+async def set_order_payment_panel(order_id, payment_id: str, payment_url: str) -> None:
+    """Связать заказ-«счёт» с платежом ЮKassa (зеркало бот-стороны, но под panel_rw —
+    column-гранты на provider_payment_id/payment_url выданы в 1B)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update orders set provider_payment_id = $2, payment_url = $3 where id = $1",
+            order_id, payment_id, payment_url,
+        )
+
+
+async def enqueue_invoice_message(lead_id, tg_user_id: int, text: str, *, actor: str) -> None:
+    """Положить лиду сообщение-счёт в outbox (ссылку на оплату доставит БОТ)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by) "
+            "values ($1, $2, 'text', $3, 'queued', $4)",
+            lead_id, tg_user_id, text, actor,
+        )
+
+
+async def get_online_payments_enabled() -> bool:
+    """Тумблер онлайн-оплаты из app_settings (нет строки/пусто → ВЫКЛ — зеркало бота)."""
+    raw = await get_app_setting(config.ONLINE_PAYMENTS_SETTING_KEY)
+    return bool((raw or "").strip())
+
+
+async def set_online_payments_with_audit(
+    enabled: bool, *, actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Включить/выключить онлайн-оплату (upsert app_settings + аудит, одна транзакция)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                """
+                insert into app_settings (key, value) values ($1, $2)
+                on conflict (key) do update set value = excluded.value
+                """,
+                config.ONLINE_PAYMENTS_SETTING_KEY, "1" if enabled else "",
+            )
+            await _insert_audit(
+                c, actor=actor, action="online_payments_set", ip=ip, user_agent=user_agent,
+                detail={"enabled": enabled},
+            )
+
+
+async def list_priced_products_for_invoice() -> list[asyncpg.Record]:
+    """Активные оферы с рублёвой ценой — селектор «выставить счёт» в диалоге."""
+    q = """
+        select id, name, price, currency
+        from products
+        where status = 'active' and price is not null and price > 0 and currency = 'RUB'
+        order by kind desc, created_at desc
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q)
 
 
 # =========================================================================== #
