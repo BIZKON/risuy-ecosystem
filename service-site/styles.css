@@ -1,0 +1,95 @@
+/* Сайт сервиса «ИИ-Агент Про» — self-contained (без внешних шрифтов/CDN, РФ-доступность).
+   Профессиональный B2B-минимализм. Один файл на все страницы (главная + юр-страницы). */
+:root{
+  --bg:#ffffff; --surface:#f7f8fb; --ink:#14152a; --muted:#5b5f73; --line:#e6e8f0;
+  --accent:#4f46e5; --accent-ink:#3730a3; --ok:#0f9d58; --dark:#14152a;
+  --maxw:980px; --radius:14px; --shadow:0 1px 2px rgba(20,21,42,.06),0 8px 24px rgba(20,21,42,.06);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+  font-size:17px; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent); text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 20px}
+
+/* Шапка */
+.top{position:sticky; top:0; z-index:10; background:rgba(255,255,255,.9); backdrop-filter:blur(8px); border-bottom:1px solid var(--line)}
+.top .wrap{display:flex; align-items:center; justify-content:space-between; height:64px; gap:16px}
+.brand{display:flex; align-items:center; gap:10px; font-weight:800; font-size:19px; color:var(--ink)}
+.brand:hover{text-decoration:none}
+.logo{width:30px; height:30px; border-radius:8px; background:linear-gradient(135deg,var(--accent),#7c3aed); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:15px}
+.nav{display:flex; gap:22px; font-size:15px}
+.nav a{color:var(--muted)}
+.nav a:hover{color:var(--ink); text-decoration:none}
+@media(max-width:640px){.nav{display:none}}
+
+/* Кнопки */
+.btn{display:inline-block; padding:13px 22px; border-radius:10px; font-weight:700; font-size:16px; border:1px solid transparent; cursor:pointer}
+.btn--primary{background:var(--accent); color:#fff}
+.btn--primary:hover{background:var(--accent-ink); text-decoration:none}
+.btn--ghost{background:#fff; color:var(--ink); border-color:var(--line)}
+.btn--ghost:hover{border-color:var(--accent); text-decoration:none}
+
+/* Hero */
+.hero{padding:64px 0 40px; text-align:center}
+.hero h1{font-size:42px; line-height:1.15; letter-spacing:-.02em; margin:0 0 16px}
+.hero p{font-size:20px; color:var(--muted); max-width:680px; margin:0 auto 28px}
+.hero .cta{display:flex; gap:12px; justify-content:center; flex-wrap:wrap}
+@media(max-width:640px){.hero h1{font-size:32px} .hero p{font-size:18px}}
+
+/* Секции */
+section{padding:44px 0}
+.section-title{font-size:28px; letter-spacing:-.01em; margin:0 0 8px; text-align:center}
+.section-sub{color:var(--muted); text-align:center; margin:0 auto 32px; max-width:640px}
+
+/* Возможности */
+.grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:18px}
+.card{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:24px}
+.card h3{margin:0 0 8px; font-size:18px}
+.card p{margin:0; color:var(--muted); font-size:15px}
+
+/* Тарифы */
+.plans{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:18px; align-items:stretch}
+.plan{background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:28px; display:flex; flex-direction:column; box-shadow:var(--shadow)}
+.plan--featured{border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,70,229,.18),var(--shadow)}
+.plan .badge{align-self:flex-start; font-size:12px; font-weight:700; color:var(--accent-ink); background:#eef0fe; padding:4px 10px; border-radius:999px; margin-bottom:12px}
+.plan h3{margin:0 0 4px; font-size:20px}
+.plan .price{font-size:34px; font-weight:800; letter-spacing:-.02em; margin:6px 0}
+.plan .price small{font-size:15px; font-weight:600; color:var(--muted)}
+.plan ul{list-style:none; padding:0; margin:14px 0 0; color:var(--muted); font-size:15px}
+.plan li{padding:7px 0 7px 26px; position:relative}
+.plan li::before{content:"✓"; position:absolute; left:0; color:var(--ok); font-weight:800}
+
+/* Шаги оплаты */
+.steps{counter-reset:s; display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:18px}
+.step{position:relative; padding:22px 22px 22px 22px; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius)}
+.step h4{margin:8px 0 6px; font-size:16px}
+.step p{margin:0; color:var(--muted); font-size:14px}
+.step::before{counter-increment:s; content:counter(s); display:inline-flex; width:32px; height:32px; align-items:center; justify-content:center; border-radius:50%; background:var(--accent); color:#fff; font-weight:800}
+
+/* Футер */
+.foot{background:var(--dark); color:#c9cbe0; padding:40px 0; font-size:14px; margin-top:24px}
+.foot a{color:#fff}
+.foot .cols{display:flex; flex-wrap:wrap; gap:32px; justify-content:space-between}
+.foot h5{color:#fff; margin:0 0 10px; font-size:15px}
+.foot .req{max-width:520px; line-height:1.7}
+.foot .links{display:flex; flex-direction:column; gap:6px}
+.foot .copy{border-top:1px solid rgba(255,255,255,.12); margin-top:24px; padding-top:16px; color:#9da0bd}
+
+/* Юридические страницы */
+.legal{padding:40px 0 20px}
+.legal .doc{background:#fff; max-width:820px; margin:0 auto}
+.legal h1{font-size:30px; letter-spacing:-.01em; margin:0 0 4px}
+.legal .lead{color:var(--muted); margin:0 0 24px}
+.legal h2{font-size:21px; margin:30px 0 10px; padding-top:10px; border-top:1px solid var(--line)}
+.legal h3{font-size:17px; margin:18px 0 6px}
+.legal p,.legal li{color:#23253f}
+.legal table{border-collapse:collapse; width:100%; margin:14px 0; font-size:15px}
+.legal th,.legal td{border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top}
+.legal th{background:var(--surface); width:38%}
+.legal .back{display:inline-block; margin-bottom:20px; color:var(--muted); font-size:15px}
+.legal .updated{color:var(--muted); font-size:14px}
