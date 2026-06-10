@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Команда{% endblock %}
+{% block body_class %}page-team{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Команда</h1>
+  <p class="page-head__hint">Операторы панели и их роли. <b>Администратор</b> — полный доступ (включая этот раздел). <b>Оператор</b> — вся операционная работа, кроме управления командой. Действия каждого видны в аудите по его логину.</p>
+</div>
+
+{% if saved %}{{ flash(saved, 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Завести оператора ── #}
+<section class="card" aria-label="Новый оператор">
+  <h2 class="card__title">Добавить оператора</h2>
+  <p class="card__note">Логин и пароль вы передаёте человеку сами. Пароль хранится только в виде криптографического хеша — восстановить его нельзя, можно лишь сбросить на новый.</p>
+  <form method="post" action="/team" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-row">
+      <label class="field">
+        <span class="field__label">Логин</span>
+        <input class="field__input mono" type="text" name="username"
+               minlength="{{ username_min }}" maxlength="{{ username_max }}"
+               pattern="[a-z0-9_\-]+" required
+               placeholder="например, marina">
+      </label>
+      <label class="field">
+        <span class="field__label">Пароль <span class="field__hint">мин. {{ password_min }} символов</span></span>
+        <input class="field__input" type="password" name="password"
+               minlength="{{ password_min }}" required autocomplete="new-password"
+               placeholder="придумайте пароль">
+      </label>
+      <label class="field">
+        <span class="field__label">Роль</span>
+        <select class="field__input" name="role">
+          {% for r in roles %}
+          <option value="{{ r.key }}"{% if r.key == default_role %} selected{% endif %}>{{ r.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <p class="hint hint--block">Логин — строчные латинские буквы, цифры, дефис, подчёркивание ({{ username_min }}–{{ username_max }} символов).</p>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Создать оператора</button>
+    </div>
+  </form>
+</section>
+
+{# ── Список команды ── #}
+<section class="section" aria-label="Операторы">
+  <h2 class="section__title section__title--lg">Операторы</h2>
+
+  {# env-админ — отдельный суперюзер вне БД, в списке его нет. #}
+  <p class="hint hint--block">Главный администратор <code class="mono">{{ env_admin|e }}</code> — встроенная учётная запись (вход работает всегда, в списке ниже её нет). Ниже — добавленные операторы.</p>
+
+  {% if users %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Логин</th>
+          <th scope="col">Роль</th>
+          <th scope="col">Статус</th>
+          <th scope="col">Заведён</th>
+          <th scope="col">Пароль</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr{% if not u.active %} class="row--muted"{% endif %}>
+          <td class="mono">
+            {{ u.username|e }}
+            {% if u.username == me %}<span class="pill pill--muted">вы</span>{% endif %}
+          </td>
+
+          {# Роль + переключатель (скрыт для себя — анти-самопонижение) #}
+          <td>
+            <span class="pill {% if u.role == 'admin' %}pill--ok{% else %}pill--muted{% endif %}">{{ role_labels.get(u.role, u.role) }}</span>
+            {% if u.username != me %}
+            <form class="inline-form" method="post" action="/team/{{ u.username|e }}/role">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="role" value="{{ 'operator' if u.role == 'admin' else 'admin' }}">
+              <button class="btn btn--secondary btn--sm" type="submit">
+                {{ 'Снять админа' if u.role == 'admin' else 'Сделать админом' }}
+              </button>
+            </form>
+            {% endif %}
+          </td>
+
+          {# Статус + активация/деактивация (деактивация себя запрещена) #}
+          <td>
+            {% if u.active %}<span class="pill pill--ok">Активен</span>{% else %}<span class="pill pill--bad">Отключён</span>{% endif %}
+            {% if u.username != me %}
+            <form class="inline-form" method="post" action="/team/{{ u.username|e }}/active">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="active" value="{{ '0' if u.active else '1' }}">
+              <button class="btn {% if u.active %}btn--danger-ghost{% else %}btn--secondary{% endif %} btn--sm" type="submit">
+                {{ 'Деактивировать' if u.active else 'Активировать' }}
+              </button>
+            </form>
+            {% endif %}
+          </td>
+
+          <td class="nowrap muted">
+            {{ u.created_at.strftime('%d.%m.%Y') if u.created_at else '—' }}
+            {% if u.created_by %}<br><span class="field__hint">кем: {{ u.created_by|e }}</span>{% endif %}
+          </td>
+
+          {# Сброс пароля #}
+          <td>
+            <form class="inline-form" method="post" action="/team/{{ u.username|e }}/password" autocomplete="off">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input class="field__input mono" type="password" name="password" size="16"
+                     minlength="{{ password_min }}" required autocomplete="new-password"
+                     placeholder="новый пароль" aria-label="Новый пароль для {{ u.username|e }}">
+              <button class="btn btn--secondary btn--sm" type="submit">Сбросить</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Операторов пока нет</p>
+    <p class="empty__text">Добавьте первого через форму выше. Войти он сможет своим логином и паролем — действия будут видны в аудите отдельно от вашего.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

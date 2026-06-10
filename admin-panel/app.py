@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -312,18 +313,21 @@ async def login_submit(
     # Тарпит ДО проверки пароля: замедляем брут, реальный оператор всё равно войдёт.
     await auth.apply_tarpit(account, bypass=bypass)
 
-    ok_user = auth.verify_username(username)
-    ok_pass = auth.verify_password(password)  # всегда полный argon2 (constant-time)
-    if not (ok_user and ok_pass):
+    # Единая аутентификация: env-админ (bootstrap-суперюзер) ИЛИ БД-юзер (admin_users).
+    # Возврат (actor, role) | None; constant-time/без enumeration — внутри auth.authenticate.
+    auth_result = await auth.authenticate(username, password)
+    if auth_result is None:
         await auth.register_login_failure(account)
         await db.audit(actor=account, action="login_fail", ip=ip, user_agent=ua,
                        detail={"reason": "bad_credentials"})
         return _login_redirect(error="bad", next=next_path)
+    actor, role = auth_result
 
-    # Успех: сброс троттла, ротация sid (анти-fixation), серверная сессия.
+    # Успех: сброс троттла, ротация sid (анти-fixation), серверная сессия с ролью.
     await auth.reset_login_throttle(account)
-    sid = await auth.create_session(config.ADMIN_USERNAME)
-    await db.audit(actor=config.ADMIN_USERNAME, action="login_ok", ip=ip, user_agent=ua)
+    sid = await auth.create_session(actor, role)
+    await db.audit(actor=actor, action="login_ok", ip=ip, user_agent=ua,
+                   detail={"role": role})
 
     resp = RedirectResponse(url=next_path, status_code=303)
     auth.set_session_cookie(resp, sid)
@@ -2681,6 +2685,173 @@ async def channels_page(
             "active": "channels",
         },
     )
+
+
+# =========================================================================== #
+# Раздел «Команда» (/team) — мульти-оператор + роли. ADMIN-ONLY: operator не видит
+# пункт в сайдбаре И отбивается _require_admin (defence-in-depth). env-админ —
+# bootstrap-суперюзер, всегда 'admin'. CRUD admin_users: создать / сменить роль /
+# активировать-деактивировать / сбросить пароль. Пароли — argon2 (auth.hash_password);
+# plain не хранится и не логируется. Все мутации: _require_admin → CSRF → PRG → аудит.
+# =========================================================================== #
+def _require_admin(session: auth.Session) -> None:
+    """Гейт раздела: только роль 'admin'. operator → 403 (пункта меню он и так не видит)."""
+    if session.role != "admin":
+        raise StarletteHTTPException(status_code=403, detail="Только для администратора")
+
+
+def _valid_team_username(u: str) -> bool:
+    return (config.TEAM_USERNAME_MIN <= len(u) <= config.TEAM_USERNAME_MAX
+            and re.match(config.TEAM_USERNAME_RE, u) is not None)
+
+
+def _present_admin_user(u) -> dict:
+    return {
+        "username": u["username"], "role": u["role"], "active": u["active"],
+        "created_at": u["created_at"], "created_by": u["created_by"],
+    }
+
+
+def _team_saved_text(saved: str | None) -> str | None:
+    return {
+        "created": "Оператор создан. Передайте ему логин и пароль.",
+        "role": "Роль обновлена.",
+        "active": "Статус обновлён.",
+        "password": "Пароль сброшен. Передайте оператору новый пароль.",
+    }.get(saved or "")
+
+
+def _team_err_text(err: str | None) -> str | None:
+    return {
+        "bad_username": f"Логин: {config.TEAM_USERNAME_MIN}–{config.TEAM_USERNAME_MAX} символов, "
+                        "строчные латинские буквы/цифры/дефис/подчёркивание.",
+        "reserved": "Этот логин зарезервирован системой. Выберите другой.",
+        "bad_password": f"Пароль: минимум {config.TEAM_PASSWORD_MIN} символов.",
+        "bad_role": "Недопустимая роль.",
+        "exists": "Оператор с таким логином уже есть.",
+        "not_found": "Оператор не найден.",
+        "self_deactivate": "Нельзя деактивировать собственную учётную запись.",
+    }.get(err or "")
+
+
+@app.get("/team", response_class=HTMLResponse)
+async def team_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: str | None = None,
+    err: str | None = None,
+):
+    _require_admin(session)
+    users = [_present_admin_user(u) for u in await db.list_admin_users()]
+    return templates.TemplateResponse(
+        request,
+        "team.html",
+        {
+            "users": users,
+            "roles": [{"key": r, "label": config.TEAM_ROLE_LABELS[r]} for r in config.TEAM_ROLES],
+            "role_labels": config.TEAM_ROLE_LABELS,
+            "default_role": config.TEAM_DEFAULT_ROLE,
+            "env_admin": config.ADMIN_USERNAME,
+            "username_min": config.TEAM_USERNAME_MIN,
+            "username_max": config.TEAM_USERNAME_MAX,
+            "password_min": config.TEAM_PASSWORD_MIN,
+            "me": session.actor,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "team",
+            "saved": _team_saved_text(saved),
+            "err": _team_err_text(err),
+        },
+    )
+
+
+@app.post("/team")
+async def team_create(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    username: str = Form(""),
+    password: str = Form(""),
+    role: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    uname = (username or "").strip().lower()
+    role = (role or "").strip()
+    if not _valid_team_username(uname):
+        return RedirectResponse(url="/team?err=bad_username", status_code=303)
+    if uname == (config.ADMIN_USERNAME or "").lower():   # совпал с env-админом → зарезервировано
+        return RedirectResponse(url="/team?err=reserved", status_code=303)
+    if role not in config.TEAM_ROLES:
+        return RedirectResponse(url="/team?err=bad_role", status_code=303)
+    if not (config.TEAM_PASSWORD_MIN <= len(password) <= config.TEAM_PASSWORD_MAX):
+        return RedirectResponse(url="/team?err=bad_password", status_code=303)
+    result = await db.create_admin_user_with_audit(
+        uname, auth.hash_password(password), role,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result == "exists":
+        return RedirectResponse(url="/team?err=exists", status_code=303)
+    return RedirectResponse(url="/team?saved=created", status_code=303)
+
+
+@app.post("/team/{username}/role")
+async def team_set_role(
+    request: Request,
+    username: str,
+    session: auth.Session = Depends(require_session),
+    role: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    role = (role or "").strip()
+    if role not in config.TEAM_ROLES:
+        return RedirectResponse(url="/team?err=bad_role", status_code=303)
+    ok = await db.set_admin_user_role_with_audit(
+        username.lower(), role, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/team?saved=role" if ok else "/team?err=not_found", status_code=303)
+
+
+@app.post("/team/{username}/active")
+async def team_set_active(
+    request: Request,
+    username: str,
+    session: auth.Session = Depends(require_session),
+    active: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    uname = username.lower()
+    want_active = active == "1"
+    # Запрет самодеактивации: env-админ — сеть безопасности, но db-админ мог бы потерять вход.
+    if not want_active and uname == (session.actor or "").lower():
+        return RedirectResponse(url="/team?err=self_deactivate", status_code=303)
+    ok = await db.set_admin_user_active_with_audit(
+        uname, want_active, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/team?saved=active" if ok else "/team?err=not_found", status_code=303)
+
+
+@app.post("/team/{username}/password")
+async def team_reset_password(
+    request: Request,
+    username: str,
+    session: auth.Session = Depends(require_session),
+    password: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    if not (config.TEAM_PASSWORD_MIN <= len(password) <= config.TEAM_PASSWORD_MAX):
+        return RedirectResponse(url="/team?err=bad_password", status_code=303)
+    ok = await db.set_admin_user_password_with_audit(
+        username.lower(), auth.hash_password(password),
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/team?saved=password" if ok else "/team?err=not_found", status_code=303)
 
 
 # =========================================================================== #

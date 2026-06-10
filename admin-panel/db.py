@@ -1805,6 +1805,118 @@ async def total_link_clicks() -> int:
 
 
 # =========================================================================== #
+# КОМАНДА (раздел «Команда»): мульти-оператор + роли (schema_team.sql). env-админ
+# здесь НЕ хранится (bootstrap-суперюзер вне БД, см. auth.authenticate). panel_rw:
+# SELECT + точечные INSERT/UPDATE (db/panel_role.sql), без DELETE — деактивация.
+# Аудит team_* в той же транзакции; plain-пароли НЕ логируем (только факт + роль).
+# `res.endswith(' 0')` ловит «0 строк затронуто» (INSERT 0 0 при конфликте / UPDATE 0).
+# =========================================================================== #
+
+async def get_admin_user(username: str) -> asyncpg.Record | None:
+    """Юзер панели по логину (для auth.authenticate): username/password_hash/role/active или None."""
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select username, password_hash, role, active from admin_users where username = $1",
+            username,
+        )
+
+
+async def list_admin_users() -> list[asyncpg.Record]:
+    """Список команды для /team (БЕЗ password_hash). Свежие сверху."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            """
+            select username, role, active, created_at, created_by, updated_at
+            from admin_users
+            order by created_at desc
+            """
+        )
+
+
+async def create_admin_user_with_audit(
+    username: str, password_hash: str, role: str, *,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> str:
+    """Создать оператора (INSERT + аудит, одна транзакция). "created" | "exists".
+    username/role уже нормализованы/валидны вызывающим (app.py)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute(
+                """
+                insert into admin_users (username, password_hash, role, active, created_by)
+                values ($1, $2, $3, true, $4)
+                on conflict (username) do nothing
+                """,
+                username, password_hash, role, actor,
+            )
+            if res.endswith(" 0"):   # INSERT 0 0 → логин занят
+                return "exists"
+            await _insert_audit(
+                c, actor=actor, action="team_user_create", ip=ip, user_agent=user_agent,
+                detail={"username": username, "role": role},
+            )
+    return "created"
+
+
+async def set_admin_user_role_with_audit(
+    username: str, role: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Сменить роль оператора (UPDATE + аудит). False — нет такого юзера."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute(
+                "update admin_users set role = $2, updated_at = now() where username = $1",
+                username, role,
+            )
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="team_user_role", ip=ip, user_agent=user_agent,
+                detail={"username": username, "role": role},
+            )
+    return True
+
+
+async def set_admin_user_active_with_audit(
+    username: str, active: bool, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Активировать/деактивировать оператора (UPDATE + аудит). False — нет такого юзера.
+    Деактивация = «увольнение» вместо DELETE: вход закрыт, строки/аудит сохранены."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute(
+                "update admin_users set active = $2, updated_at = now() where username = $1",
+                username, active,
+            )
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="team_user_active", ip=ip, user_agent=user_agent,
+                detail={"username": username, "active": active},
+            )
+    return True
+
+
+async def set_admin_user_password_with_audit(
+    username: str, password_hash: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Сбросить пароль оператора (UPDATE хеша + аудит). False — нет такого юзера. Plain НЕ логируем."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute(
+                "update admin_users set password_hash = $2, updated_at = now() where username = $1",
+                username, password_hash,
+            )
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="team_user_password", ip=ip, user_agent=user_agent,
+                detail={"username": username},
+            )
+    return True
+
+
+# =========================================================================== #
 # ПЛАТЕЖИ / ЗАКАЗЫ (раздел «Платежи», schema_orders.sql). Phase 1A: панель
 # фиксирует продажи руками (source='manual'), читает для дашборда. Бот в 1A не
 # участвует. panel_rw: SELECT + INSERT/UPDATE на колонках (provider_payment_id —

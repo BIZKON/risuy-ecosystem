@@ -58,6 +58,14 @@ grant select, insert, update, delete on admin_sessions to panel_rw;
 -- ── admin_login_throttle: CRUD (upsert счётчика неудач) ──────────────────────
 grant select, insert, update, delete on admin_login_throttle to panel_rw;
 
+-- ── admin_users: SELECT (auth-lookup + список «Команда») + точечные INSERT/UPDATE ──
+-- (объект в db/schema_team.sql — применять ПОСЛЕ него). DELETE НЕ выдаём: деактивация
+-- через active=false (как append-only-философия аудита). text-PK → sequence не нужен.
+-- env-админ в этой таблице НЕ хранится (bootstrap-суперюзер вне БД) — гранты его не касаются.
+grant select on admin_users to panel_rw;
+grant insert (username, password_hash, role, active, created_by) on admin_users to panel_rw;
+grant update (password_hash, role, active, updated_at) on admin_users to panel_rw;
+
 -- ── Гигиена: ничего лишнего ──────────────────────────────────────────────────
 -- Явно отзываем доступ к прочим функциям/последовательностям схемы (точечный
 -- USAGE на admin_audit_id_seq выдан выше и этим revoke не затрагивается, т.к.

@@ -71,6 +71,46 @@ def verify_username(raw_username: str) -> bool:
     )
 
 
+def hash_password(raw_password: str) -> str:
+    """argon2id PHC-хеш для нового/сброшенного пароля оператора (раздел «Команда»).
+    Plain-пароль в БД НЕ хранится; те же параметры _ph, что и у проверки."""
+    return _ph.hash(raw_password)
+
+
+async def authenticate(username: str, password: str) -> tuple[str, str] | None:
+    """Единая точка входа логина → (actor, role) при успехе, иначе None.
+
+    АДДИТИВНО, lockout НЕВОЗМОЖЕН:
+      1) env-админ (ADMIN_USERNAME/ADMIN_PASSWORD_HASH) — bootstrap-суперюзер, работает
+         ВСЕГДА мимо БД, роль 'admin'; проверяется ПЕРВЫМ. Имя env-админа зарезервировано:
+         при совпадении логина, но неверном пароле — в БД НЕ уходим.
+      2) БД-юзеры (admin_users): active + argon2 → (username, role).
+    Без user-enumeration: обе ветки всегда выполняют полный argon2 (реальный/ _DUMMY_HASH)."""
+    env_user_ok = verify_username(username)
+    env_pass_ok = verify_password(password)  # всегда полный argon2 (реальный + dummy)
+    if env_user_ok:
+        return (config.ADMIN_USERNAME, "admin") if env_pass_ok else None
+    return await _authenticate_db_user(username, password)
+
+
+async def _authenticate_db_user(username: str, password: str) -> tuple[str, str] | None:
+    """Проверка БД-пользователя (admin_users). ВСЕГДА один полный argon2-verify — на
+    реальном хеше (юзер есть и активен) или на _DUMMY_HASH (нет/неактивен) — чтобы тайминг
+    не отличал «нет логина» от «неверный пароль»."""
+    uname = (username or "").strip().lower()
+    row = await db.get_admin_user(uname) if uname else None
+    usable = bool(row and row["active"])
+    target = row["password_hash"] if usable else _DUMMY_HASH
+    try:
+        _ph.verify(target, password)
+        ok = True
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        ok = False
+    if ok and usable:
+        return (row["username"], row["role"])
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Троттл логина в БД (§3.4). НЕ in-memory: переживает редеплой контейнера.
 # Стратегия — экспоненциальный TARPIT, не жёсткий account-lock: реальный оператор
@@ -168,6 +208,9 @@ class Session:
     sid: str
     actor: str
     csrf_token: str
+    # Роль актора: 'admin' | 'operator'. Гейтит раздел «Команда» (_require_admin).
+    # env-админ ВСЕГДА 'admin' (вычисляется в load_session поверх хранимого значения).
+    role: str = "operator"
     # Серверное состояние поиска по телефону (§3.10): обратимый хеш живёт здесь,
     # а НЕ в query-string/истории/логах. None = активного поиска по телефону нет.
     search_phone_hash: str | None = None
@@ -185,8 +228,9 @@ def _csrf_for_sid(sid: str) -> str:
     return mac.hexdigest()
 
 
-async def create_session(actor: str) -> str:
-    """Ротация: ревокация всех прежних сессий актора + новая строка. Возврат sid."""
+async def create_session(actor: str, role: str = "operator") -> str:
+    """Ротация: ревокация всех прежних сессий актора + новая строка. Возврат sid.
+    role фиксируется в момент логина (для env-админа load_session всё равно поднимет до 'admin')."""
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     expires = now + timedelta(hours=config.SESSION_MAX_HOURS)
@@ -198,10 +242,10 @@ async def create_session(actor: str) -> str:
             )
             await c.execute(
                 """
-                insert into admin_sessions (sid, actor, issued_at, last_seen, expires_at, revoked)
-                values ($1, $2, $3, $3, $4, false)
+                insert into admin_sessions (sid, actor, issued_at, last_seen, expires_at, revoked, role)
+                values ($1, $2, $3, $3, $4, false, $5)
                 """,
-                sid, actor, now, expires,
+                sid, actor, now, expires, role,
             )
     return sid
 
@@ -218,7 +262,7 @@ async def load_session(sid: str) -> Session | None:
         async with c.transaction():
             row = await c.fetchrow(
                 """
-                select sid, actor, last_seen, expires_at, revoked, search_phone_hash
+                select sid, actor, last_seen, expires_at, revoked, role, search_phone_hash
                 from admin_sessions
                 where sid = $1
                 for update
@@ -236,10 +280,14 @@ async def load_session(sid: str) -> Session | None:
                 "update admin_sessions set last_seen = $2 where sid = $1", sid, now
             )
             sid_str = str(row["sid"])
+            # env-админ — суперюзер вне БД: его роль ВСЕГДА 'admin', независимо от хранимого
+            # (защита от мис-скоупа старых строк/бэкфилла). БД-юзеры — по хранимой роли.
+            role = "admin" if row["actor"] == config.ADMIN_USERNAME else (row["role"] or "operator")
             return Session(
                 sid=sid_str,
                 actor=row["actor"],
                 csrf_token=_csrf_for_sid(sid_str),
+                role=role,
                 search_phone_hash=row["search_phone_hash"],
             )
 

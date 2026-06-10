@@ -397,3 +397,18 @@ RUNTIME_PROXY_SET_KEY = "bot_proxy_set"
 RUNTIME_AGENT_TOKEN_KEY = "bot_agent_token_set"
 RUNTIME_GATEWAY_TOKEN_KEY = "bot_gateway_token_set"
 RUNTIME_PUBLIC_BASE_KEY = "bot_public_base_url"
+
+# ── Раздел «Команда» (мульти-оператор + роли, schema_team.sql) ────────────────
+# env-админ (ADMIN_USERNAME/ADMIN_PASSWORD_HASH) — bootstrap-СУПЕРЮЗЕР, работает ВСЕГДА
+# мимо БД (lockout невозможен). БД-юзеры (admin_users) — поверх. Роли: admin = полный
+# доступ (вкл. раздел «Команда»); operator = всё операционное, КРОМЕ управления
+# пользователями (решение владельца, v1). Гейт роли — в коде (_require_admin на /team).
+TEAM_ROLES = ("admin", "operator")
+TEAM_ROLE_LABELS = {"admin": "Администратор", "operator": "Оператор"}
+TEAM_DEFAULT_ROLE = "operator"
+# Политика логина/пароля нового оператора (defence-in-depth; argon2-хеш в БД, не plain).
+TEAM_USERNAME_MIN = 3
+TEAM_USERNAME_MAX = 32
+TEAM_USERNAME_RE = r"^[a-z0-9_-]+$"   # лоуэркейс, без пробелов — совпадает с lower() актора
+TEAM_PASSWORD_MIN = 10
+TEAM_PASSWORD_MAX = 200

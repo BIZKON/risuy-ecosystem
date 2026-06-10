@@ -60,7 +60,7 @@
   'dashboard': 'Статистика', 'dialogs': 'Диалоги', 'agents': 'ИИ-агенты',
   'knowledge': 'Базы знаний', 'integrations': 'Интеграции', 'channels': 'Каналы',
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
-  'subscription': 'Подписка',
+  'subscription': 'Подписка', 'team': 'Команда',
 } %}
 
 <body class="app {% block body_class %}{% endblock %}">
@@ -85,7 +85,7 @@
       {{ nav_item('products',     '/products',   'Продукты',   active) }}
       {{ nav_item('payments',     '/payments',   'Платежи',    active) }}
       {{ nav_item('subscription', '/subscription', 'Подписка',  active) }}
-      {{ nav_item('team',         '#', 'Команда',      active, 0, true) }}
+      {%- if session and session.role == 'admin' %}{{ nav_item('team', '/team', 'Команда', active) }}{% endif %}
     </nav>
 
     {% if csrf_token %}
