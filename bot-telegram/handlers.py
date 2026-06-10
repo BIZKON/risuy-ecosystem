@@ -64,9 +64,9 @@ def _gate_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _guide_kb() -> InlineKeyboardMarkup:
+def _guide_kb(guide_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=texts.GUIDE_BTN, url=config.GUIDE_URL)],
+        [InlineKeyboardButton(text=texts.GUIDE_BTN, url=guide_url)],
     ])
 
 
@@ -259,8 +259,11 @@ async def _deliver(user_id: int, message: Message, state: FSMContext, bot: Bot):
     # подписки; меняется только КОНТЕНТ финальной выдачи.
     if await _deliver_lead_magnet_product(user_id, bot):
         return
+    # Ссылка-гайд = app_settings['guide_url'] (панель, «Интеграции») ПОВЕРХ env GUIDE_URL;
+    # любой промах → env (см. db.get_effective_guide_url). Берём один раз: текст и кнопка совпадают.
+    guide_url = await db.get_effective_guide_url()
     await messaging.send_text(
-        bot, user_id, texts.deliver(config.GUIDE_URL), source="funnel", reply_markup=_guide_kb()
+        bot, user_id, texts.deliver(guide_url), source="funnel", reply_markup=_guide_kb(guide_url)
     )
 
 

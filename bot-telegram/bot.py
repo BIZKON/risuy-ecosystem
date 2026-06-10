@@ -187,6 +187,23 @@ async def main() -> None:
             BotCommand(command="stop", description="Отписаться от рассылок"),
         ])
         await bot.delete_webhook(drop_pending_updates=True)
+        # Публикуем НЕ-секретный снимок конфигурации в app_settings (bot_username для
+        # deep-link'ов панели + статус интеграций). Сбой изолируем — статус-борд не
+        # критичен, бот должен подняться в любом случае.
+        try:
+            me = await bot.get_me()
+            await db.publish_runtime_status(
+                bot_username=me.username or "",
+                gate_channel_url=config.CHANNEL_URL,
+                guide_url_env=config.GUIDE_URL,
+                proxy_set=bool(config.TELEGRAM_PROXY),
+                agent_token_set=bool(config.TIMEWEB_AI_TOKEN),
+                gateway_token_set=bool(config.AI_GATEWAY_TOKEN),
+                public_base_url=config.BOT_PUBLIC_BASE_URL,
+            )
+            logger.info("Статус рантайма опубликован в app_settings (bot @%s)", me.username)
+        except Exception as e:  # noqa: BLE001 — публикация статуса не должна валить старт
+            logger.warning("Не удалось опубликовать статус рантайма: %s", e)
         logger.info("Бот запущен на long-polling")
         await dp.start_polling(bot)
     finally:

@@ -704,6 +704,24 @@ async def get_app_setting(key: str) -> str | None:
         return await c.fetchval("select value from app_settings where key = $1", key)
 
 
+async def get_effective_guide_url() -> str:
+    """Эффективная ссылка-гайд для выдачи воронки: app_settings['guide_url'] (пишет
+    панель, раздел «Интеграции») ПОВЕРХ env GUIDE_URL. Любой промах — пусто/мусор/не
+    http(s)/сбой чтения — фолбэк на config.GUIDE_URL (env остаётся источником истины по
+    умолчанию, как у лид-магнит-офера). Зеркалит запись панели (admin-panel/db.py::
+    set_guide_url_with_audit, та же валидация). Читается В МОМЕНТ выдачи — правка ссылки
+    в панели подхватывается без редеплоя; чтение изолировано → выдача гайда не падает из-за БД."""
+    try:
+        raw = await get_app_setting("guide_url")
+    except Exception as e:  # noqa: BLE001 — сбой чтения настройки не должен ломать выдачу
+        logging.getLogger(__name__).warning("Не удалось прочитать guide_url: %s", e)
+        return config.GUIDE_URL
+    url = (raw or "").strip()
+    if url.startswith(("http://", "https://")) and not any(c.isspace() for c in url):
+        return url
+    return config.GUIDE_URL
+
+
 async def get_active_lead_magnet_product() -> dict | None:
     """Офер-лид-магнит для ЗАМЕНЫ GUIDE_URL-заглушки в выдаче воронки, или None (фолбэк).
 
@@ -781,6 +799,48 @@ async def get_ai_overrides() -> dict:
         "system_prompt": kv.get("ai_system_prompt") or "",
         "fallback": kv.get("ai_fallback_text") or "",
     }
+
+
+# ── app_settings: НЕ-секретный снимок конфигурации бота (бот ПИШЕТ owner-ролью) ──
+# Ключи статуса рантайма (бот пишет, панель ЧИТАЕТ — разделы «Интеграции»/«Каналы»).
+# ДОЛЖНЫ совпадать с admin-panel/config.py::RUNTIME_STATUS_*_KEY. У панели и бота РАЗНОЕ
+# окружение, поэтому общий канал статуса — только app_settings. Секреты СЮДА НЕ кладём:
+# для токена/прокси публикуем булев флаг присутствия ("1"/""), а не значение.
+_RUNTIME_STATUS_KEYS = (
+    "bot_username", "gate_channel_url", "bot_guide_url_env", "bot_proxy_set",
+    "bot_agent_token_set", "bot_gateway_token_set", "bot_public_base_url",
+)
+
+
+async def publish_runtime_status(
+    *, bot_username: str, gate_channel_url: str, guide_url_env: str,
+    proxy_set: bool, agent_token_set: bool, gateway_token_set: bool,
+    public_base_url: str,
+) -> None:
+    """Публикует НЕ-секретный снимок конфигурации бота в app_settings, чтобы панель честно
+    показывала статус интеграций и строила deep-link'и (t.me/<bot_username>?start=<source>).
+    Вызывается на СТАРТЕ (bot.py, после get_me); сбой изолируется вызывающим — не валит
+    запуск. updated_at строки bot_username = «последний раз бот публиковал статус» (heartbeat).
+    Пишем owner-ролью (бот владеет app_settings) — грантов панели не требует."""
+    pairs = (
+        ("bot_username", (bot_username or "").lstrip("@")),
+        ("gate_channel_url", gate_channel_url or ""),
+        ("bot_guide_url_env", guide_url_env or ""),
+        ("bot_proxy_set", "1" if proxy_set else ""),
+        ("bot_agent_token_set", "1" if agent_token_set else ""),
+        ("bot_gateway_token_set", "1" if gateway_token_set else ""),
+        ("bot_public_base_url", public_base_url or ""),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into app_settings (key, value) values ($1, $2)
+                    on conflict (key) do update set value = excluded.value
+                    """,
+                    key, value,
+                )
 
 
 # ── Трекинг /r/<token>: чтение токена + лог клика (пишет БОТ) ─────────────────

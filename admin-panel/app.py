@@ -2558,6 +2558,72 @@ async def knowledge_set_prompt(
 
 
 # =========================================================================== #
+# Раздел «Интеграции» (/integrations) — статус-борд интеграций (read-only) +
+# редактируемая ссылка-гайд (ЗАКРЫТИЕ GUIDE_URL-заглушки через app_settings). Статус =
+# get_ai_settings (что знает панель) + get_runtime_status (НЕ-секретный снимок бота).
+# Ссылку-гайд бот читает ПОВЕРХ env без редеплоя (get_effective_guide_url).
+# =========================================================================== #
+def _integrations_err_text(err: str | None) -> str | None:
+    return {
+        "bad_url": "Ссылка должна начинаться с http:// или https:// и быть без пробелов "
+                   f"(до {config.GUIDE_URL_MAX} символов).",
+    }.get(err or "")
+
+
+@app.get("/integrations", response_class=HTMLResponse)
+async def integrations_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    err: str | None = None,
+):
+    ai = await db.get_ai_settings()
+    runtime = await db.get_runtime_status()
+    guide_override = await db.get_guide_url_setting()
+    # Эффективная ссылка-гайд = override из панели ИЛИ env-фолбэк бота (что бот и выдаст).
+    guide_effective = guide_override or runtime.get("guide_url_env") or ""
+    # Какой токен нужен ТЕКУЩЕМУ бэкенду ИИ — для честного статуса «ключ ИИ задан?».
+    ai_token_ok = (runtime["gateway_token_set"] if ai["backend"] == "gateway"
+                   else runtime["agent_token_set"])
+    return templates.TemplateResponse(
+        request,
+        "integrations.html",
+        {
+            "ai": ai,
+            "ai_backend_label": config.AI_BACKENDS.get(ai["backend"], ai["backend"]),
+            "ai_token_ok": ai_token_ok,
+            "runtime": runtime,
+            "guide_override": guide_override,
+            "guide_effective": guide_effective,
+            "guide_url_max": config.GUIDE_URL_MAX,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "integrations",
+            "saved": bool(saved),
+            "err": _integrations_err_text(err),
+        },
+    )
+
+
+@app.post("/integrations/guide-url")
+async def integrations_set_guide_url(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    guide_url: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    # Пусто → снять переопределение (бот фолбэчит на env GUIDE_URL).
+    result = await db.set_guide_url_with_audit(
+        guide_url.strip() or None,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if result == "bad_url":
+        return RedirectResponse(url="/integrations?err=bad_url", status_code=303)
+    return RedirectResponse(url="/integrations?saved=1", status_code=303)
+
+
+# =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #
 @app.exception_handler(AuthRedirect)

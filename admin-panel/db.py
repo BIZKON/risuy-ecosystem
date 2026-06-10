@@ -1686,6 +1686,95 @@ async def list_liya_messages(*, limit: int = 20) -> list[asyncpg.Record]:
 
 
 # =========================================================================== #
+# ИНТЕГРАЦИИ (раздел «Интеграции»): ссылка-гайд через app_settings (закрытие
+# GUIDE_URL-заглушки) + чтение НЕ-секретного снимка конфигурации бота, который бот
+# публикует на старте (bot-telegram/db.py::publish_runtime_status). Панель и бот живут
+# в РАЗНОМ окружении — общий канал статуса только app_settings. Грант select/insert/
+# update on app_settings уже есть (как у лид-магнита/ИИ); DDL/новых грантов НЕ требует.
+# =========================================================================== #
+
+async def get_guide_url_setting() -> str | None:
+    """Переопределение ссылки-гайда из app_settings['guide_url'] (или None → бот фолбэчит
+    на env GUIDE_URL). Read-only под panel_rw (грант select)."""
+    raw = await get_app_setting(config.GUIDE_URL_SETTING_KEY)
+    return (raw or "").strip() or None
+
+
+async def set_guide_url_with_audit(
+    url: str | None, *, actor: str, ip: str | None, user_agent: str | None,
+) -> str:
+    """Задать/снять переопределение ссылки-гайда (upsert app_settings['guide_url'] + аудит).
+
+    url пусто/None → снять: пишем пустой value (delete на app_settings панели не грантован,
+    как у лид-магнита; бот трактует пустое как «нет override» → фолбэк на env GUIDE_URL).
+    Иначе валидируем СИММЕТРИЧНО боту (get_effective_guide_url): http(s)-схема, без пробелов,
+    длина ≤ GUIDE_URL_MAX — иначе бот всё равно отвергнет значение и уйдёт на env, поэтому
+    не даём сохранить заведомо-битую ссылку (понятная ошибка в UI). Возвращает
+    "set" | "cleared" | "bad_url". Запись и аудит — в ОДНОЙ транзакции (паттерн мутаций).
+    Ссылка-гайд — операционный конфиг (публичный URL GetCourse), не ПДн → пишем её в аудит."""
+    clean = (url or "").strip()
+    if clean and (
+        len(clean) > config.GUIDE_URL_MAX
+        or not clean.startswith(config.LINK_HINT_SCHEMES)
+        or any(c.isspace() for c in clean)
+    ):
+        return "bad_url"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                """
+                insert into app_settings (key, value) values ($1, $2)
+                on conflict (key) do update set value = excluded.value
+                """,
+                config.GUIDE_URL_SETTING_KEY, clean,
+            )
+            await _insert_audit(
+                c, actor=actor, action="guide_url_set", ip=ip, user_agent=user_agent,
+                detail={"url": clean or None, "cleared": not clean},
+            )
+    return "set" if clean else "cleared"
+
+
+_RUNTIME_STATUS_KEYS = (
+    config.RUNTIME_BOT_USERNAME_KEY, config.RUNTIME_GATE_CHANNEL_KEY,
+    config.RUNTIME_GUIDE_ENV_KEY, config.RUNTIME_PROXY_SET_KEY,
+    config.RUNTIME_AGENT_TOKEN_KEY, config.RUNTIME_GATEWAY_TOKEN_KEY,
+    config.RUNTIME_PUBLIC_BASE_KEY,
+)
+
+
+async def get_runtime_status() -> dict:
+    """Снимок конфигурации бота из app_settings (бот публикует на старте one-shot). Значения
+    НЕ-секретные (для токена/прокси — булев флаг присутствия). heartbeat_at = updated_at
+    строки bot_username (когда бот последний раз публиковался). Нет строк → бот ещё не
+    публиковал статус (старый образ/не перезапускался после деплоя) → published=False,
+    панель покажет подсказку. Read-only (грант select)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select key, value, updated_at from app_settings where key = any($1::text[])",
+            list(_RUNTIME_STATUS_KEYS),
+        )
+    kv = {r["key"]: r for r in rows}
+
+    def _val(key: str) -> str:
+        r = kv.get(key)
+        return (r["value"] or "").strip() if r else ""
+
+    hb_row = kv.get(config.RUNTIME_BOT_USERNAME_KEY)
+    return {
+        "published": bool(kv),
+        "bot_username": _val(config.RUNTIME_BOT_USERNAME_KEY),
+        "gate_channel_url": _val(config.RUNTIME_GATE_CHANNEL_KEY),
+        "guide_url_env": _val(config.RUNTIME_GUIDE_ENV_KEY),
+        "proxy_set": _val(config.RUNTIME_PROXY_SET_KEY) == "1",
+        "agent_token_set": _val(config.RUNTIME_AGENT_TOKEN_KEY) == "1",
+        "gateway_token_set": _val(config.RUNTIME_GATEWAY_TOKEN_KEY) == "1",
+        "public_base_url": _val(config.RUNTIME_PUBLIC_BASE_KEY),
+        "heartbeat_at": hb_row["updated_at"] if hb_row else None,
+    }
+
+
+# =========================================================================== #
 # ПЛАТЕЖИ / ЗАКАЗЫ (раздел «Платежи», schema_orders.sql). Phase 1A: панель
 # фиксирует продажи руками (source='manual'), читает для дашборда. Бот в 1A не
 # участвует. panel_rw: SELECT + INSERT/UPDATE на колонках (provider_payment_id —

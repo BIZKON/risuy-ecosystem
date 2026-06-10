@@ -58,7 +58,7 @@
 
 {% set NAV_TITLES = {
   'dashboard': 'Статистика', 'dialogs': 'Диалоги', 'agents': 'ИИ-агенты',
-  'knowledge': 'Базы знаний',
+  'knowledge': 'Базы знаний', 'integrations': 'Интеграции',
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
   'subscription': 'Подписка',
 } %}
@@ -80,7 +80,7 @@
       {{ nav_item('channels',     '#', 'Каналы',       active, 0, true) }}
       {{ nav_item('agents',       '/agents',     'ИИ-агенты',   active) }}
       {{ nav_item('knowledge',    '/knowledge',  'Базы знаний',  active) }}
-      {{ nav_item('integrations', '#', 'Интеграции',   active, 0, true) }}
+      {{ nav_item('integrations', '/integrations', 'Интеграции',   active) }}
       {{ nav_item('broadcasts',   '/broadcasts', 'Рассылки',   active) }}
       {{ nav_item('products',     '/products',   'Продукты',   active) }}
       {{ nav_item('payments',     '/payments',   'Платежи',    active) }}

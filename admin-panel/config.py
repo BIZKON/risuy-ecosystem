@@ -376,3 +376,24 @@ TIMEWEB_AI_ENABLED = bool(TIMEWEB_AI_TOKEN)
 # Промпт агента — главный рычаг «обучения» (курсы/цены/расписание/правила). Контекст
 # модели огромный, поэтому потолок щедрый (в отличие от gateway-фолбэка на 4000).
 AI_AGENT_PROMPT_MAX = _opt_int("AI_AGENT_PROMPT_MAX", 20000)
+
+# ── Раздел «Интеграции»: статус-борд + ссылка-гайд через app_settings ─────────
+# Ссылка-гайд (выдаётся после воронки) была ТОЛЬКО в env бота (GUIDE_URL = заглушка у
+# живых лидов). Теперь панель пишет app_settings['guide_url'], бот ЧИТАЕТ её ПОВЕРХ env
+# (bot-telegram/db.py::get_effective_guide_url) — правка ссылки БЕЗ редеплоя. Пусто →
+# бот фолбэчит на env GUIDE_URL (env остаётся дефолтом, как у лид-магнит-офера).
+GUIDE_URL_SETTING_KEY = "guide_url"
+GUIDE_URL_MAX = 500
+LINK_HINT_SCHEMES = ("http://", "https://")   # допустимые схемы ссылки-гайда
+
+# Снимок конфигурации БОТА в app_settings (бот ПИШЕТ owner-ролью на старте, панель ЧИТАЕТ).
+# У панели и бота РАЗНОЕ окружение → единственный честный канал статуса. Ключи ДОЛЖНЫ
+# совпадать с bot-telegram/db.py::_RUNTIME_STATUS_KEYS. Секретов тут нет: токен/прокси —
+# булев флаг присутствия ("1"/""), а не значение. updated_at строки bot_username = heartbeat.
+RUNTIME_BOT_USERNAME_KEY = "bot_username"
+RUNTIME_GATE_CHANNEL_KEY = "gate_channel_url"
+RUNTIME_GUIDE_ENV_KEY = "bot_guide_url_env"
+RUNTIME_PROXY_SET_KEY = "bot_proxy_set"
+RUNTIME_AGENT_TOKEN_KEY = "bot_agent_token_set"
+RUNTIME_GATEWAY_TOKEN_KEY = "bot_gateway_token_set"
+RUNTIME_PUBLIC_BASE_KEY = "bot_public_base_url"

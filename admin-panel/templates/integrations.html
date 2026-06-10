@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat_card, flash %}
+
+{% block title %}Интеграции{% endblock %}
+{% block body_class %}page-integrations{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Интеграции</h1>
+  <p class="page-head__hint">Состояние внешних подключений бота и <b>ссылка-гайд</b>, которую бот выдаёт после воронки. Ссылку можно менять <b>без перезапуска бота</b> — подхватится со следующей выдачи.</p>
+</div>
+
+{% if saved %}{{ flash('Ссылка-гайд сохранена. Бот выдаст её со следующей воронки.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+{% if not runtime.published %}{{ flash('Бот ещё не публиковал статус. После ближайшего деплоя/перезапуска здесь появятся актуальные данные (имя бота, каналы, ключи), а в «Каналах» — рабочие deep-link\'и. Статус заполнится автоматически.', 'info') }}{% endif %}
+
+{# ── Статус-карточки ── #}
+<div class="stats stats--funnel">
+  {{ stat_card('Бот',
+       ('@' ~ runtime.bot_username) if runtime.bot_username else '—',
+       '', 'accent' if runtime.bot_username else 'muted',
+       (runtime.heartbeat_at.strftime('обновлён %d.%m %H:%M') if runtime.heartbeat_at else 'не публиковался')) }}
+  {{ stat_card('Авто-ответы ИИ', 'Включены' if ai.enabled else 'Выключены',
+       '', 'accent' if ai.enabled else 'muted', ai_backend_label) }}
+  {{ stat_card('Ключ ИИ', 'Задан' if ai_token_ok else 'Не задан',
+       '', 'accent' if ai_token_ok else 'muted') }}
+</div>
+
+{# ── Таблица состояния подключений (read-only) ── #}
+<section class="section" aria-label="Состояние интеграций">
+  <h2 class="section__title section__title--lg">Состояние подключений</h2>
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Интеграция</th>
+          <th scope="col">Статус</th>
+          <th scope="col">Детали</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>ИИ-ассистент (Лия)</td>
+          <td>{% if ai.enabled %}<span class="pill pill--ok">Включён</span>{% else %}<span class="pill pill--muted">Выключен</span>{% endif %}</td>
+          <td class="muted">Движок: {{ ai_backend_label }}</td>
+        </tr>
+        <tr>
+          <td>Ключ ИИ в окружении бота</td>
+          <td>{% if ai_token_ok %}<span class="pill pill--ok">Задан</span>{% else %}<span class="pill pill--bad">Не задан</span>{% endif %}</td>
+          <td class="muted">{% if ai.backend == 'gateway' %}Ключ шлюза (ИИ-Агент Про){% else %}Токен агента (Лия){% endif %}{% if not ai_token_ok %} — добавьте скриптом деплоя (секрет, не через UI){% endif %}</td>
+        </tr>
+        <tr>
+          <td>Гейт-канал (проверка подписки)</td>
+          <td>{% if runtime.gate_channel_url %}<span class="pill pill--ok">Подключён</span>{% else %}<span class="pill pill--muted">—</span>{% endif %}</td>
+          <td>{% if runtime.gate_channel_url %}<a href="{{ runtime.gate_channel_url|e }}" target="_blank" rel="noopener noreferrer nofollow">{{ runtime.gate_channel_url|e }}</a>{% else %}<span class="muted">бот не публиковал статус</span>{% endif %}</td>
+        </tr>
+        <tr>
+          <td>Прокси Telegram</td>
+          <td>{% if runtime.proxy_set %}<span class="pill pill--ok">Включён</span>{% else %}<span class="pill pill--muted">Прямое подключение</span>{% endif %}</td>
+          <td class="muted">Доступ к Telegram API из РФ-ЦОД</td>
+        </tr>
+        <tr>
+          <td>Трекинг ссылок (редирект /r)</td>
+          <td>{% if runtime.public_base_url %}<span class="pill pill--ok">Включён</span>{% else %}<span class="pill pill--muted">—</span>{% endif %}</td>
+          <td class="muted">{{ runtime.public_base_url|e if runtime.public_base_url else 'публичный адрес бота не задан' }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="hint hint--block">Только чтение. Имя бота, каналы и флаги ключей публикует сам бот при старте — секреты сюда не попадают. Управление ИИ — в разделе «ИИ-агенты», обучение — в «Базах знаний».</p>
+</section>
+
+{# ── Ссылка-гайд (закрытие GUIDE_URL-заглушки через app_settings) ── #}
+<section class="card" aria-label="Ссылка-гайд">
+  <h2 class="card__title">Ссылка-гайд (выдаётся после воронки)</h2>
+  <p class="card__note">Что бот отправляет человеку, прошедшему воронку, — <b>если не настроен лид-магнит-офер</b> в разделе «Продукты» (офер имеет приоритет). Меняется без перезапуска бота.</p>
+
+  <p class="hint hint--block">Сейчас бот выдаёт:
+    {% if guide_effective %}<a href="{{ guide_effective|e }}" target="_blank" rel="noopener noreferrer nofollow"><code class="mono">{{ guide_effective|e }}</code></a>{% else %}<span class="muted">— ссылка не задана —</span>{% endif %}
+    {% if guide_override %}<span class="pill pill--ok">из панели</span>{% else %}<span class="pill pill--muted">из окружения бота</span>{% endif %}
+  </p>
+
+  <form method="post" action="/integrations/guide-url" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Переопределить ссылку <span class="field__hint">app_settings, поверх окружения</span></span>
+      <input class="field__input mono" type="url" name="guide_url" inputmode="url"
+             value="{{ guide_override|e if guide_override else '' }}" maxlength="{{ guide_url_max }}"
+             placeholder="https://schoolinmotion.getcourse.ru/pl/...">
+    </label>
+    <p class="hint hint--block">Должна начинаться с <code class="mono">http://</code> или <code class="mono">https://</code> (до {{ guide_url_max }} символов). Пусто — снять переопределение{% if runtime.guide_url_env %} (бот вернётся к ссылке из окружения: <code class="mono">{{ runtime.guide_url_env|e }}</code>){% else %} (бот вернётся к ссылке из своего окружения){% endif %}.</p>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Сохранить</button>
+    </div>
+  </form>
+</section>
+{% endblock %}
