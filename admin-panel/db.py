@@ -1881,7 +1881,9 @@ async def set_admin_user_active_with_audit(
     username: str, active: bool, *, actor: str, ip: str | None, user_agent: str | None,
 ) -> bool:
     """Активировать/деактивировать оператора (UPDATE + аудит). False — нет такого юзера.
-    Деактивация = «увольнение» вместо DELETE: вход закрыт, строки/аудит сохранены."""
+    Деактивация = «увольнение» вместо DELETE: вход закрыт, строки/аудит сохранены.
+    При деактивации ЖИВЫЕ сессии актора ревокаются В ТОЙ ЖЕ транзакции — иначе уже
+    выданная сессия доживала бы до idle/потолка (выявлено сквозной проверкой на проде)."""
     async with pool.acquire() as c:
         async with c.transaction():
             res = await c.execute(
@@ -1890,6 +1892,12 @@ async def set_admin_user_active_with_audit(
             )
             if res.endswith(" 0"):
                 return False
+            if not active:
+                # Немедленный выброс: следующий же запрос деактивированного → 303 /login.
+                await c.execute(
+                    "update admin_sessions set revoked = true where actor = $1 and revoked = false",
+                    username,
+                )
             await _insert_audit(
                 c, actor=actor, action="team_user_active", ip=ip, user_agent=user_agent,
                 detail={"username": username, "active": active},
