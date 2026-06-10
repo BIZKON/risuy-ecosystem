@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat_card, source_badge, flash %}
+
+{% block title %}Каналы{% endblock %}
+{% block body_class %}page-channels{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Каналы</h1>
+  <p class="page-head__hint">Откуда приходят лиды и как конвертируются — по площадкам. Ниже — готовые <b>deep-link'и</b> для воронки: разместите свою ссылку на каждом канале, и атрибуция заполнится сама.</p>
+</div>
+
+{# ── Сводные карточки ── #}
+<div class="stats stats--funnel">
+  {{ stat_card('Лидов всего', attribution.total_leads) }}
+  {{ stat_card('Купили', attribution.total_converted, '', 'accent') }}
+  {{ stat_card('Конверсия', attribution.overall_pct ~ '%') }}
+  {{ stat_card('Клики по ссылкам', clicks, '', 'muted', 'в рассылках (/r)') }}
+</div>
+
+{# ── Атрибуция по площадкам (read-only) ── #}
+<section class="section" aria-label="Атрибуция по площадкам">
+  <h2 class="section__title section__title--lg">Атрибуция по площадкам</h2>
+  {% if attribution.rows %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Площадка</th>
+          <th scope="col" class="num">Лидов</th>
+          <th scope="col" class="num">Купили</th>
+          <th scope="col" class="num">Конверсия</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in attribution.rows %}
+        <tr>
+          <td>{{ source_badge(r.source) }}</td>
+          <td class="num mono">{{ r.leads }}</td>
+          <td class="num mono">{{ r.converted }}</td>
+          <td class="num mono">{{ r.conv_pct }}%</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint hint--block">«Площадка» = метка <code class="mono">source</code> лида (ставится при первом <code class="mono">/start</code> по deep-link; first-touch — повторный заход не перетирает). Без метки — «Другое».</p>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Пока нет лидов</p>
+    <p class="empty__text">Как только люди начнут приходить в бота — здесь появится разбивка по площадкам.</p>
+  </div>
+  {% endif %}
+</section>
+
+{# ── Генератор deep-link'ов воронки ── #}
+<section class="section" aria-label="Ссылки для каналов">
+  <h2 class="section__title section__title--lg">Ссылки для каналов (deep-link)</h2>
+  {% if deep_links %}
+  <p class="hint hint--block">Разместите СВОЮ ссылку на каждой площадке. Перешедший по ней автоматически получит метку этой площадки и попадёт в таблицу выше. Кликните по полю и скопируйте ссылку.</p>
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Площадка</th>
+          <th scope="col">Ссылка для размещения</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in deep_links %}
+        <tr>
+          <td>{{ source_badge(d.source) }}</td>
+          <td><input class="field__input mono" type="text" readonly
+                     value="{{ d.url|e }}" aria-label="Ссылка для площадки {{ d.label|e }}"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint hint--block">Это все отслеживаемые площадки. Неизвестная метка (любой другой <code class="mono">?start=</code>) учтётся как «Другое». Чтобы добавить новый канал в этот список — нужна правка кода (бот + панель).</p>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Имя бота ещё не опубликовано</p>
+    <p class="empty__text">Ссылки появятся после ближайшего деплоя/перезапуска бота — он публикует своё имя автоматически. Загляните чуть позже.</p>
+  </div>
+  {% endif %}
+</section>
+
+{# ── Гейт-канал (проверка подписки) ── #}
+<section class="section" aria-label="Канал проверки подписки">
+  <h2 class="section__title section__title--lg">Канал проверки подписки</h2>
+  {% if runtime.gate_channel_url %}
+  <p class="hint hint--block">Перед выдачей гайда бот проверяет подписку на канал:
+    <a href="{{ runtime.gate_channel_url|e }}" target="_blank" rel="noopener noreferrer nofollow"><code class="mono">{{ runtime.gate_channel_url|e }}</code></a>.
+    Это даёт каналу нативный рост. Канал НЕ получает контент рассылок — только проверку подписки.</p>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Статус канала не опубликован</p>
+    <p class="empty__text">Появится после перезапуска бота.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

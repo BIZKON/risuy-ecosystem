@@ -58,7 +58,7 @@
 
 {% set NAV_TITLES = {
   'dashboard': 'Статистика', 'dialogs': 'Диалоги', 'agents': 'ИИ-агенты',
-  'knowledge': 'Базы знаний', 'integrations': 'Интеграции',
+  'knowledge': 'Базы знаний', 'integrations': 'Интеграции', 'channels': 'Каналы',
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
   'subscription': 'Подписка',
 } %}
@@ -77,7 +77,7 @@
     <nav class="snav" aria-label="Основная навигация">
       {{ nav_item('dashboard',    '/',           'Статистика', active) }}
       {{ nav_item('dialogs',      '/dialogs',    'Диалоги',    active, nav_dialogs_badge|default(0, true)) }}
-      {{ nav_item('channels',     '#', 'Каналы',       active, 0, true) }}
+      {{ nav_item('channels',     '/channels',   'Каналы',     active) }}
       {{ nav_item('agents',       '/agents',     'ИИ-агенты',   active) }}
       {{ nav_item('knowledge',    '/knowledge',  'Базы знаний',  active) }}
       {{ nav_item('integrations', '/integrations', 'Интеграции',   active) }}

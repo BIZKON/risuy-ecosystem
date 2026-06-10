@@ -2624,6 +2624,66 @@ async def integrations_set_guide_url(
 
 
 # =========================================================================== #
+# Раздел «Каналы» (/channels) — read-only атрибуция по площадке (source): лиды,
+# конверсия, conv% + генератор deep-link'ов воронки (t.me/<bot_username>?start=<source>)
+# + статус гейт-канала. Имя бота — из runtime-снимка (бот публикует на старте). Нет POST.
+# =========================================================================== #
+# Площадки для deep-link'ов: VALID_SOURCES бота, КРОМЕ 'other' (дефолтный «прочий» бакет —
+# отдельная ссылка избыточна; неизвестный ?start= в боте всё равно падает в 'other').
+_DEEPLINK_SOURCES = tuple(s for s in config.SOURCES if s != "other")
+
+
+def _present_attribution(rows) -> dict:
+    """Презентер атрибуции: строки по источникам (+ conv%) и итоги. leads=0 → conv%=0."""
+    items, total_leads, total_conv = [], 0, 0
+    for r in rows:
+        leads, conv = r["leads"], r["converted"]
+        total_leads += leads
+        total_conv += conv
+        items.append({
+            "source": r["source"],
+            "label": config.SOURCE_LABELS.get(r["source"], r["source"]),
+            "leads": leads,
+            "converted": conv,
+            "conv_pct": round(conv / leads * 100, 1) if leads else 0.0,
+        })
+    overall_pct = round(total_conv / total_leads * 100, 1) if total_leads else 0.0
+    # ключ rows, НЕ items: в Jinja `attribution.items` разрешается в метод dict.items(), не в ключ.
+    return {"rows": items, "total_leads": total_leads,
+            "total_converted": total_conv, "overall_pct": overall_pct}
+
+
+@app.get("/channels", response_class=HTMLResponse)
+async def channels_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+):
+    attribution = _present_attribution(await db.attribution_by_source())
+    clicks = await db.total_link_clicks()
+    runtime = await db.get_runtime_status()
+    username = runtime["bot_username"]
+    deep_links = [
+        {"source": s, "label": config.SOURCE_LABELS.get(s, s),
+         "url": f"https://t.me/{username}?start={s}"}
+        for s in _DEEPLINK_SOURCES
+    ] if username else []
+    return templates.TemplateResponse(
+        request,
+        "channels.html",
+        {
+            "attribution": attribution,
+            "clicks": clicks,
+            "runtime": runtime,
+            "bot_username": username,
+            "deep_links": deep_links,
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "channels",
+        },
+    )
+
+
+# =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #
 @app.exception_handler(AuthRedirect)

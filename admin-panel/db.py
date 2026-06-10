@@ -1775,6 +1775,36 @@ async def get_runtime_status() -> dict:
 
 
 # =========================================================================== #
+# КАНАЛЫ (раздел «Каналы»): read-only атрибуция по площадке (source) — лиды и
+# конверсия — для deep-link'ов воронки (?start=<source>). Зеркалит dashboard_by_source,
+# но + converted. conv% и итоги считает презентер app.py. Read-only (грант select).
+# =========================================================================== #
+
+async def attribution_by_source() -> list[asyncpg.Record]:
+    """Атрибуция по площадкам: лиды и конверсия (status='converted') на каждый source.
+    Один проход group by (как dashboard_by_source). НЕ фильтруем — это сводка по всей базе.
+    Деление на ноль/формат conv% — в презентере (app.py), не в SQL."""
+    q = """
+        select source,
+               count(*)                                     as leads,
+               count(*) filter (where status = 'converted') as converted
+        from leads
+        group by source
+        order by leads desc, source asc
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q)
+
+
+async def total_link_clicks() -> int:
+    """Всего кликов по трекинг-ссылкам рассылок (/r) — вспомогательная метрика «Каналов».
+    Это клики по ССЫЛКАМ В РАССЫЛКАХ (per-broadcast), НЕ атрибуция площадки воронки —
+    отдельная ось, помечаем как таковую в UI. Грант select on link_clicks у panel_rw есть."""
+    async with pool.acquire() as c:
+        return await c.fetchval("select count(*) from link_clicks") or 0
+
+
+# =========================================================================== #
 # ПЛАТЕЖИ / ЗАКАЗЫ (раздел «Платежи», schema_orders.sql). Phase 1A: панель
 # фиксирует продажи руками (source='manual'), читает для дашборда. Бот в 1A не
 # участвует. panel_rw: SELECT + INSERT/UPDATE на колонках (provider_payment_id —
