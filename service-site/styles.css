@@ -110,6 +110,7 @@ section{padding:44px 0}
 .pay-form input[type=email]{width:100%; padding:13px 14px; border:1px solid var(--line); border-radius:10px; font-size:16px; font-family:inherit}
 .pay-form input[type=email]:focus{outline:none; border-color:var(--accent)}
 .pay-form .agree{display:flex; gap:10px; align-items:flex-start; font-size:14px; color:var(--muted)}
+.pay-form .agree + .agree{margin-top:12px}
 .pay-form .agree input{margin-top:3px; accent-color:var(--accent)}
 .pay-form .btn-pay{width:100%; padding:16px; font-size:17px; font-weight:800; color:#fff; background:var(--accent); border:none; border-radius:12px; cursor:pointer; margin-top:6px}
 .pay-form .btn-pay:hover{background:var(--accent-ink)}
