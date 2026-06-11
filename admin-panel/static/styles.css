@@ -1319,6 +1319,8 @@ select.field__input {
 .role-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 10px 26px -18px rgba(33,31,26,.55); text-decoration: none; }
 .role-card__name { font-weight: 700; font-size: 16px; color: var(--ink); }
 .role-card__role { font-size: 13px; color: var(--accent); font-weight: 600; }
+.role-card__stats { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.role-card__stats b { color: var(--ink); font-weight: 700; }
 .role-card__tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
 .role-card__cta { margin-top: auto; padding-top: 10px; font-size: 13px; font-weight: 600; color: var(--accent); }
 

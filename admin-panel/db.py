@@ -1814,6 +1814,21 @@ async def set_channel_persona(
             )
 
 
+async def persona_dialog_stats() -> list[asyncpg.Record]:
+    """Сырьё аналитики «по ИИ-сотрудникам»: лиды и конверсия (status='converted') в разрезе
+    (ai_persona, source). Эффективную персону каждой группы резолвит app.py (нужны канал- и
+    глобал-назначения из app_settings — их в SQL нет). Read-only (грант select на leads)."""
+    q = """
+        select ai_persona, source,
+               count(*)                                     as leads,
+               count(*) filter (where status = 'converted') as converted
+        from leads
+        group by ai_persona, source
+    """
+    async with pool.acquire() as c:
+        return await c.fetch(q)
+
+
 async def ai_activity_summary(since) -> asyncpg.Record:
     """Сводка активности Лии для статус-карточек: всего ответов, за окно [since, now),
     и время последнего. Один проход по messages (source='liya', direction='out')."""

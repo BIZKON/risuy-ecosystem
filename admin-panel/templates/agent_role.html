@@ -15,11 +15,13 @@
 {% if push_warn %}{{ flash('Сохранено в панели, но не удалось отправить живому агенту (ИИ-сервис недоступен). Повторите сохранение позже для синхронизации.', 'error') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 
-{# ── Статус сотрудника ── #}
+{# ── Статус и показатели сотрудника ── #}
 <div class="stats stats--funnel">
-  {{ stat_card('Агент', 'Создан' if agent_ready else 'Создаётся при назначении', '',
+  {{ stat_card('Диалогов ведёт', leads, '', 'accent' if leads else 'muted') }}
+  {{ stat_card('Продаж', converted, '', 'accent' if converted else 'muted') }}
+  {{ stat_card('Конверсия', conv_pct ~ '%') }}
+  {{ stat_card('Агент', 'Создан' if agent_ready else 'При назначении', '',
        'accent' if agent_ready else 'muted') }}
-  {% if agent_ready %}{{ stat_card('ID агента', '…' ~ access_tail, '', 'muted') }}{% endif %}
   {{ stat_card('База знаний', (knowledge|length) ~ ' симв.', '', 'accent' if knowledge else 'muted') }}
   {% if tw_enabled and agent_ready %}{{ stat_card('Векторных баз', kb_count if kb_count is not none else '—', '', 'muted') }}{% endif %}
 </div>

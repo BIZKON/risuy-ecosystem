@@ -23,6 +23,9 @@
     <a class="role-card" href="/agents/role/{{ c.slug }}">
       <span class="role-card__name">{{ c.name }}</span>
       <span class="role-card__role">{{ c.role }}</span>
+      <span class="role-card__stats" title="Диалогов ведёт · продаж · конверсия">
+        <b>{{ c.leads }}</b> диал. · <b>{{ c.converted }}</b> прод. · <b>{{ c.conv_pct }}%</b>
+      </span>
       <span class="role-card__tags">
         {% if c.agent_ready %}<span class="pill pill--ok">агент готов</span>{% else %}<span class="pill pill--muted">не создан</span>{% endif %}
         {% if c.customized %}<span class="pill">своя инструкция</span>{% endif %}

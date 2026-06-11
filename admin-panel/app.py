@@ -523,6 +523,37 @@ def _persona_label(slug: str) -> str:
     return f'{p["name"]} — {p["role"]}' if p else ""
 
 
+def _effective_persona(lead_ai_persona, source, channel_map: dict, global_persona: str) -> str:
+    """Какой ИИ-сотрудник РЕАЛЬНО ведёт лида (та же лестница приоритетов, что у бота):
+    диалог (leads.ai_persona) > канал > глобальная настройка > дефолтный агент (Лия)."""
+    for cand in (lead_ai_persona, channel_map.get(source or "", ""), global_persona):
+        c = (cand or "").strip()
+        if c in config.PERSONA_PRESETS:
+            return c
+    return "liya"  # без назначения лида ведёт дефолтный агент — Лия (администратор)
+
+
+async def _persona_stats() -> dict:
+    """{slug: {leads, converted, conv_pct}} — нагрузка и конверсия по сотрудникам. Каждую
+    группу (ai_persona, source) относим к её ЭФФЕКТИВНОМУ сотруднику и суммируем. Снимок по
+    текущим назначениям (история смен персон не отслеживается — для решений «кто конвертит»
+    достаточно)."""
+    rows = await db.persona_dialog_stats()
+    channel_map = (await db.get_channel_personas(tuple(config.SOURCES)))["personas"]
+    global_persona = (await db.get_ai_settings()).get("persona") or ""
+    agg: dict[str, list[int]] = {}
+    for r in rows:
+        eff = _effective_persona(r["ai_persona"], r["source"], channel_map, global_persona)
+        b = agg.setdefault(eff, [0, 0])
+        b[0] += r["leads"]
+        b[1] += r["converted"]
+    return {
+        slug: {"leads": v[0], "converted": v[1],
+               "conv_pct": round(v[1] * 100 / v[0]) if v[0] else 0}
+        for slug, v in agg.items()
+    }
+
+
 async def _resolve_dialog_staff(lead: dict) -> dict:
     """Кто СЕЙЧАС отвечает этому диалогу + что выбрать в селекте. Приоритет:
     leads.ai_persona (ручной выбор диалога) > канал (ai_persona__<source>) > глобальная
@@ -2689,16 +2720,20 @@ async def agents_page(
         for k in config.PERSONA_ORDER
     ]
     persona_label = next((p["label"] for p in personas if p["is_current"]), "")
-    # Обзор ИИ-сотрудников по ролям: статус (агент создан? кастомизирован? есть знания?).
+    # Обзор ИИ-сотрудников по ролям: статус (агент создан? кастомизирован? есть знания?)
+    # + нагрузка/конверсия (счётчик диалогов на сотрудника — для решений «кого развивать»).
+    stats = await _persona_stats()
     role_cards = []
     for k in config.PERSONA_ORDER:
         r = await db.get_persona_role(k)
         p = config.PERSONA_PRESETS[k]
+        s = stats.get(k, {"leads": 0, "converted": 0, "conv_pct": 0})
         role_cards.append({
             "slug": k, "name": p["name"], "role": p["role"],
             "agent_ready": bool(r["access_id"]),
             "has_knowledge": bool((r["knowledge"] or "").strip()),
             "customized": not r["instruction_is_default"],
+            "leads": s["leads"], "converted": s["converted"], "conv_pct": s["conv_pct"],
         })
     return templates.TemplateResponse(
         request,
@@ -2794,6 +2829,7 @@ async def agent_role_page(
         raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
     preset = config.PERSONA_PRESETS[slug]
     role = await db.get_persona_role(slug)
+    s = (await _persona_stats()).get(slug, {"leads": 0, "converted": 0, "conv_pct": 0})
     # Статус векторных баз знаний агента (read-only): только если токен ИИ есть И агент создан.
     kb_count, tw_error = None, False
     if config.TIMEWEB_AI_ENABLED and role["nid"]:
@@ -2812,6 +2848,7 @@ async def agent_role_page(
             "agent_ready": bool(role["access_id"]),
             "access_tail": role["access_id"][-6:] if role["access_id"] else "",
             "best_practices": config.PERSONA_BEST_PRACTICES.get(slug, []),
+            "leads": s["leads"], "converted": s["converted"], "conv_pct": s["conv_pct"],
             "instruction_max": config.PERSONA_INSTRUCTION_MAX,
             "knowledge_max": config.PERSONA_KNOWLEDGE_MAX,
             "tw_enabled": config.TIMEWEB_AI_ENABLED,
