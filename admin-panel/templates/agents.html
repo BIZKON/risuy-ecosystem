@@ -14,6 +14,26 @@
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 {% if preset_applied %}{{ flash('Шаблон должности подставлен в системный промпт (НЕ сохранён). Проверьте текст, заполните данные в [скобках] и нажмите «Сохранить».', 'ok') }}{% endif %}
 
+{# ── ИИ-сотрудники по ролям: карточки → персональная настройка ── #}
+<section class="section" aria-label="ИИ-сотрудники по ролям">
+  <h2 class="section__title section__title--lg">ИИ-сотрудники</h2>
+  <p class="hint hint--block">Обучите каждого под его роль: <b>инструкция</b> (характер и правила), <b>база знаний</b> (продукты, цены, FAQ) и <b>лучшие практики</b>. Готового сотрудника назначайте на канал (раздел «Каналы») или на конкретный диалог.</p>
+  <div class="role-grid">
+    {% for c in role_cards %}
+    <a class="role-card" href="/agents/role/{{ c.slug }}">
+      <span class="role-card__name">{{ c.name }}</span>
+      <span class="role-card__role">{{ c.role }}</span>
+      <span class="role-card__tags">
+        {% if c.agent_ready %}<span class="pill pill--ok">агент готов</span>{% else %}<span class="pill pill--muted">не создан</span>{% endif %}
+        {% if c.customized %}<span class="pill">своя инструкция</span>{% endif %}
+        {% if c.has_knowledge %}<span class="pill">есть знания</span>{% endif %}
+      </span>
+      <span class="role-card__cta">Настроить и обучить →</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+
 {# ── Статус-карточки ── #}
 <div class="stats stats--funnel">
   {{ stat_card('Авто-ответы',

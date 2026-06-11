@@ -1312,3 +1312,17 @@ select.field__input {
   .bperiod__tx-head, .bperiod__tx-row { grid-template-columns: 1fr 1fr 1fr; }
   .bperiod__tx-head span:nth-child(3), .bperiod__tx-row span:nth-child(3) { display: none; }
 }
+
+/* ── ИИ-сотрудники по ролям (обзор на /agents) ── */
+.role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.role-card { display: flex; flex-direction: column; gap: 6px; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
+.role-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 10px 26px -18px rgba(33,31,26,.55); text-decoration: none; }
+.role-card__name { font-weight: 700; font-size: 16px; color: var(--ink); }
+.role-card__role { font-size: 13px; color: var(--accent); font-weight: 600; }
+.role-card__tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.role-card__cta { margin-top: auto; padding-top: 10px; font-size: 13px; font-weight: 600; color: var(--accent); }
+
+/* ── Лучшие практики роли (страница агента) ── */
+.bp-list { margin: 8px 0 0; padding-left: 0; list-style: none; display: grid; gap: 9px; }
+.bp-list li { position: relative; padding-left: 26px; font-size: 14px; color: var(--ink-soft); line-height: 1.5; }
+.bp-list li::before { content: "✓"; position: absolute; left: 0; top: 0; color: var(--ok); font-weight: 800; }

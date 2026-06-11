@@ -1693,11 +1693,39 @@ async def get_persona_agent(slug: str) -> str:
     return (v or "").strip()
 
 
-async def save_persona_agent(slug: str, access_id: str, prompt: str) -> None:
-    """Запомнить агента персоны: slug → access_id (для cloud_ai) И slug → промпт (для
-    gateway / per-lead). Реестр переиспользуется каналами И диалогами — один агент на персону."""
+async def get_persona_role(slug: str) -> dict:
+    """Всё для страницы управления ролью: инструкция, знания, эффективный промпт,
+    access_id и числовой id агента. Дефолт инструкции — каркас из PERSONA_PRESETS."""
+    keys = {
+        "instruction": config.PERSONA_INSTRUCTION_KEY.format(slug=slug),
+        "knowledge": config.PERSONA_KNOWLEDGE_KEY.format(slug=slug),
+        "prompt": config.PERSONA_PROMPT_REGISTRY_KEY.format(slug=slug),
+        "access_id": config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug),
+        "nid": config.PERSONA_AGENT_NID_KEY.format(slug=slug),
+    }
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select key, value from app_settings where key = any($1::text[])",
+            list(keys.values()),
+        )
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    preset = config.PERSONA_PRESETS.get(slug) or {}
+    instr = kv.get(keys["instruction"], "")
+    return {
+        "instruction": instr if instr else (preset.get("prompt") or ""),
+        "instruction_is_default": not bool(instr),
+        "knowledge": kv.get(keys["knowledge"], ""),
+        "access_id": kv.get(keys["access_id"], "").strip(),
+        "nid": kv.get(keys["nid"], "").strip(),
+    }
+
+
+async def save_persona_agent(slug: str, access_id: str, numeric_id, prompt: str) -> None:
+    """Запомнить агента персоны: access_id (вызов ботом) + числовой id (PATCH промпта) +
+    эффективный промпт (gateway/per-lead). Один агент на персону — общий для каналов/диалогов."""
     pairs = (
         (config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug), access_id),
+        (config.PERSONA_AGENT_NID_KEY.format(slug=slug), str(numeric_id or "")),
         (config.PERSONA_PROMPT_REGISTRY_KEY.format(slug=slug), prompt),
     )
     async with pool.acquire() as c:
@@ -1710,6 +1738,34 @@ async def save_persona_agent(slug: str, access_id: str, prompt: str) -> None:
                     """,
                     key, value,
                 )
+
+
+async def set_persona_role(
+    slug: str, *, instruction: str, knowledge: str, prompt: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Сохранить инструкцию + знания роли + эффективный промпт (склейку, читает бот) — в одной
+    транзакции с аудитом. Пуш на живого cloud-ai агента (если создан) делает вызывающий через API."""
+    pairs = (
+        (config.PERSONA_INSTRUCTION_KEY.format(slug=slug), instruction),
+        (config.PERSONA_KNOWLEDGE_KEY.format(slug=slug), knowledge),
+        (config.PERSONA_PROMPT_REGISTRY_KEY.format(slug=slug), prompt),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into app_settings (key, value) values ($1, $2)
+                    on conflict (key) do update set value = excluded.value
+                    """,
+                    key, value,
+                )
+            await _insert_audit(
+                c, actor=actor, action="persona_role_set", ip=ip, user_agent=user_agent,
+                detail={"persona": slug, "instruction_len": len(instruction),
+                        "knowledge_len": len(knowledge)},
+            )
 
 
 async def set_lead_persona(

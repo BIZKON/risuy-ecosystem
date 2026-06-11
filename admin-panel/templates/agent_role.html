@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat_card, flash %}
+
+{% block title %}{{ name }} — обучение{% endblock %}
+{% block body_class %}page-agents{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <a class="btn btn--secondary btn--sm" href="/agents">← Все сотрудники</a>
+  <h1 class="page-head__title" style="margin-top:10px">{{ name }} — {{ role_title }}</h1>
+  <p class="page-head__hint">Обучите этого ИИ-сотрудника под его роль: <b>инструкция</b> (характер и правила) + <b>база знаний</b> (факты: продукты, цены, FAQ, скрипты). Применяется там, куда сотрудник назначен — на канал или на диалог.</p>
+</div>
+
+{% if saved %}{{ flash('Сотрудник обучен. ' ~ ('Изменения отправлены живому агенту — применятся со следующего ответа.' if agent_ready else 'Вступят, когда вы назначите сотрудника на канал или диалог.'), 'ok') }}{% endif %}
+{% if push_warn %}{{ flash('Сохранено в панели, но не удалось отправить живому агенту (ИИ-сервис недоступен). Повторите сохранение позже для синхронизации.', 'error') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Статус сотрудника ── #}
+<div class="stats stats--funnel">
+  {{ stat_card('Агент', 'Создан' if agent_ready else 'Создаётся при назначении', '',
+       'accent' if agent_ready else 'muted') }}
+  {% if agent_ready %}{{ stat_card('ID агента', '…' ~ access_tail, '', 'muted') }}{% endif %}
+  {{ stat_card('База знаний', (knowledge|length) ~ ' симв.', '', 'accent' if knowledge else 'muted') }}
+  {% if tw_enabled and agent_ready %}{{ stat_card('Векторных баз', kb_count if kb_count is not none else '—', '', 'muted') }}{% endif %}
+</div>
+
+{# ── Лучшие практики роли ── #}
+<section class="card" aria-label="Лучшие практики">
+  <h2 class="card__title">Лучшие практики роли «{{ role_title }}»</h2>
+  <p class="card__note muted">Как прокачать этого сотрудника — что вписать в инструкцию и базу знаний ниже.</p>
+  <ul class="bp-list">
+    {% for bp in best_practices %}<li>{{ bp }}</li>{% endfor %}
+  </ul>
+</section>
+
+{# ── Обучение: инструкция + база знаний ── #}
+<section class="card" aria-label="Обучение сотрудника">
+  <h2 class="card__title">Обучение</h2>
+  <form method="post" action="/agents/role/{{ slug }}" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label class="field">
+      <span class="field__label">Инструкция сотрудника <span class="field__hint">кто он, тон, что можно и нельзя</span></span>
+      <textarea class="field__input field__textarea field__textarea--lg" name="instruction"
+                maxlength="{{ instruction_max }}" rows="10"
+                placeholder="Ты — …, роль …. Тон: …. Правила: не выдумывай цены; сложное передавай менеджеру; не проси коды и данные карт…">{{ instruction }}</textarea>
+    </label>
+    {% if instruction_is_default %}
+    <p class="hint hint--block">⚠️ Сейчас показан готовый <b>шаблон роли</b> — отредактируйте под свой бизнес (замените текст в [скобках]) и сохраните. До {{ instruction_max }} символов.</p>
+    {% else %}
+    <p class="hint hint--block">Характер и правила сотрудника. До {{ instruction_max }} символов.</p>
+    {% endif %}
+
+    <label class="field">
+      <span class="field__label">База знаний роли <span class="field__hint">факты, по которым отвечает</span></span>
+      <textarea class="field__input field__textarea field__textarea--lg" name="knowledge"
+                maxlength="{{ knowledge_max }}" rows="14"
+                placeholder="Продукты и цены: …&#10;Частые вопросы и ответы: …&#10;Скрипты/акции: …&#10;Чего НЕ обещать: …">{{ knowledge }}</textarea>
+    </label>
+    <p class="hint hint--block">Конкретные факты — сотрудник отвечает строго по ним и не выдумывает. До {{ knowledge_max }} символов. Бесплатно, данные в РФ, применяется сразу (без редеплоя).</p>
+
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Сохранить и обучить</button>
+    </div>
+  </form>
+</section>
+
+{# ── Векторная база знаний (RAG) — честный статус ── #}
+<section class="section" aria-label="Векторная база знаний">
+  <h2 class="section__title section__title--lg">Векторная база знаний (RAG)</h2>
+  {% if not tw_enabled %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Управление агентом не подключено</p>
+    <p class="empty__text">Нет токена ИИ-сервиса в окружении панели — добавляется скриптом деплоя.</p>
+  </div>
+  {% elif kb_count %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Подключено векторных баз: {{ kb_count }}</p>
+    <p class="empty__text">Сотрудник использует векторные базы знаний при ответах (в дополнение к инструкции выше).</p>
+  </div>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Сейчас знания — через поле «База знаний роли» выше</p>
+    <p class="empty__text">Это работает сразу, бесплатно и держит данные в РФ — для большинства ролей хватает (до {{ knowledge_max }} символов фактов). <b>Векторная база (RAG)</b> нужна при больших массивах документов; её подключение в РФ-контуре (эмбеддинги без передачи за рубеж) — следующий этап. Нужен большой объём знаний для этой роли — напишите нам, подключим.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

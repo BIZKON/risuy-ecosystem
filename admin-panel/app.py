@@ -2689,6 +2689,17 @@ async def agents_page(
         for k in config.PERSONA_ORDER
     ]
     persona_label = next((p["label"] for p in personas if p["is_current"]), "")
+    # Обзор ИИ-сотрудников по ролям: статус (агент создан? кастомизирован? есть знания?).
+    role_cards = []
+    for k in config.PERSONA_ORDER:
+        r = await db.get_persona_role(k)
+        p = config.PERSONA_PRESETS[k]
+        role_cards.append({
+            "slug": k, "name": p["name"], "role": p["role"],
+            "agent_ready": bool(r["access_id"]),
+            "has_knowledge": bool((r["knowledge"] or "").strip()),
+            "customized": not r["instruction_is_default"],
+        })
     return templates.TemplateResponse(
         request,
         "agents.html",
@@ -2709,6 +2720,7 @@ async def agents_page(
             "personas": personas,
             "persona_label": persona_label,
             "preset_applied": bool(preset_key),
+            "role_cards": role_cards,
             "recent_messages": recent,
             "csrf_token": session.csrf_token,
             "session": session,
@@ -2766,6 +2778,84 @@ async def agents_save(
         actor=session.actor, ip=_ip(request), user_agent=_ua(request), persona=persona,
     )
     return RedirectResponse(url="/agents?saved=1", status_code=303)
+
+
+# ---- /agents/role/{slug} — управление ИИ-сотрудником роли (промпт + знания + RAG) ---- #
+@app.get("/agents/role/{slug}", response_class=HTMLResponse)
+async def agent_role_page(
+    request: Request,
+    slug: str,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    warn: int = 0,
+    err: str | None = None,
+):
+    if slug not in config.PERSONA_PRESETS:
+        raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
+    preset = config.PERSONA_PRESETS[slug]
+    role = await db.get_persona_role(slug)
+    # Статус векторных баз знаний агента (read-only): только если токен ИИ есть И агент создан.
+    kb_count, tw_error = None, False
+    if config.TIMEWEB_AI_ENABLED and role["nid"]:
+        try:
+            agent = await timeweb_ai.get_agent(int(role["nid"]))
+            kb_count = len(agent.get("knowledge_bases_ids") or [])
+        except (timeweb_ai.TimewebAIError, ValueError):
+            tw_error = True
+    return templates.TemplateResponse(
+        request,
+        "agent_role.html",
+        {
+            "slug": slug, "name": preset["name"], "role_title": preset["role"],
+            "instruction": role["instruction"], "knowledge": role["knowledge"],
+            "instruction_is_default": role["instruction_is_default"],
+            "agent_ready": bool(role["access_id"]),
+            "access_tail": role["access_id"][-6:] if role["access_id"] else "",
+            "best_practices": config.PERSONA_BEST_PRACTICES.get(slug, []),
+            "instruction_max": config.PERSONA_INSTRUCTION_MAX,
+            "knowledge_max": config.PERSONA_KNOWLEDGE_MAX,
+            "tw_enabled": config.TIMEWEB_AI_ENABLED,
+            "kb_count": kb_count, "tw_error": tw_error,
+            "saved": bool(saved), "push_warn": bool(warn),
+            "err": _agent_role_err_text(err),
+            "csrf_token": session.csrf_token, "session": session, "active": "agents",
+        },
+    )
+
+
+@app.post("/agents/role/{slug}")
+async def agent_role_save(
+    request: Request,
+    slug: str,
+    session: auth.Session = Depends(require_session),
+    instruction: str = Form(""),
+    knowledge: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Сохранить инструкцию + базу знаний роли. Эффективный промпт (склейка) пишется в реестр
+    (его берёт gateway-бэкенд и создание агента) и, если агент роли уже создан, пушится на
+    живого cloud-ai агента (PATCH по числовому id). Сбой пуша не теряет сохранённое → warn."""
+    await _enforce_csrf(request, session, csrf_token)
+    if slug not in config.PERSONA_PRESETS:
+        raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
+    instruction = instruction.strip()[: config.PERSONA_INSTRUCTION_MAX]
+    knowledge = knowledge.strip()[: config.PERSONA_KNOWLEDGE_MAX]
+    if not instruction:
+        return RedirectResponse(url=f"/agents/role/{slug}?err=empty", status_code=303)
+    prompt = _persona_effective_prompt(instruction, knowledge)
+    await db.set_persona_role(
+        slug, instruction=instruction, knowledge=knowledge, prompt=prompt,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    role = await db.get_persona_role(slug)
+    if config.TIMEWEB_AI_ENABLED and role["nid"]:
+        try:
+            await timeweb_ai.set_system_prompt(int(role["nid"]), prompt)
+        except (timeweb_ai.TimewebAIError, ValueError):
+            import logging
+            logging.getLogger("admin-panel").exception("push persona-role prompt failed")
+            return RedirectResponse(url=f"/agents/role/{slug}?warn=1", status_code=303)
+    return RedirectResponse(url=f"/agents/role/{slug}?saved=1", status_code=303)
 
 
 # =========================================================================== #
@@ -3069,23 +3159,43 @@ async def channels_set_persona(
     return RedirectResponse(url="/channels?saved_persona=1", status_code=303)
 
 
+def _persona_effective_prompt(instruction: str, knowledge: str) -> str:
+    """Системный промпт агента роли = инструкция + (опц.) база знаний промптом. Знания
+    подаются как факты, по которым агент обязан отвечать (РФ-комплаентный «RAG промптом»)."""
+    instruction = (instruction or "").strip()
+    knowledge = (knowledge or "").strip()
+    if knowledge:
+        return (f"{instruction}\n\n## База знаний — отвечай СТРОГО по этим фактам, "
+                f"не выдумывай:\n{knowledge}")
+    return instruction
+
+
 async def _ensure_persona_agent(slug: str) -> str:
     """access_id cloud-ai агента персоны: из реестра (один агент на персону) или создаём
-    через API + сохраняем agent+prompt в реестры. Переиспользуется каналами И диалогами.
-    Нет токена ИИ → "" (per-lead/канал тогда полагается на промпт для gateway-бэкенда).
+    через API + сохраняем оба id (access для вызова, числовой для PATCH) и эффективный промпт.
+    Берём АКТУАЛЬНЫЙ промпт роли (инструкция+знания владельца), иначе каркас пресета.
+    Нет токена ИИ → "" (канал/per-lead тогда полагается на промпт для gateway-бэкенда).
     TimewebAIError (сбой создания) пробрасывается вызывающему — он решает, что показать."""
     existing = await db.get_persona_agent(slug)
     if existing:
         return existing
-    preset = config.PERSONA_PRESETS[slug]
     if not config.TIMEWEB_AI_ENABLED:
         return ""
-    access_id = await timeweb_ai.create_agent(
-        f'{preset["name"]} — {preset["role"]}', preset["prompt"],
-        model_id=config.PERSONA_AGENT_MODEL_ID,
+    role = await db.get_persona_role(slug)
+    prompt = _persona_effective_prompt(role["instruction"], role["knowledge"])
+    preset = config.PERSONA_PRESETS[slug]
+    created = await timeweb_ai.create_agent(
+        f'{preset["name"]} — {preset["role"]}', prompt, model_id=config.PERSONA_AGENT_MODEL_ID,
     )
-    await db.save_persona_agent(slug, access_id, preset["prompt"])
-    return access_id
+    await db.save_persona_agent(slug, created["access_id"], created.get("id"), prompt)
+    return created["access_id"]
+
+
+def _agent_role_err_text(err: str | None) -> str | None:
+    return {
+        "empty": "Инструкция роли не может быть пустой — опишите, кто этот сотрудник и как отвечает.",
+        "tw": "Не удалось обратиться к ИИ-сервису. Проверьте токен ИИ в окружении панели.",
+    }.get(err or "")
 
 
 # =========================================================================== #

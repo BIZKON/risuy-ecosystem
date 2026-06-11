@@ -78,12 +78,11 @@ async def set_system_prompt(agent_id, prompt: str) -> dict:
     return data.get("agent", data)
 
 
-async def create_agent(name: str, system_prompt: str, *, model_id: int) -> str:
-    """Создать cloud-ai агента под «ИИ-сотрудника» (персону) и вернуть access_id (UUID).
-
-    Вызов агента идёт ПО access_id (числовой id → 404, грабля §6ter скилла). token_package_id
-    при создании не валидируется и пакет НЕ покупает: агент работает pay-as-you-go с баланса.
-    api.timeweb.cloud периодически даёт SSL read-timeout → до 3 попыток (только на сеть)."""
+async def create_agent(name: str, system_prompt: str, *, model_id: int) -> dict:
+    """Создать cloud-ai агента под «ИИ-сотрудника» (персону). Возвращает {access_id, id}:
+    access_id (UUID) — для ВЫЗОВА ботом (числовой → 404 на /call, грабля §6ter); числовой id —
+    для PATCH промпта (set_system_prompt идёт по нему). token_package_id не валидируется и пакет
+    НЕ покупает: агент PAYG с баланса. api.timeweb.cloud даёт SSL read-timeout → до 3 попыток."""
     body = {
         "name": name[:100],
         "access_type": "private",
@@ -104,7 +103,7 @@ async def create_agent(name: str, system_prompt: str, *, model_id: int) -> str:
             access_id = (agent.get("access_id") or "").strip()
             if not access_id:
                 raise TimewebAIError("Создание агента: в ответе нет access_id")
-            return access_id
+            return {"access_id": access_id, "id": agent.get("id")}
         except TimewebAIError as e:
             last_err = e
             if "недоступен" not in str(e):  # ретраим только сеть/таймаут, не 4xx-ответы
