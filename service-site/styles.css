@@ -93,3 +93,33 @@ section{padding:44px 0}
 .legal th{background:var(--surface); width:38%}
 .legal .back{display:inline-block; margin-bottom:20px; color:var(--muted); font-size:15px}
 .legal .updated{color:var(--muted); font-size:14px}
+
+/* Страница оплаты */
+.pay{max-width:560px; margin:0 auto}
+.pay h1{font-size:30px; margin:0 0 6px}
+.pay .lead{color:var(--muted); margin:0 0 28px}
+.pay-form{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:26px}
+.pay-form .group{margin-bottom:22px}
+.pay-form label.lbl{display:block; font-weight:700; margin-bottom:10px}
+.pay-opt{display:flex; align-items:center; gap:12px; border:1px solid var(--line); background:#fff; border-radius:10px; padding:14px 16px; margin-bottom:10px; cursor:pointer}
+.pay-opt:hover{border-color:var(--accent)}
+.pay-opt input{accent-color:var(--accent); width:18px; height:18px}
+.pay-opt .nm{font-weight:700}
+.pay-opt .pr{margin-left:auto; font-weight:800; font-size:18px; white-space:nowrap}
+.pay-opt .qt{display:block; color:var(--muted); font-size:13px; font-weight:400}
+.pay-form input[type=email]{width:100%; padding:13px 14px; border:1px solid var(--line); border-radius:10px; font-size:16px; font-family:inherit}
+.pay-form input[type=email]:focus{outline:none; border-color:var(--accent)}
+.pay-form .agree{display:flex; gap:10px; align-items:flex-start; font-size:14px; color:var(--muted)}
+.pay-form .agree input{margin-top:3px; accent-color:var(--accent)}
+.pay-form .btn-pay{width:100%; padding:16px; font-size:17px; font-weight:800; color:#fff; background:var(--accent); border:none; border-radius:12px; cursor:pointer; margin-top:6px}
+.pay-form .btn-pay:hover{background:var(--accent-ink)}
+.pay-form .secure{text-align:center; color:var(--muted); font-size:13px; margin:14px 0 0}
+.pay-overlay{display:none; position:fixed; inset:0; background:rgba(20,21,42,.55); z-index:50; align-items:center; justify-content:center}
+.pay-overlay.on{display:flex}
+.pay-overlay .box{background:#fff; border-radius:16px; padding:36px 40px; text-align:center; max-width:380px}
+.pay-overlay .spin{width:42px; height:42px; border:4px solid var(--line); border-top-color:var(--accent); border-radius:50%; margin:0 auto 18px; animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.pay-overlay h3{margin:0 0 8px; font-size:19px}
+.pay-overlay p{margin:0; color:var(--muted); font-size:15px}
+.plan__pay{margin-top:auto; padding-top:18px; text-align:center}
+.plan__pay .btn{display:block}

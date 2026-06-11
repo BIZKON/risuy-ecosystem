@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Оплата подписки — ИИ-Агент Про</title>
+<meta name="description" content="Оплата подписки на сервис «ИИ-Агент Про» банковской картой. Выберите тариф и оплатите онлайн.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="logo">АП</span> ИИ-Агент&nbsp;Про</a>
+    <nav class="nav">
+      <a href="index.html#tarify">Тарифы</a>
+      <a href="oferta.html">Оферта</a>
+      <a href="contacts.html">Контакты</a>
+    </nav>
+  </div>
+</header>
+
+<main class="legal">
+  <div class="wrap">
+    <div class="pay">
+      <a class="back" href="index.html">← На главную</a>
+      <h1>Оплата подписки</h1>
+      <p class="lead">Выберите тариф, укажите email и оплатите банковской картой. Платёж проходит через ЮKassa по защищённому соединению.</p>
+
+      <form class="pay-form" id="payForm" autocomplete="on">
+        <div class="group">
+          <label class="lbl">Тариф</label>
+          <label class="pay-opt">
+            <input type="radio" name="plan" value="econom" data-amount="3 750 ₽" required>
+            <span><span class="nm">Эконом</span><span class="qt">500 сообщений ИИ в месяц</span></span>
+            <span class="pr">3 750 ₽<small>/мес</small></span>
+          </label>
+          <label class="pay-opt">
+            <input type="radio" name="plan" value="start" data-amount="7 500 ₽">
+            <span><span class="nm">Стартовый</span><span class="qt">1 500 сообщений ИИ в месяц</span></span>
+            <span class="pr">7 500 ₽<small>/мес</small></span>
+          </label>
+        </div>
+
+        <div class="group">
+          <label class="lbl" for="email">Email для чека и доступа</label>
+          <input type="email" id="email" name="email" placeholder="you@company.ru" required>
+        </div>
+
+        <div class="group">
+          <label class="agree">
+            <input type="checkbox" id="agree" required>
+            <span>Я принимаю условия <a href="oferta.html" target="_blank">Публичной оферты</a> и <a href="privacy.html" target="_blank">Политики конфиденциальности</a></span>
+          </label>
+        </div>
+
+        <button type="submit" class="btn-pay">Оплатить картой</button>
+        <p class="secure">🔒 Оплата картой Visa / MasterCard / МИР через ЮKassa. Данные карты вводятся на защищённой странице платёжной системы.</p>
+      </form>
+    </div>
+  </div>
+</main>
+
+<div class="pay-overlay" id="payOverlay" role="status" aria-live="polite">
+  <div class="box">
+    <div class="spin"></div>
+    <h3>Переходим к оплате…</h3>
+    <p id="payMsg">Формируем платёж и перенаправляем на защищённую форму оплаты ЮKassa.</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  // Предвыбор тарифа из ?plan=econom|start
+  var params = new URLSearchParams(location.search);
+  var plan = params.get('plan');
+  if (plan) {
+    var r = document.querySelector('input[name="plan"][value="' + plan + '"]');
+    if (r) r.checked = true;
+  }
+  var form = document.getElementById('payForm');
+  var overlay = document.getElementById('payOverlay');
+  var msg = document.getElementById('payMsg');
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!form.reportValidity()) return;
+    var sel = document.querySelector('input[name="plan"]:checked');
+    var amount = sel ? sel.getAttribute('data-amount') : '';
+    overlay.classList.add('on');
+    msg.textContent = 'Формируем платёж на сумму ' + amount + ' и перенаправляем на защищённую форму оплаты ЮKassa.';
+  });
+})();
+</script>
+
+</body>
+</html>
