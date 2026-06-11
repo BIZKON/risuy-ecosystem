@@ -42,6 +42,21 @@
     </label>
     <p class="hint hint--block">Если выключить — ИИ молчит, и клиентам в свободном чате отвечает оператор вручную (как при паузе диалога). Выдачу воронки это не затрагивает.</p>
 
+    {# ── «ИИ-сотрудник»: должность + готовые шаблоны промпта (витрина персон) ── #}
+    <label class="field">
+      <span class="field__label">Должность ИИ-сотрудника <span class="field__hint">кто отвечает клиентам по умолчанию</span></span>
+      <select class="field__input" name="persona">
+        <option value=""{% if not ai.persona %} selected{% endif %}>Своя настройка (без должности)</option>
+        {% for p in personas %}
+        <option value="{{ p.key }}"{% if p.is_current %} selected{% endif %}>{{ p.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="hint hint--block">Готовые шаблоны промпта под должность:
+      {% for p in personas %}<a href="/agents?preset={{ p.key }}">{{ p.label }}</a>{% if not loop.last %} · {% endif %}{% endfor %}.
+      Клик подставит шаблон в «Системный промпт» ниже (не сохраняя) — проверьте, заполните [скобки] и нажмите «Сохранить».
+      <b>Разным каналам — разных сотрудников:</b> назначается в разделе <a href="/channels">«Каналы»</a> (лидам из рекламы — продавец, подписчикам за подарком — администратор).</p>
+
     <label class="field">
       <span class="field__label">Бэкенд ИИ</span>
       <select class="field__input" name="backend">
@@ -77,20 +92,6 @@
              placeholder="адрес OpenAI-совместимого шлюза">
     </label>
     <p class="hint hint--block">Пусто — используется адрес по умолчанию. OpenAI-совместимый эндпоинт; бот добавит <code class="mono">/chat/completions</code>.</p>
-
-    {# ── «ИИ-сотрудник»: должность + готовые шаблоны промпта (витрина персон) ── #}
-    <label class="field">
-      <span class="field__label">Должность ИИ-сотрудника <span class="field__hint">метка с витрины сайта</span></span>
-      <select class="field__input" name="persona">
-        <option value=""{% if not ai.persona %} selected{% endif %}>Своя настройка (без должности)</option>
-        {% for p in personas %}
-        <option value="{{ p.key }}"{% if p.is_current %} selected{% endif %}>{{ p.label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <p class="hint hint--block">Готовые шаблоны промпта под должность:
-      {% for p in personas %}<a href="/agents?preset={{ p.key }}">{{ p.label }}</a>{% if not loop.last %} · {% endif %}{% endfor %}.
-      Клик подставит шаблон в поле ниже (не сохраняя) — проверьте, заполните [скобки] и нажмите «Сохранить».</p>
 
     <label class="field">
       <span class="field__label">Системный промпт <span class="field__hint">для бэкенда «ИИ-Агент Про (прямой)»</span></span>

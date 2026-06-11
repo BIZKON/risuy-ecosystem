@@ -7,8 +7,11 @@
 {% block content %}
 <div class="page-head">
   <h1 class="page-head__title">Каналы</h1>
-  <p class="page-head__hint">Откуда приходят лиды и как конвертируются — по площадкам. Ниже — готовые <b>deep-link'и</b> для воронки: разместите свою ссылку на каждом канале, и атрибуция заполнится сама.</p>
+  <p class="page-head__hint">Откуда приходят лиды и как конвертируются — по площадкам. Здесь же каждому каналу можно назначить своего <b>ИИ-сотрудника</b>. Ниже — готовые <b>deep-link'и</b> для воронки: разместите свою ссылку на каждом канале, и атрибуция заполнится сама.</p>
 </div>
+
+{% if saved_persona %}{{ flash('ИИ-сотрудник назначен каналу. Бот применит это со следующего сообщения лида.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
 
 {# ── Сводные карточки ── #}
 <div class="stats stats--funnel">
@@ -51,6 +54,44 @@
     <p class="empty__text">Как только люди начнут приходить в бота — здесь появится разбивка по площадкам.</p>
   </div>
   {% endif %}
+</section>
+
+{# ── ИИ-сотрудники по каналам ── #}
+<section class="section" aria-label="ИИ-сотрудники по каналам">
+  <h2 class="section__title section__title--lg">ИИ-сотрудники по каналам</h2>
+  <p class="hint hint--block">Каждому каналу — свой характер ответов: лидам из рекламы может отвечать <b>продавец</b>, подписчикам за подарком — <b>администратор</b>. «Как у всех» = общая настройка из раздела «ИИ-агенты». Применяется со следующего сообщения лида, без перезапуска.</p>
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Площадка</th>
+          <th scope="col">ИИ-сотрудник</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ch in channel_staff %}
+        <tr>
+          <td>{{ source_badge(ch.source) }}</td>
+          <td>
+            <form method="post" action="/channels/persona" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="source" value="{{ ch.source }}">
+              <select class="field__input field__input--inline" name="persona"
+                      aria-label="ИИ-сотрудник для площадки {{ ch.label|e }}">
+                <option value=""{% if not ch.persona %} selected{% endif %}>Как у всех (общая настройка)</option>
+                {% for p in persona_options %}
+                <option value="{{ p.key }}"{% if ch.persona == p.key %} selected{% endif %}>{{ p.label }}</option>
+                {% endfor %}
+              </select>
+              <button class="btn btn--dark btn--sm" type="submit">Сохранить</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint hint--block">При первом назначении сотрудника панель создаёт под него отдельного ИИ-агента (его знания и промпт правятся в «Базах знаний»). «Другое» — лиды без метки площадки.</p>
 </section>
 
 {# ── Генератор deep-link'ов воронки ── #}

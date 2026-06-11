@@ -78,6 +78,40 @@ async def set_system_prompt(agent_id, prompt: str) -> dict:
     return data.get("agent", data)
 
 
+async def create_agent(name: str, system_prompt: str, *, model_id: int) -> str:
+    """Создать cloud-ai агента под «ИИ-сотрудника» (персону) и вернуть access_id (UUID).
+
+    Вызов агента идёт ПО access_id (числовой id → 404, грабля §6ter скилла). token_package_id
+    при создании не валидируется и пакет НЕ покупает: агент работает pay-as-you-go с баланса.
+    api.timeweb.cloud периодически даёт SSL read-timeout → до 3 попыток (только на сеть)."""
+    body = {
+        "name": name[:100],
+        "access_type": "private",
+        "model_id": model_id,
+        "token_package_id": 0,
+        "settings": {
+            "model": {"temperature": 0.6, "max_tokens": 4096, "top_p": 1,
+                      "presence_penalty": 0, "frequency_penalty": 0},
+            "system_prompt": system_prompt,
+            "refine_query": False,
+        },
+    }
+    last_err: Exception | None = None
+    for _ in range(3):
+        try:
+            data = await asyncio.to_thread(_request, "POST", "/cloud-ai/agents", body=body)
+            agent = data.get("agent", data)
+            access_id = (agent.get("access_id") or "").strip()
+            if not access_id:
+                raise TimewebAIError("Создание агента: в ответе нет access_id")
+            return access_id
+        except TimewebAIError as e:
+            last_err = e
+            if "недоступен" not in str(e):  # ретраим только сеть/таймаут, не 4xx-ответы
+                raise
+    raise last_err  # type: ignore[misc]
+
+
 async def list_models() -> dict:
     """{model_id: public_name} — для подписи модели агента («DeepSeek V4 Pro»)."""
     data = await asyncio.to_thread(_request, "GET", "/cloud-ai/models")

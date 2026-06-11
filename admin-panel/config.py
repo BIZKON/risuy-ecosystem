@@ -455,6 +455,20 @@ PERSONA_PRESETS = {
     },
 }
 PERSONA_ORDER = ("liya", "mark", "sofia", "gleb")
+
+# «ИИ-сотрудник на канал»: разные персоны на разные источники лидов (страница «Каналы»).
+# Панель ПИШЕТ per-канальные ключи, бот ЧИТАЕТ их поверх глобальных (get_ai_overrides(source)):
+#   ai_persona__<source>        — slug персоны канала (для UI; бот не читает)
+#   ai_agent_id__<source>       — access_id СВОЕГО cloud-ai агента персоны (бэкенд cloud_ai)
+#   ai_system_prompt__<source>  — промпт персоны (бэкенд gateway)
+#   ai_persona_agent__<slug>    — реестр созданных агентов персон (slug → access_id), чтобы
+#                                 не плодить дубликаты: один агент на персону, переиспользуется.
+# Агент персоны создаётся панелью ЧЕРЕЗ API при первом назначении (timeweb_ai.create_agent).
+CHANNEL_PERSONA_KEY = "ai_persona__{source}"
+CHANNEL_AGENT_KEY = "ai_agent_id__{source}"
+CHANNEL_PROMPT_KEY = "ai_system_prompt__{source}"
+PERSONA_AGENT_REGISTRY_KEY = "ai_persona_agent__{slug}"
+PERSONA_AGENT_MODEL_ID = _opt_int("PERSONA_AGENT_MODEL_ID", 133)  # DeepSeek V4 Pro (как агент Лии)
 AI_BACKENDS = {
     "cloud_ai": "Агент (Лия)",
     "gateway": f"{AI_BRAND_MODEL} (прямой)",

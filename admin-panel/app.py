@@ -2907,10 +2907,21 @@ def _present_attribution(rows) -> dict:
             "total_converted": total_conv, "overall_pct": overall_pct}
 
 
+def _channels_err_text(err: str | None) -> str | None:
+    return {
+        "bad_source": "Неизвестный канал.",
+        "bad_persona": "Неизвестный ИИ-сотрудник.",
+        "tw": "Не удалось создать агента персоны у ИИ-сервиса. Проверьте токен ИИ в окружении "
+              "панели и повторите — назначение не сохранено.",
+    }.get(err or "")
+
+
 @app.get("/channels", response_class=HTMLResponse)
 async def channels_page(
     request: Request,
     session: auth.Session = Depends(require_session),
+    saved_persona: int = 0,
+    err: str | None = None,
 ):
     attribution = _present_attribution(await db.attribution_by_source())
     clicks = await db.total_link_clicks()
@@ -2921,6 +2932,17 @@ async def channels_page(
          "url": f"https://t.me/{username}?start={s}"}
         for s in _DEEPLINK_SOURCES
     ] if username else []
+    # «ИИ-сотрудник на канал»: назначения по ВСЕМ источникам (вкл. 'other' — лиды без метки).
+    cp = await db.get_channel_personas(tuple(config.SOURCES))
+    persona_options = [
+        {"key": k, "label": f'{config.PERSONA_PRESETS[k]["name"]} — {config.PERSONA_PRESETS[k]["role"]}'}
+        for k in config.PERSONA_ORDER
+    ]
+    channel_staff = [
+        {"source": s, "label": config.SOURCE_LABELS.get(s, s),
+         "persona": cp["personas"].get(s, "")}
+        for s in config.SOURCES
+    ]
     return templates.TemplateResponse(
         request,
         "channels.html",
@@ -2930,11 +2952,63 @@ async def channels_page(
             "runtime": runtime,
             "bot_username": username,
             "deep_links": deep_links,
+            "channel_staff": channel_staff,
+            "persona_options": persona_options,
+            "saved_persona": bool(saved_persona),
+            "err": _channels_err_text(err),
             "csrf_token": session.csrf_token,
             "session": session,
             "active": "channels",
         },
     )
+
+
+@app.post("/channels/persona")
+async def channels_set_persona(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    source: str = Form(""),
+    persona: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Назначить «ИИ-сотрудника» каналу. Персона выбрана впервые → панель создаёт под неё
+    СВОЕГО cloud-ai агента через API (один на персону, реестр ai_persona_agent__<slug>) и
+    каналу прописывается его access_id + промпт-каркас. Пустая персона — сброс («как у всех»).
+    Бот подхватывает per-канальные ключи со следующего сообщения лида, без редеплоя."""
+    await _enforce_csrf(request, session, csrf_token)
+    source = source.strip()
+    if source not in config.SOURCES:
+        return RedirectResponse(url="/channels?err=bad_source", status_code=303)
+    persona = persona.strip()
+    if persona and persona not in config.PERSONA_PRESETS:
+        return RedirectResponse(url="/channels?err=bad_persona", status_code=303)
+
+    agent_access_id = ""
+    prompt = ""
+    if persona:
+        preset = config.PERSONA_PRESETS[persona]
+        prompt = preset["prompt"]
+        cp = await db.get_channel_personas((source,))
+        agent_access_id = cp["agents"].get(persona, "")
+        if not agent_access_id and config.TIMEWEB_AI_ENABLED:
+            # Первое назначение персоны: создаём её агента (cloud_ai-бэкенд зовёт его по
+            # access_id). Сбой создания → ничего не сохраняем (канал остаётся как был).
+            try:
+                agent_access_id = await timeweb_ai.create_agent(
+                    f'{preset["name"]} — {preset["role"]}', prompt,
+                    model_id=config.PERSONA_AGENT_MODEL_ID,
+                )
+            except timeweb_ai.TimewebAIError:
+                import logging
+                logging.getLogger("admin-panel").exception("create_agent персоны не удался")
+                return RedirectResponse(url="/channels?err=tw", status_code=303)
+            await db.save_persona_agent(persona, agent_access_id)
+
+    await db.set_channel_persona(
+        source=source, persona=persona, agent_access_id=agent_access_id, prompt=prompt,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/channels?saved_persona=1", status_code=303)
 
 
 # =========================================================================== #

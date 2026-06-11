@@ -1661,6 +1661,69 @@ async def set_ai_settings(
             )
 
 
+# ── «ИИ-сотрудник на канал» (страница «Каналы») ──────────────────────────────
+async def get_channel_personas(sources: tuple[str, ...]) -> dict:
+    """{source: persona_slug} назначений «ИИ-сотрудника» по каналам + реестр агентов
+    персон {slug: access_id}. Одним запросом. Неизвестные слуги отфильтрованы."""
+    keys = [config.CHANNEL_PERSONA_KEY.format(source=s) for s in sources]
+    keys += [config.PERSONA_AGENT_REGISTRY_KEY.format(slug=p) for p in config.PERSONA_PRESETS]
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select key, value from app_settings where key = any($1::text[])", keys
+        )
+    kv = {r["key"]: (r["value"] or "").strip() for r in rows}
+    personas = {}
+    for s in sources:
+        v = kv.get(config.CHANNEL_PERSONA_KEY.format(source=s), "")
+        personas[s] = v if v in config.PERSONA_PRESETS else ""
+    agents = {
+        p: kv.get(config.PERSONA_AGENT_REGISTRY_KEY.format(slug=p), "")
+        for p in config.PERSONA_PRESETS
+    }
+    return {"personas": personas, "agents": agents}
+
+
+async def save_persona_agent(slug: str, access_id: str) -> None:
+    """Запомнить созданного агента персоны (slug → access_id) — переиспользуется каналами."""
+    async with pool.acquire() as c:
+        await c.execute(
+            """
+            insert into app_settings (key, value) values ($1, $2)
+            on conflict (key) do update set value = excluded.value
+            """,
+            config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug), access_id,
+        )
+
+
+async def set_channel_persona(
+    *, source: str, persona: str, agent_access_id: str, prompt: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Назначить «ИИ-сотрудника» каналу: персона + агент (cloud_ai) + промпт (gateway) —
+    в ОДНОЙ транзакции с аудитом. persona=""/пустые значения = сброс на «как у всех»
+    (delete панели не грантован — пишем пустые value, бот трактует их как «нет оверрайда»)."""
+    pairs = (
+        (config.CHANNEL_PERSONA_KEY.format(source=source), persona),
+        (config.CHANNEL_AGENT_KEY.format(source=source), agent_access_id),
+        (config.CHANNEL_PROMPT_KEY.format(source=source), prompt),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into app_settings (key, value) values ($1, $2)
+                    on conflict (key) do update set value = excluded.value
+                    """,
+                    key, value,
+                )
+            await _insert_audit(
+                c, actor=actor, action="channel_persona_set", ip=ip, user_agent=user_agent,
+                detail={"source": source, "persona": persona or None,
+                        "agent_set": bool(agent_access_id)},
+            )
+
+
 async def ai_activity_summary(since) -> asyncpg.Record:
     """Сводка активности Лии для статус-карточек: всего ответов, за окно [since, now),
     и время последнего. Один проход по messages (source='liya', direction='out')."""

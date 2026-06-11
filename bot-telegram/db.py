@@ -121,6 +121,20 @@ _MSG_KINDS = {
 }
 
 
+# ── Канал лида (для «ИИ-сотрудника на канал») ────────────────────────────────
+async def get_lead_source(tg_user_id: int) -> str | None:
+    """source лида (метка площадки first-touch) для выбора per-канального ИИ-сотрудника.
+    Нет лида/сбой → None (фолбэк на глобальные настройки ИИ — Лия не молчит из-за БД)."""
+    try:
+        async with pool.acquire() as c:
+            return await c.fetchval(
+                "select source from leads where tg_user_id = $1", tg_user_id
+            )
+    except Exception as e:  # noqa: BLE001 — выбор персоны не должен ломать авто-ответ
+        logging.getLogger(__name__).warning("Не удалось прочитать source лида: %s", e)
+        return None
+
+
 # ── Перехват (bot_paused) ────────────────────────────────────────────────────
 async def is_bot_paused(tg_user_id: int) -> bool:
     """True, если оператор взял ручное управление этим лидом. Нет строки → False."""
@@ -779,19 +793,28 @@ _AI_SETTING_KEYS = (
 _AI_BACKENDS = ("cloud_ai", "gateway")
 
 
-async def get_ai_overrides() -> dict:
+async def get_ai_overrides(source: str | None = None) -> dict:
     """Настройки ИИ из app_settings ПОВЕРХ env (пишет панель). Одним запросом.
     Отсутствие строки → дефолт: enabled=True (сохранить поведение «только env»),
     backend='cloud_ai', agent_id='' (→ config.AGENT_ID), model/gateway_base_url='' (→
     дефолты ai.py), system_prompt='', fallback='' (→ хардкод ai._FALLBACK). Ключи доступа
     (TIMEWEB_AI_TOKEN / AI_GATEWAY_TOKEN) в app_settings НЕ лежат (секреты) — только env.
     Любой сбой чтения трактуем как «нет переопределений»: ИИ не должен молчать из-за БД.
-    Логика/дефолты ДОЛЖНЫ совпадать с панелью (admin-panel/db.py::get_ai_settings)."""
+    Логика/дефолты ДОЛЖНЫ совпадать с панелью (admin-panel/db.py::get_ai_settings).
+
+    source — канал лида («ИИ-сотрудник на канал», панель → «Каналы»): если для него
+    назначена персона, панель кладёт ключи `ai_agent_id__<source>` (cloud_ai: СВОЙ агент
+    персоны) и `ai_system_prompt__<source>` (gateway: промпт персоны). Непустой
+    per-канальный ключ ПОБЕЖДАЕТ глобальный; пусто/нет строки → глобальное поведение."""
+    keys = list(_AI_SETTING_KEYS)
+    src = (source or "").strip()
+    if src:
+        keys += [f"ai_agent_id__{src}", f"ai_system_prompt__{src}"]
     try:
         async with pool.acquire() as c:
             rows = await c.fetch(
                 "select key, value from app_settings where key = any($1::text[])",
-                list(_AI_SETTING_KEYS),
+                keys,
             )
     except Exception as e:  # noqa: BLE001 — сбой чтения не должен ломать авто-ответ
         logging.getLogger(__name__).warning("Не удалось прочитать настройки ИИ: %s", e)
@@ -802,13 +825,18 @@ async def get_ai_overrides() -> dict:
     backend = (kv.get("ai_backend") or "").strip()
     if backend not in _AI_BACKENDS:
         backend = "cloud_ai"
+    agent_id = (kv.get("ai_agent_id") or "").strip()
+    system_prompt = kv.get("ai_system_prompt") or ""
+    if src:
+        agent_id = (kv.get(f"ai_agent_id__{src}") or "").strip() or agent_id
+        system_prompt = (kv.get(f"ai_system_prompt__{src}") or "") or system_prompt
     return {
         "enabled": True if enabled_raw is None else bool(enabled_raw.strip()),
         "backend": backend,
-        "agent_id": (kv.get("ai_agent_id") or "").strip(),
+        "agent_id": agent_id,
         "model": (kv.get("ai_model") or "").strip(),
         "gateway_base_url": (kv.get("ai_gateway_base_url") or "").strip(),
-        "system_prompt": kv.get("ai_system_prompt") or "",
+        "system_prompt": system_prompt,
         "fallback": kv.get("ai_fallback_text") or "",
     }
 

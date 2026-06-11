@@ -271,7 +271,9 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
         return
     # Глобальный тумблер Лии (раздел «ИИ-агенты» панели): выключена → молчим, как при
     # паузе (оператор ответит руками). agent_id/fallback берём поверх env из тех же настроек.
-    ai_cfg = await db.get_ai_overrides()
+    # source лида выбирает per-канального «ИИ-сотрудника» (панель → «Каналы»); нет — глобальный.
+    lead_source = await db.get_lead_source(message.from_user.id)
+    ai_cfg = await db.get_ai_overrides(lead_source)
     if not ai_cfg["enabled"]:
         return
     try:
