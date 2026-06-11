@@ -12,6 +12,7 @@
 
 {% if saved %}{{ flash('Настройки ИИ сохранены. Бот применит их со следующего сообщения.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
+{% if preset_applied %}{{ flash('Шаблон должности подставлен в системный промпт (НЕ сохранён). Проверьте текст, заполните данные в [скобках] и нажмите «Сохранить».', 'ok') }}{% endif %}
 
 {# ── Статус-карточки ── #}
 <div class="stats stats--funnel">
@@ -19,6 +20,8 @@
        'Включены' if ai.enabled else 'Выключены',
        '', 'accent' if ai.enabled else 'muted') }}
   {{ stat_card('Движок', 'ИИ-Агент Про' if ai.backend == 'gateway' else 'Лия', '', 'accent') }}
+  {{ stat_card('Должность', persona_label if persona_label else 'Своя настройка', '',
+       'accent' if persona_label else 'muted') }}
   {{ stat_card('Ответов за ' ~ window_days ~ ' дн.', activity.recent) }}
   {{ stat_card('Всего ответов', activity.total) }}
   {{ stat_card('Последний ответ',
@@ -75,13 +78,27 @@
     </label>
     <p class="hint hint--block">Пусто — используется адрес по умолчанию. OpenAI-совместимый эндпоинт; бот добавит <code class="mono">/chat/completions</code>.</p>
 
+    {# ── «ИИ-сотрудник»: должность + готовые шаблоны промпта (витрина персон) ── #}
+    <label class="field">
+      <span class="field__label">Должность ИИ-сотрудника <span class="field__hint">метка с витрины сайта</span></span>
+      <select class="field__input" name="persona">
+        <option value=""{% if not ai.persona %} selected{% endif %}>Своя настройка (без должности)</option>
+        {% for p in personas %}
+        <option value="{{ p.key }}"{% if p.is_current %} selected{% endif %}>{{ p.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="hint hint--block">Готовые шаблоны промпта под должность:
+      {% for p in personas %}<a href="/agents?preset={{ p.key }}">{{ p.label }}</a>{% if not loop.last %} · {% endif %}{% endfor %}.
+      Клик подставит шаблон в поле ниже (не сохраняя) — проверьте, заполните [скобки] и нажмите «Сохранить».</p>
+
     <label class="field">
       <span class="field__label">Системный промпт <span class="field__hint">для бэкенда «ИИ-Агент Про (прямой)»</span></span>
       <textarea class="field__input field__textarea field__textarea--lg" name="system_prompt"
                 maxlength="{{ system_prompt_max }}" rows="5"
                 placeholder="Кто такая Лия, тон общения, что можно и чего нельзя…">{{ ai.system_prompt }}</textarea>
     </label>
-    <p class="hint hint--block">Задаёт характер и правила модели. Для «Агент (Лия)» промпт настраивается на самом агенте в админке провайдера — тогда это поле не применяется.</p>
+    <p class="hint hint--block">Задаёт характер и правила модели. Для «Агент (Лия)» промпт настраивается на самом агенте в админке провайдера — тогда это поле не применяется (шаблон должности можно скопировать отсюда в «Базы знаний»).</p>
 
     {# ── Общий фолбэк ── #}
     <label class="field">

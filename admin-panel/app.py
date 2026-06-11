@@ -2469,6 +2469,7 @@ async def service_subscribe(
     email: str = Form(""),
     agree_oferta: str = Form(""),
     agree_pdn: str = Form(""),
+    persona: str = Form(""),
 ):
     """Публичная форма оплаты с info.pro-agent-ai.ru/pay.html (БЕЗ сессии/CSRF — внешний
     источник, как вебхук). Сумму берём С СЕРВЕРА (из тарифа), НЕ из формы — защита от подмены.
@@ -2492,6 +2493,12 @@ async def service_subscribe(
 
     amount = _plan_amount(plan_obj)
     description = f"Подписка «ИИ-Агент Про» — {plan_obj['name']}"
+    # Метка «ИИ-сотрудника» с витрины (опциональна): только из белого списка персон —
+    # уходит в metadata платежа, чтобы видеть, какой образ реально продаёт.
+    persona = persona.strip() if persona.strip() in config.PERSONA_PRESETS else ""
+    metadata = {"kind": "service_landing", "plan": plan}
+    if persona:
+        metadata["persona"] = persona
     import logging
     lg = logging.getLogger("admin-panel")
     try:
@@ -2499,7 +2506,7 @@ async def service_subscribe(
             amount=amount, currency=config.SERVICE_CURRENCY,
             description=description, return_url=f"{site}/pay-success.html",
             idempotence_key=uuid.uuid4().hex,
-            metadata={"kind": "service_landing", "plan": plan},
+            metadata=metadata,
             receipt=_service_receipt(email, description, amount),
         )
     except yookassa.YooKassaError:
@@ -2588,6 +2595,7 @@ async def agents_page(
     session: auth.Session = Depends(require_session),
     saved: int = 0,
     err: str | None = None,
+    preset: str | None = None,
 ):
     ai = await db.get_ai_settings()
     since = datetime.now(timezone.utc) - timedelta(days=config.AI_ACTIVITY_WINDOW_DAYS)
@@ -2597,6 +2605,20 @@ async def agents_page(
         {"key": k, "label": config.AI_BACKENDS[k], "is_current": k == ai["backend"]}
         for k in config.AI_BACKEND_ORDER
     ]
+    # «Должности» (пресеты): ?preset=<slug> предзаполняет промпт каркасом ДО сохранения
+    # (PRG-чисто, без JS — клик по ссылке-шаблону перерисовывает форму). Невалидный slug
+    # тихо игнорируем. Выбранная persona уезжает в форму и сохранится обычным POST.
+    preset_key = preset if preset in config.PERSONA_PRESETS else None
+    if preset_key:
+        ai = {**ai,
+              "system_prompt": config.PERSONA_PRESETS[preset_key]["prompt"],
+              "persona": preset_key}
+    personas = [
+        {"key": k, "label": f'{config.PERSONA_PRESETS[k]["name"]} — {config.PERSONA_PRESETS[k]["role"]}',
+         "is_current": k == ai["persona"]}
+        for k in config.PERSONA_ORDER
+    ]
+    persona_label = next((p["label"] for p in personas if p["is_current"]), "")
     return templates.TemplateResponse(
         request,
         "agents.html",
@@ -2614,6 +2636,9 @@ async def agents_page(
             "model_max": config.AI_MODEL_MAX,
             "gateway_url_max": config.AI_GATEWAY_URL_MAX,
             "system_prompt_max": config.AI_SYSTEM_PROMPT_MAX,
+            "personas": personas,
+            "persona_label": persona_label,
+            "preset_applied": bool(preset_key),
             "recent_messages": recent,
             "csrf_token": session.csrf_token,
             "session": session,
@@ -2641,6 +2666,7 @@ async def agents_save(
     gateway_base_url: str = Form(""),
     system_prompt: str = Form(""),
     fallback: str = Form(""),
+    persona: str = Form(""),
     csrf_token: str = Form(""),
 ):
     await _enforce_csrf(request, session, csrf_token)
@@ -2662,10 +2688,12 @@ async def agents_save(
         or any(c.isspace() for c in gateway_base_url)
     ):
         return RedirectResponse(url="/agents?err=bad_gateway_url", status_code=303)
+    # Persona — метка-«должность» из белого списка ("" = своя настройка); мусор молча в "".
+    persona = persona.strip() if persona.strip() in config.PERSONA_PRESETS else ""
     await db.set_ai_settings(
         enabled=bool(enabled), backend=backend, agent_id=agent_id, model=model,
         gateway_base_url=gateway_base_url, system_prompt=system_prompt, fallback=fallback,
-        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request), persona=persona,
     )
     return RedirectResponse(url="/agents?saved=1", status_code=303)
 

@@ -1586,6 +1586,7 @@ _AI_SETTING_KEYS = (
     config.AI_GATEWAY_URL_SETTING_KEY,
     config.AI_SYSTEM_PROMPT_SETTING_KEY,
     config.AI_FALLBACK_SETTING_KEY,
+    config.AI_PERSONA_SETTING_KEY,
 )
 
 
@@ -1614,13 +1615,17 @@ async def get_ai_settings() -> dict:
                             or config.AI_DEFAULT_GATEWAY_URL,
         "system_prompt": kv.get(config.AI_SYSTEM_PROMPT_SETTING_KEY) or "",
         "fallback": kv.get(config.AI_FALLBACK_SETTING_KEY) or "",
+        # Slug активной «должности» (бейдж в UI; бот ключ не читает). Неизвестный → "".
+        "persona": (kv.get(config.AI_PERSONA_SETTING_KEY) or "").strip()
+                   if (kv.get(config.AI_PERSONA_SETTING_KEY) or "").strip() in config.PERSONA_PRESETS
+                   else "",
     }
 
 
 async def set_ai_settings(
     *, enabled: bool, backend: str, agent_id: str, model: str,
     gateway_base_url: str, system_prompt: str, fallback: str,
-    actor: str, ip: str | None, user_agent: str | None,
+    actor: str, ip: str | None, user_agent: str | None, persona: str = "",
 ) -> None:
     """Сохранить настройки ИИ (upsert ключей app_settings) + аудит — в ОДНОЙ транзакции
     (паттерн остальных мутаций). «Выключено»/пустые поля пишем пустым value (delete на
@@ -1634,6 +1639,7 @@ async def set_ai_settings(
         (config.AI_GATEWAY_URL_SETTING_KEY, gateway_base_url),
         (config.AI_SYSTEM_PROMPT_SETTING_KEY, system_prompt),
         (config.AI_FALLBACK_SETTING_KEY, fallback),
+        (config.AI_PERSONA_SETTING_KEY, persona),
     )
     async with pool.acquire() as c:
         async with c.transaction():
@@ -1650,7 +1656,8 @@ async def set_ai_settings(
                 detail={"enabled": enabled, "backend": backend,
                         "agent_id": agent_id or None, "model": model or None,
                         "system_prompt_set": bool(system_prompt),
-                        "fallback_set": bool(fallback)},
+                        "fallback_set": bool(fallback),
+                        "persona": persona or None},
             )
 
 

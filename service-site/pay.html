@@ -88,6 +88,14 @@
     var r = document.querySelector('input[name="plan"][value="' + plan + '"]');
     if (r) r.checked = true;
   }
+  // «ИИ-сотрудник» с витрины (?persona=) → hidden-поле формы → metadata платежа.
+  // Формат проверяем тут поверхностно; белый список — на бэкенде.
+  var persona = params.get('persona');
+  if (persona && /^[a-z0-9_-]{1,32}$/.test(persona)) {
+    var hp = document.createElement('input');
+    hp.type = 'hidden'; hp.name = 'persona'; hp.value = persona;
+    document.getElementById('payForm').appendChild(hp);
+  }
   // Показ ошибки из ?err= (бэкенд редиректит сюда при отказе) — клиентские формулировки.
   var err = params.get('err');
   if (err) {

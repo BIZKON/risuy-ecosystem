@@ -294,6 +294,48 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 .plans-note{margin-block-start:var(--s5); text-align:center;
   color:var(--faint); font-size:var(--fs-s)}
 
+/* ---------- 7bis. Команда ИИ-сотрудников (витрина персон) ---------- */
+.team{display:grid; gap:var(--s4);
+  grid-template-columns:repeat(auto-fit,minmax(14.5rem,1fr))}
+.person{
+  background:var(--bg); border:1px solid var(--line); border-radius:var(--r-l);
+  padding:var(--s5); display:flex; flex-direction:column; text-align:center;
+  box-shadow:var(--shadow-s);
+  transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+}
+.person:hover{transform:translateY(-3px); box-shadow:var(--shadow-m);
+  border-color:#CBD7F3}
+@media (prefers-reduced-motion:reduce){ .person{transition:none}
+  .person:hover{transform:none} }
+.person__avatar{inline-size:96px; block-size:96px; margin:0 auto var(--s4);
+  border-radius:24px; overflow:hidden; box-shadow:var(--shadow-s)}
+.person__avatar svg{inline-size:100%; block-size:100%}
+.person h3{font-size:1.25rem; font-weight:800}
+.person__role{color:var(--primary); font-weight:700; font-size:var(--fs-s);
+  margin:.15rem 0 var(--s3)}
+.person__cv{list-style:none; margin:0 0 var(--s4); padding:0;
+  color:var(--muted); font-size:var(--fs-xs); text-align:start;
+  display:grid; gap:.4rem}
+.person__cv li{padding-inline-start:1.25rem; position:relative}
+.person__cv li::before{
+  content:""; position:absolute; inset-inline-start:0; inset-block-start:.42rem;
+  inline-size:.8rem; block-size:.45rem;
+  border-inline-start:2px solid var(--ok); border-block-end:2px solid var(--ok);
+  transform:rotate(-50deg); border-radius:1px;
+}
+.person__status{font-size:var(--fs-xs); color:var(--faint);
+  margin-block-end:var(--s3)}
+.person__status b{color:var(--amber); font-weight:700}
+.person__price{font-weight:800; font-size:1.1875rem; margin-block-end:var(--s1)}
+.person__price small{display:block; font-size:var(--fs-xs); font-weight:500;
+  color:var(--faint); margin-block-start:.15rem}
+.person__cta{margin-block-start:auto; padding-block-start:var(--s4)}
+.person__cta .btn{inline-size:100%}
+.team-note{margin-block-start:var(--s5); text-align:center;
+  color:var(--faint); font-size:var(--fs-xs); max-inline-size:46rem;
+  margin-inline:auto}
+.team-more{display:flex; justify-content:center; margin-block-start:var(--s5)}
+
 /* ---------- 8. FAQ ---------- */
 .faq{max-inline-size:46rem; margin-inline:auto; display:grid; gap:var(--s3)}
 .faq details{
