@@ -3,69 +3,172 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ИИ-Агент Про — автоматизация общения с клиентами через ИИ</title>
-<meta name="description" content="ИИ-Агент Про — SaaS-сервис: ИИ-агент отвечает клиентам в мессенджерах 24/7, обрабатывает заявки, ведёт рассылки и аналитику. Тарифы от 3 750 ₽ в месяц.">
+<title>Pro Agent AI — ИИ-агент для продаж и поддержки в мессенджерах</title>
+<meta name="description" content="ИИ-агент отвечает вашим клиентам 24/7 в Telegram: консультирует, собирает заявки, принимает оплату прямо в чате. Личный кабинет, рассылки, аналитика. Тарифы от 3 750 ₽. Данные — в РФ (152-ФЗ).">
+<meta property="og:title" content="Pro Agent AI — ИИ-агент для продаж и поддержки">
+<meta property="og:description" content="ИИ отвечает клиентам 24/7, доводит до оплаты и передаёт сложные случаи оператору. Данные — в РФ.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231D4ED8'/%3E%3Cpath d='M16 7l1.9 5.4L23 14l-5.1 1.6L16 21l-1.9-5.4L9 14l5.1-1.6z' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
+<script>if('IntersectionObserver' in window)document.documentElement.classList.add('js')</script>
 </head>
 <body>
 
-<header class="top">
+<header class="top top--dark">
   <div class="wrap">
-    <a class="brand" href="index.html"><span class="logo">АП</span> ИИ-Агент&nbsp;Про</a>
-    <nav class="nav">
+    <a class="brand" href="index.html" aria-label="Pro Agent AI — на главную">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l2.1 5.9L20 11l-5.9 2.1L12 19l-2.1-5.9L4 11l5.9-2.1z"/></svg></span>
+      Pro Agent&nbsp;AI
+    </a>
+    <nav class="nav" aria-label="Основная навигация">
       <a href="#vozmozhnosti">Возможности</a>
+      <a href="#keis">Кейс</a>
       <a href="#tarify">Тарифы</a>
-      <a href="#kak">Как подключить</a>
-      <a href="contacts.html">Контакты</a>
+      <a href="#faq">Вопросы</a>
+      <a class="btn btn--primary" href="#tarify">Выбрать тариф</a>
     </nav>
   </div>
 </header>
 
 <main>
+  <!-- ============ HERO ============ -->
   <section class="hero">
     <div class="wrap">
-      <h1>ИИ-агент, который отвечает вашим клиентам 24/7</h1>
-      <p>«ИИ-Агент Про» — сервис автоматизации общения с клиентами в мессенджерах: ИИ принимает обращения, обрабатывает заявки, ведёт рассылки и собирает аналитику. Меньше нагрузки на менеджеров — больше заявок доходит до продажи.</p>
-      <div class="cta">
-        <a class="btn btn--primary" href="#tarify">Смотреть тарифы</a>
-        <a class="btn btn--ghost" href="contacts.html">Связаться</a>
+      <div>
+        <p class="kicker">Сервис автоматизации общения с клиентами</p>
+        <h1>ИИ-агент, который отвечает вашим клиентам 24/7 — и доводит их до оплаты</h1>
+        <p class="lead">Pro Agent AI берёт переписку в Telegram на себя: <b>консультирует, собирает заявки, отправляет ссылку на оплату</b> — а сложные случаи передаёт живому оператору. Вы управляете всем из одного кабинета.</p>
+        <div class="cta">
+          <a class="btn btn--primary" href="#tarify">Выбрать тариф</a>
+          <a class="btn btn--outline-dark" href="#keis">Посмотреть кейс</a>
+        </div>
+        <div class="trust" role="list">
+          <span class="pill" role="listitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 22s8-3.6 8-9V5l-8-3-8 3v8c0 5.4 8 9 8 9z"/></svg>Серверы в РФ · 152-ФЗ</span>
+          <span class="pill" role="listitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>Без автосписаний</span>
+          <span class="pill" role="listitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Доступ за 1 рабочий день</span>
+        </div>
+      </div>
+
+      <!-- Чат-мокап: продукт в действии (CSS, без изображений) -->
+      <div class="chatcard" aria-label="Пример диалога ИИ-агента с клиентом">
+        <div class="chatcard__head">
+          <span class="chatcard__dot" aria-hidden="true"></span>
+          <div>
+            <div class="chatcard__title">Ваш бизнес · Telegram</div>
+            <div class="chatcard__sub">ИИ-агент онлайн · отвечает мгновенно</div>
+          </div>
+        </div>
+        <p class="msg msg--in">Здравствуйте! Подскажите, а можно записаться на пробное занятие? И сколько стоит абонемент?<span class="msg__meta">Клиент · 23:47</span></p>
+        <p class="msg msg--out">Добрый вечер! Конечно 🙂 Пробное занятие — бесплатно. Абонемент на месяц — 4 900 ₽. Могу записать вас прямо сейчас и прислать ссылку на оплату — удобно?<span class="msg__btn">Перейти к оплате</span><span class="msg__meta">ИИ-агент · через 3 секунды</span></p>
+        <p class="msg msg--note">Оператор видит диалог в кабинете и может подключиться в любой момент</p>
       </div>
     </div>
   </section>
 
-  <section id="vozmozhnosti">
+  <!-- ============ ВОЗМОЖНОСТИ ============ -->
+  <section class="section" id="vozmozhnosti">
     <div class="wrap">
-      <h2 class="section-title">Что умеет сервис</h2>
-      <p class="section-sub">Готовое решение для автоматизации клиентских коммуникаций — без разработки с нуля.</p>
-      <div class="grid">
-        <div class="card"><h3>ИИ-ассистент 24/7</h3><p>Отвечает клиентам в Telegram и других каналах круглосуточно, в характере вашего бренда. Снимает рутину с менеджеров.</p></div>
-        <div class="card"><h3>Заявки и клиенты</h3><p>Собирает контакты, ведёт воронку и карточки клиентов, фиксирует диалоги — ничего не теряется.</p></div>
-        <div class="card"><h3>Рассылки</h3><p>Сегментированные рассылки и автоматические касания: возврат клиентов и допродажи на автопилоте.</p></div>
-        <div class="card"><h3>Аналитика</h3><p>Источники заявок, конверсия и эффективность каналов — понятная картина в личном кабинете.</p></div>
+      <div class="section__head reveal">
+        <p class="kicker">Возможности</p>
+        <h2>Один сервис вместо дежурного менеджера, CRM и рассыльщика</h2>
+        <p>Готовое решение: подключаем к вашему Telegram — и клиентские переписки работают сами.</p>
+      </div>
+      <div class="features">
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l1.7 4.8L18.5 9.5l-4.8 1.7L12 16l-1.7-4.8L5.5 9.5l4.8-1.7z"/><path d="M18 14l.85 2.4L21.25 17.25l-2.4.85L18 20.5l-.85-2.4-2.4-.85 2.4-.85z"/></svg></div>
+          <h3>ИИ-агент 24/7</h3>
+          <p>Отвечает мгновенно в любое время — ночью, в выходные, в праздники. Говорит в тоне вашего бренда и знает ваши продукты.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/><path d="M9 11h6M9 14h3"/></svg></div>
+          <h3>Живые диалоги</h3>
+          <p>Вся переписка — в одном кабинете. Оператор подключается в любой момент, и ИИ уступает место человеку.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.6c1.8.9 2.5 2.3 2.5 5.4"/></svg></div>
+          <h3>Лиды и воронка</h3>
+          <p>Каждое обращение становится карточкой клиента: статусы, источник, история. Ни одна заявка не теряется.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M3 11l16-6v14L3 13v-2z"/><path d="M7 13.5V18a2 2 0 0 0 4 0v-3"/></svg></div>
+          <h3>Рассылки и допродажи</h3>
+          <p>Сегментированные рассылки с кнопкой покупки прямо в сообщении: возврат «спящих» клиентов и повторные продажи.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg></div>
+          <h3>Оплата прямо в чате</h3>
+          <p>Клиент оплачивает картой через ЮKassa, не выходя из переписки. Заказы и статусы оплат — в кабинете.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg></div>
+          <h3>Аналитика каналов</h3>
+          <p>Ссылки-метки для каждой площадки: видно, откуда приходят лиды и какой канал реально приводит покупателей.</p>
+        </div>
       </div>
     </div>
   </section>
 
-  <section id="tarify" style="background:var(--surface)">
+  <!-- ============ КЕЙС ============ -->
+  <section class="section section--soft" id="keis">
     <div class="wrap">
-      <h2 class="section-title">Тарифы</h2>
-      <p class="section-sub">Абонентская плата за расчётный период (30 дней). Оплата картой, без автосписаний. Цены указаны в рублях, НДС не облагается (УСН).</p>
+      <div class="case">
+        <div class="reveal">
+          <span class="case__badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 2l2.4 6.9H21l-5.4 4.2 2 6.9-5.6-4.2L6.4 20l2-6.9L3 8.9h6.6z"/></svg>Первый клиент сервиса</span>
+          <h2>Кейс: академическая школа рисунка «Школа Лесова»</h2>
+          <p class="about">Школа рисунка и живописи им. Б. В. Лесова подключила Pro Agent AI, чтобы заявки из рекламы не ждали утра, а у администраторов освободились руки.</p>
+          <p class="about">ИИ-помощница «Лия» встречает каждого нового подписчика, выдаёт бесплатный материал школы и отвечает на вопросы о курсах — в характере бренда школы.</p>
+        </div>
+        <ul class="case-list reveal">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Заявка не ждёт утра</b><span>ИИ отвечает сразу — даже ночью и в выходные, когда администраторы спят.</span></div></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Операторы — только там, где нужны</b><span>Живой диалог подхватывается из кабинета: ИИ снимает рутину, человек закрывает сделку.</span></div></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Оплата не выходя из чата</b><span>Рассылка с кнопкой «Купить» → оплата картой → заказ и статус видны школе в кабинете.</span></div></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Понятно, какая реклама работает</b><span>У каждой площадки своя ссылка-метка — конверсия каналов видна в аналитике.</span></div></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ КАК ПОДКЛЮЧИТЬ ============ -->
+  <section class="section" id="kak">
+    <div class="wrap">
+      <div class="section__head reveal">
+        <p class="kicker">Подключение</p>
+        <h2>От заявки до работающего ИИ-агента — четыре шага</h2>
+        <p>Программист не нужен: настройку берём на себя, управление — в личном кабинете.</p>
+      </div>
+      <div class="steps">
+        <div class="step reveal"><h3>Заявка</h3><p>Оставляете заявку — обсуждаем нишу, сценарии и каналы общения с клиентами.</p></div>
+        <div class="step reveal"><h3>Настройка</h3><p>Обучаем ИИ-агента на ваших материалах: продукты, цены, тон общения, ответы на частые вопросы.</p></div>
+        <div class="step reveal"><h3>Оплата и доступ</h3><p>Выбираете тариф и оплачиваете картой. Доступ к кабинету — в течение 1 рабочего дня.</p></div>
+        <div class="step reveal"><h3>Запуск</h3><p>ИИ-агент начинает отвечать клиентам. Вы смотрите диалоги, лидов и аналитику в кабинете.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ТАРИФЫ ============ -->
+  <section class="section section--soft" id="tarify">
+    <div class="wrap">
+      <div class="section__head reveal">
+        <p class="kicker">Тарифы</p>
+        <h2>Прозрачные тарифы без автосписаний</h2>
+        <p>Оплата картой за расчётный период (30 дней) — разовым платежом, по вашей инициативе. НДС не облагается (УСН).</p>
+      </div>
       <div class="plans">
-        <div class="plan">
+        <div class="plan reveal">
           <h3>Эконом</h3>
-          <div class="price">3 750 ₽<small> / месяц</small></div>
+          <div class="price">3 750 ₽<small> / 30 дней</small></div>
           <ul>
             <li>500 сообщений ИИ в месяц</li>
             <li>7,5 ₽ за сообщение сверх квоты</li>
             <li>Без ограничений по числу каналов</li>
             <li>Для небольших команд</li>
           </ul>
-          <div class="plan__pay"><a class="btn btn--primary" href="pay.html?plan=econom">Оплатить</a></div>
+          <div class="plan__pay"><a class="btn btn--ghost" href="pay.html?plan=econom">Оплатить</a></div>
         </div>
-        <div class="plan plan--featured">
+        <div class="plan plan--featured reveal">
           <span class="badge">Популярный</span>
           <h3>Стартовый</h3>
-          <div class="price">7 500 ₽<small> / месяц</small></div>
+          <div class="price">7 500 ₽<small> / 30 дней</small></div>
           <ul>
             <li>1 500 сообщений ИИ в месяц</li>
             <li>5 ₽ за сообщение сверх квоты</li>
@@ -74,7 +177,7 @@
           </ul>
           <div class="plan__pay"><a class="btn btn--primary" href="pay.html?plan=start">Оплатить</a></div>
         </div>
-        <div class="plan">
+        <div class="plan reveal">
           <h3>Индивидуальный</h3>
           <div class="price">по запросу</div>
           <ul>
@@ -86,28 +189,62 @@
           <div class="plan__pay"><a class="btn btn--ghost" href="contacts.html">Оставить заявку</a></div>
         </div>
       </div>
-      <p class="section-sub" style="margin-top:24px">Актуальные тарифы и оплата — в личном кабинете, раздел «Подписка». Условия оказания услуг — в <a href="oferta.html">Публичной оферте</a>.</p>
+      <p class="plans-note">Условия оказания услуг — в <a href="oferta.html">Публичной оферте</a>. Актуальные тарифы и оплата — также в личном кабинете, раздел «Подписка».</p>
     </div>
   </section>
 
-  <section id="kak">
+  <!-- ============ FAQ ============ -->
+  <section class="section" id="faq">
     <div class="wrap">
-      <h2 class="section-title">Как подключить</h2>
-      <p class="section-sub">От заявки до работающего ИИ-агента — несколько шагов.</p>
-      <div class="steps">
-        <div class="step"><h4>Заявка</h4><p>Оставляете заявку — настраиваем сервис под вашу нишу и сценарии.</p></div>
-        <div class="step"><h4>Доступ</h4><p>Получаете личный кабинет для управления ИИ-агентом и рассылками.</p></div>
-        <div class="step"><h4>Оплата</h4><p>Выбираете тариф и оплачиваете банковской картой через ЮKassa.</p></div>
-        <div class="step"><h4>Работа</h4><p>ИИ-агент начинает отвечать вашим клиентам и собирать заявки.</p></div>
+      <div class="section__head reveal">
+        <p class="kicker">Вопросы и ответы</p>
+        <h2>Коротко о главном</h2>
       </div>
-      <div class="cta" style="justify-content:center; margin-top:28px">
-        <a class="btn btn--primary" href="contacts.html">Оставить заявку</a>
+      <div class="faq reveal">
+        <details>
+          <summary>Как происходит оплата?</summary>
+          <div class="a"><p>Банковской картой через ЮKassa — разовый платёж за расчётный период (30 дней). Автосписаний нет: следующий период вы оплачиваете сами, когда захотите продлить.</p></div>
+        </details>
+        <details>
+          <summary>Что такое «сообщение ИИ» и что будет при превышении квоты?</summary>
+          <div class="a"><p>Сообщение ИИ — это один ответ, сгенерированный ИИ-агентом. В тариф входит квота (например, 500 или 1 500 сообщений за период). Превышение тарифицируется по цене тарифа и включается в счёт следующего периода — сервис не останавливается.</p></div>
+        </details>
+        <details>
+          <summary>Можно ли вернуть деньги?</summary>
+          <div class="a"><p>Да. При отказе от услуг до конца оплаченного периода мы возвращаем оплату пропорционально неиспользованному остатку — по заявлению на email из <a href="contacts.html">реквизитов</a>. Подробно — в разделе 10 <a href="oferta.html">Оферты</a>.</p></div>
+        </details>
+        <details>
+          <summary>Где хранятся данные и кто видит данные карт?</summary>
+          <div class="a"><p>Серверы и базы данных — на территории РФ; трансграничная передача персональных данных не осуществляется (152-ФЗ). Данные банковских карт мы не собираем и не храним — их обрабатывает ЮKassa (ООО НКО «ЮМани», стандарт PCI DSS).</p></div>
+        </details>
+        <details>
+          <summary>Как ИИ обучается под мой бизнес?</summary>
+          <div class="a"><p>Мы настраиваем агента на ваших материалах: продукты, цены, регламенты, тон общения. Дальше знания ИИ можно пополнять через личный кабинет — без программиста и без остановки сервиса.</p></div>
+        </details>
+        <details>
+          <summary>Для кого подходит сервис?</summary>
+          <div class="a"><p>Для юридических лиц и ИП, чьи клиенты пишут в мессенджеры: школы и студии, услуги, эксперты, локальный бизнес. Если у вас есть поток обращений в Telegram — сервис снимет рутину с команды.</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ФИНАЛЬНЫЙ CTA ============ -->
+  <section class="section">
+    <div class="wrap">
+      <div class="cta-final reveal">
+        <h2>Запустите ИИ-агента для своего бизнеса</h2>
+        <p>Выберите тариф — и уже через день клиентам будет отвечать ваш ИИ-агент. Без автосписаний, с данными в РФ и возвратом за неиспользованный период.</p>
+        <div class="cta">
+          <a class="btn btn--light" href="#tarify">Выбрать тариф</a>
+          <a class="btn btn--outline-dark" href="contacts.html">Оставить заявку</a>
+        </div>
       </div>
     </div>
   </section>
 </main>
 
-<footer class="foot">
+<footer class="foot foot--tight">
   <div class="wrap">
     <div class="cols">
       <div class="req">
@@ -124,9 +261,21 @@
         <a href="contacts.html">Реквизиты и контакты</a>
       </div>
     </div>
-    <div class="copy">© 2026 ИП Сыров К.А. Оплата услуг производится через ЮKassa (ООО НКО «ЮМани»).</div>
+    <div class="copy">© 2026 ИП Сыров К.А. · Pro Agent AI — сервис «ИИ-Агент Про». Оплата услуг производится через ЮKassa (ООО НКО «ЮМани»).</div>
   </div>
 </footer>
+
+<script>
+(function(){
+  if(!('IntersectionObserver' in window))return;
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(e){
+      if(e.isIntersecting){e.target.classList.add('is-in');io.unobserve(e.target);}
+    });
+  },{rootMargin:'0px 0px -8% 0px',threshold:.08});
+  document.querySelectorAll('.reveal').forEach(function(el){io.observe(el);});
+})();
+</script>
 
 </body>
 </html>

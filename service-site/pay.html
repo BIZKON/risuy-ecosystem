@@ -3,16 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Оплата подписки — ИИ-Агент Про</title>
-<meta name="description" content="Оплата подписки на сервис «ИИ-Агент Про» банковской картой. Выберите тариф и оплатите онлайн.">
+<title>Оплата подписки — Pro Agent AI</title>
+<meta name="description" content="Оплата подписки на сервис «ИИ-Агент Про» (Pro Agent AI) банковской картой. Выберите тариф и оплатите онлайн через ЮKassa.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231D4ED8'/%3E%3Cpath d='M16 7l1.9 5.4L23 14l-5.1 1.6L16 21l-1.9-5.4L9 14l5.1-1.6z' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="index.html"><span class="logo">АП</span> ИИ-Агент&nbsp;Про</a>
-    <nav class="nav">
+    <a class="brand" href="index.html" aria-label="Pro Agent AI — на главную">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l2.1 5.9L20 11l-5.9 2.1L12 19l-2.1-5.9L4 11l5.9-2.1z"/></svg></span>
+      Pro Agent&nbsp;AI
+    </a>
+    <nav class="nav" aria-label="Основная навигация">
       <a href="index.html#tarify">Тарифы</a>
       <a href="oferta.html">Оферта</a>
       <a href="contacts.html">Контакты</a>
@@ -35,12 +39,12 @@
           <label class="pay-opt">
             <input type="radio" name="plan" value="econom" data-amount="3 750 ₽" required>
             <span><span class="nm">Эконом</span><span class="qt">500 сообщений ИИ в месяц</span></span>
-            <span class="pr">3 750 ₽<small>/мес</small></span>
+            <span class="pr">3 750 ₽<small>/30 дней</small></span>
           </label>
           <label class="pay-opt">
             <input type="radio" name="plan" value="start" data-amount="7 500 ₽">
             <span><span class="nm">Стартовый</span><span class="qt">1 500 сообщений ИИ в месяц</span></span>
-            <span class="pr">7 500 ₽<small>/мес</small></span>
+            <span class="pr">7 500 ₽<small>/30 дней</small></span>
           </label>
         </div>
 
@@ -61,7 +65,7 @@
         </div>
 
         <button type="submit" class="btn-pay">Оплатить картой</button>
-        <p class="secure">🔒 Оплата картой Visa / MasterCard / МИР через ЮKassa. Данные карты вводятся на защищённой странице платёжной системы.</p>
+        <p class="secure"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>Оплата картой Visa / MasterCard / МИР через ЮKassa. Данные карты вводятся на защищённой странице платёжной системы.</p>
       </form>
     </div>
   </div>
@@ -69,7 +73,7 @@
 
 <div class="pay-overlay" id="payOverlay" role="status" aria-live="polite">
   <div class="box">
-    <div class="spin"></div>
+    <div class="spin" aria-hidden="true"></div>
     <h3>Переходим к оплате…</h3>
     <p id="payMsg">Формируем платёж и перенаправляем на защищённую форму оплаты ЮKassa.</p>
   </div>
