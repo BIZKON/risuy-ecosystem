@@ -95,6 +95,9 @@ grant usage on sequence admin_audit_id_seq to panel_rw;  -- подтвердит
 -- leads: добавить UPDATE только на bot_paused (поверх status/notes/erase_requested_at выше).
 -- unsubscribed_at панель НЕ пишет — только ЧИТАЕТ (SELECT на leads уже выдан).
 grant update (bot_paused) on leads to panel_rw;
+-- ai_persona — «ИИ-сотрудник диалога» (оператор выбирает персону на конкретный диалог;
+-- объект колонки — db/schema_persona.sql, применять ПОСЛЕ него). Бот (owner) только читает.
+grant update (ai_persona) on leads to panel_rw;
 
 -- Переписка: только чтение треда. Пишет бот (вход через middleware, исход через messaging-слой).
 grant select on messages to panel_rw;

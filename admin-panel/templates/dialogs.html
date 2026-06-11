@@ -97,10 +97,32 @@
       </div>
     </header>
 
-    {% if replied or paused_flash or reply_err %}
+    {# ── ИИ-сотрудник этого диалога: кто отвечает + ручная смена роли/характера ── #}
+    <div class="dchat__staff">
+      <span class="dchat__staff-now" title="Кто из ИИ-сотрудников отвечает в этом диалоге">
+        {% if lead.bot_paused %}🔴 Вы на ручном — ИИ молчит. Сотрудник <b>{{ dialog_staff.effective_name }}</b> вступит, когда вернёте авто-режим
+        {% else %}🤖 Отвечает: <b>{{ dialog_staff.effective_name }}</b>{% endif %}
+        <span class="dchat__staff-scope">· {{ dialog_staff.scope }}</span>
+      </span>
+      <form class="inline-form dchat__staff-form" method="post" action="/dialogs/{{ lead.id }}/persona">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="from" value="dialog">
+        <select class="field__input field__input--inline" name="persona"
+                aria-label="Сменить ИИ-сотрудника этого диалога">
+          <option value=""{% if not dialog_staff.current %} selected{% endif %}>По умолчанию (канал / общая)</option>
+          {% for o in dialog_staff.options %}
+          <option value="{{ o.key }}"{% if dialog_staff.current == o.key %} selected{% endif %}>{{ o.label }}</option>
+          {% endfor %}
+        </select>
+        <button class="btn btn--dark btn--sm" type="submit">Сменить</button>
+      </form>
+    </div>
+
+    {% if replied or paused_flash or staff_flash or reply_err %}
     <div class="dchat__flash">
       {% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
       {% if paused_flash %}{{ flash('Режим бота переключён.', 'ok') }}{% endif %}
+      {% if staff_flash %}{{ flash('ИИ-сотрудник этого диалога обновлён. Применится со следующего сообщения клиента.', 'ok') }}{% endif %}
       {% if reply_err %}{{ flash(reply_err, 'error') }}{% endif %}
     </div>
     {% endif %}

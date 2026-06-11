@@ -312,7 +312,7 @@ async def get_lead(lead_id) -> asyncpg.Record | None:
                phone_hash, consent, subscribed, status,
                guide_sent_at, follow_up_1_at, follow_up_2_at, follow_up_3_at,
                tg_user_id, max_user_id, notes, survey, erase_requested_at,
-               bot_paused, unsubscribed_at
+               bot_paused, unsubscribed_at, ai_persona
         from leads
         where id = $1
     """
@@ -1683,16 +1683,50 @@ async def get_channel_personas(sources: tuple[str, ...]) -> dict:
     return {"personas": personas, "agents": agents}
 
 
-async def save_persona_agent(slug: str, access_id: str) -> None:
-    """Запомнить созданного агента персоны (slug → access_id) — переиспользуется каналами."""
+async def get_persona_agent(slug: str) -> str:
+    """access_id ранее созданного агента персоны (или "" если ещё не создавался)."""
     async with pool.acquire() as c:
-        await c.execute(
-            """
-            insert into app_settings (key, value) values ($1, $2)
-            on conflict (key) do update set value = excluded.value
-            """,
-            config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug), access_id,
+        v = await c.fetchval(
+            "select value from app_settings where key = $1",
+            config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug),
         )
+    return (v or "").strip()
+
+
+async def save_persona_agent(slug: str, access_id: str, prompt: str) -> None:
+    """Запомнить агента персоны: slug → access_id (для cloud_ai) И slug → промпт (для
+    gateway / per-lead). Реестр переиспользуется каналами И диалогами — один агент на персону."""
+    pairs = (
+        (config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug), access_id),
+        (config.PERSONA_PROMPT_REGISTRY_KEY.format(slug=slug), prompt),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into app_settings (key, value) values ($1, $2)
+                    on conflict (key) do update set value = excluded.value
+                    """,
+                    key, value,
+                )
+
+
+async def set_lead_persona(
+    lead_id, persona: str, *, actor: str, ip: str | None, user_agent: str | None
+) -> None:
+    """«ИИ-сотрудник диалога»: записать выбор персоны на конкретного лида (leads.ai_persona)
+    + аудит, в ОДНОЙ транзакции. persona="" → NULL (сброс на канал/глобал)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "update leads set ai_persona = $2 where id = $1",
+                lead_id, (persona or None),
+            )
+            await _insert_audit(
+                c, actor=actor, action="lead_persona_set", lead_id=lead_id,
+                ip=ip, user_agent=user_agent, detail={"persona": persona or None},
+            )
 
 
 async def set_channel_persona(

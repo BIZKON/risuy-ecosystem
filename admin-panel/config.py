@@ -467,8 +467,12 @@ PERSONA_ORDER = ("liya", "mark", "sofia", "gleb")
 CHANNEL_PERSONA_KEY = "ai_persona__{source}"
 CHANNEL_AGENT_KEY = "ai_agent_id__{source}"
 CHANNEL_PROMPT_KEY = "ai_system_prompt__{source}"
-PERSONA_AGENT_REGISTRY_KEY = "ai_persona_agent__{slug}"
+PERSONA_AGENT_REGISTRY_KEY = "ai_persona_agent__{slug}"     # slug → access_id агента персоны
+PERSONA_PROMPT_REGISTRY_KEY = "ai_persona_prompt__{slug}"   # slug → промпт персоны (для gateway + per-lead)
 PERSONA_AGENT_MODEL_ID = _opt_int("PERSONA_AGENT_MODEL_ID", 133)  # DeepSeek V4 Pro (как агент Лии)
+# Выбор персоны на КОНКРЕТНЫЙ диалог хранится в leads.ai_persona (db/schema_persona.sql),
+# а НЕ в app_settings: атрибут лида, стирается с ним по 152-ФЗ. Приоритет в боте:
+# leads.ai_persona (диалог) > ai_*__<source> (канал) > глобальные ai_* (раздел «ИИ-агенты»).
 AI_BACKENDS = {
     "cloud_ai": "Агент (Лия)",
     "gateway": f"{AI_BRAND_MODEL} (прямой)",

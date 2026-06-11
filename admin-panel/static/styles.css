@@ -435,6 +435,16 @@ body.page-dialogs .main { overflow: hidden; min-height: 0; }
 .dchat__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .dchat__actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
 .dchat__flash { flex: none; padding: 10px 18px 0; }
+/* Полоса «ИИ-сотрудник диалога»: кто отвечает + ручная смена роли */
+.dchat__staff {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 9px 18px; background: var(--surface);
+  border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.dchat__staff-now { color: var(--ink); }
+.dchat__staff-scope { color: var(--ink-faint, #8a8275); }
+.dchat__staff-form { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.dchat__staff-form .field__input--inline { min-width: 200px; margin-right: 0; }
 
 /* Поверхность диалога: лента скроллится, композер прижат снизу. Скоуп — ТОЛЬКО
    внутри .dchat__surface, чтобы карточка лида (lead.html) листалась как обычно. */

@@ -135,6 +135,19 @@ async def get_lead_source(tg_user_id: int) -> str | None:
         return None
 
 
+async def get_lead_persona(tg_user_id: int) -> str | None:
+    """slug «ИИ-сотрудника», выбранного оператором на ЭТОТ диалог (leads.ai_persona).
+    Перекрывает канал/глобал. Нет/сбой → None (наследуется канал/глобал)."""
+    try:
+        async with pool.acquire() as c:
+            return await c.fetchval(
+                "select ai_persona from leads where tg_user_id = $1", tg_user_id
+            )
+    except Exception as e:  # noqa: BLE001 — выбор персоны не должен ломать авто-ответ
+        logging.getLogger(__name__).warning("Не удалось прочитать ai_persona лида: %s", e)
+        return None
+
+
 # ── Перехват (bot_paused) ────────────────────────────────────────────────────
 async def is_bot_paused(tg_user_id: int) -> bool:
     """True, если оператор взял ручное управление этим лидом. Нет строки → False."""
@@ -793,7 +806,7 @@ _AI_SETTING_KEYS = (
 _AI_BACKENDS = ("cloud_ai", "gateway")
 
 
-async def get_ai_overrides(source: str | None = None) -> dict:
+async def get_ai_overrides(source: str | None = None, persona: str | None = None) -> dict:
     """Настройки ИИ из app_settings ПОВЕРХ env (пишет панель). Одним запросом.
     Отсутствие строки → дефолт: enabled=True (сохранить поведение «только env»),
     backend='cloud_ai', agent_id='' (→ config.AGENT_ID), model/gateway_base_url='' (→
@@ -802,14 +815,20 @@ async def get_ai_overrides(source: str | None = None) -> dict:
     Любой сбой чтения трактуем как «нет переопределений»: ИИ не должен молчать из-за БД.
     Логика/дефолты ДОЛЖНЫ совпадать с панелью (admin-panel/db.py::get_ai_settings).
 
-    source — канал лида («ИИ-сотрудник на канал», панель → «Каналы»): если для него
-    назначена персона, панель кладёт ключи `ai_agent_id__<source>` (cloud_ai: СВОЙ агент
-    персоны) и `ai_system_prompt__<source>` (gateway: промпт персоны). Непустой
-    per-канальный ключ ПОБЕЖДАЕТ глобальный; пусто/нет строки → глобальное поведение."""
+    Выбор «ИИ-сотрудника» — три уровня, по возрастанию приоритета:
+      • глобальный  — ai_agent_id / ai_system_prompt (раздел «ИИ-агенты»);
+      • канал       — source лида → ai_agent_id__<source> / ai_system_prompt__<source>
+                      (панель → «Каналы»); ПОБЕЖДАЕТ глобальный;
+      • диалог      — persona (leads.ai_persona, оператор в «Диалогах») → реестры
+                      ai_persona_agent__<persona> / ai_persona_prompt__<persona>;
+                      ПОБЕЖДАЕТ канал. Пусто/нет ключа на любом уровне → берётся нижний."""
     keys = list(_AI_SETTING_KEYS)
     src = (source or "").strip()
+    per = (persona or "").strip()
     if src:
         keys += [f"ai_agent_id__{src}", f"ai_system_prompt__{src}"]
+    if per:
+        keys += [f"ai_persona_agent__{per}", f"ai_persona_prompt__{per}"]
     try:
         async with pool.acquire() as c:
             rows = await c.fetch(
@@ -827,9 +846,12 @@ async def get_ai_overrides(source: str | None = None) -> dict:
         backend = "cloud_ai"
     agent_id = (kv.get("ai_agent_id") or "").strip()
     system_prompt = kv.get("ai_system_prompt") or ""
-    if src:
+    if src:  # канал перекрывает глобал
         agent_id = (kv.get(f"ai_agent_id__{src}") or "").strip() or agent_id
         system_prompt = (kv.get(f"ai_system_prompt__{src}") or "") or system_prompt
+    if per:  # персона диалога перекрывает канал и глобал
+        agent_id = (kv.get(f"ai_persona_agent__{per}") or "").strip() or agent_id
+        system_prompt = (kv.get(f"ai_persona_prompt__{per}") or "") or system_prompt
     return {
         "enabled": True if enabled_raw is None else bool(enabled_raw.strip()),
         "backend": backend,

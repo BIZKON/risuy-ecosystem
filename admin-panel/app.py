@@ -518,6 +518,38 @@ def _present_dialog_row(r) -> dict:
     }
 
 
+def _persona_label(slug: str) -> str:
+    p = config.PERSONA_PRESETS.get(slug)
+    return f'{p["name"]} — {p["role"]}' if p else ""
+
+
+async def _resolve_dialog_staff(lead: dict) -> dict:
+    """Кто СЕЙЧАС отвечает этому диалогу + что выбрать в селекте. Приоритет:
+    leads.ai_persona (ручной выбор диалога) > канал (ai_persona__<source>) > глобальная
+    настройка (раздел «ИИ-агенты») > дефолтный агент (Лия). Возвращает текущий ручной slug
+    (для select), имя эффективной персоны и область её действия (для подписи)."""
+    source = lead.get("source") or "other"
+    lead_persona = (lead.get("ai_persona") or "").strip()
+    lead_persona = lead_persona if lead_persona in config.PERSONA_PRESETS else ""
+    if lead_persona:
+        eff, scope = lead_persona, "выбран для этого диалога"
+    else:
+        ch = (await db.get_channel_personas((source,)))["personas"].get(source, "")
+        if ch:
+            eff = ch
+            scope = f'по каналу «{config.SOURCE_LABELS.get(source, source)}»'
+        elif (await db.get_ai_settings()).get("persona"):
+            eff, scope = (await db.get_ai_settings())["persona"], "общая настройка"
+        else:
+            eff, scope = "", "по умолчанию"
+    return {
+        "current": lead_persona,
+        "effective_name": _persona_label(eff) if eff else "Лия — ИИ-администратор",
+        "scope": scope,
+        "options": [{"key": k, "label": _persona_label(k)} for k in config.PERSONA_ORDER],
+    }
+
+
 async def _render_dialogs(
     request: Request,
     session: auth.Session,
@@ -527,6 +559,7 @@ async def _render_dialogs(
     thread=None,
     replied: bool = False,
     paused_flash: bool = False,
+    staff_flash: bool = False,
     reply_err: str | None = None,
     invoiced: bool = False,
     invoice_err: str | None = None,
@@ -579,6 +612,8 @@ async def _render_dialogs(
             "invoice_products": invoice_products,
             "invoiced": invoiced,
             "invoice_err": _invoice_err_text(invoice_err),
+            "dialog_staff": await _resolve_dialog_staff(lead),
+            "staff_flash": staff_flash,
         })
     return templates.TemplateResponse(request, "dialogs.html", ctx)
 
@@ -597,6 +632,7 @@ async def dialogs_detail(
     session: auth.Session = Depends(require_session),
     replied: int = 0,
     paused: int = 0,
+    staff: int = 0,
     err: str | None = None,
     invoiced: int = 0,
     inv_err: str | None = None,
@@ -610,9 +646,41 @@ async def dialogs_detail(
     thread = await _load_thread_audited(request, session, lead_id)
     return await _render_dialogs(
         request, session, selected_id=lead_id, rec=rec, thread=thread,
-        replied=bool(replied), paused_flash=bool(paused), reply_err=err,
-        invoiced=bool(invoiced), invoice_err=inv_err,
+        replied=bool(replied), paused_flash=bool(paused), staff_flash=bool(staff),
+        reply_err=err, invoiced=bool(invoiced), invoice_err=inv_err,
     )
+
+
+# ---- /dialogs/{id}/persona — сменить «ИИ-сотрудника» этого диалога --------- #
+@app.post("/dialogs/{lead_id}/persona")
+async def dialog_set_persona(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    persona: str = Form(""),
+    from_: str = Form("dialog", alias="from"),
+    csrf_token: str = Form(""),
+):
+    """Оператор назначает диалогу конкретного ИИ-сотрудника (или «По умолчанию» = сброс).
+    Перекрывает канальную и глобальную настройку для ЭТОГО лида; бот применит со следующего
+    его сообщения. При выборе персоны убеждаемся, что её агент создан (cloud_ai зовёт по
+    access_id) — переиспользуем общий с «Каналами» реестр (один агент на персону)."""
+    await _enforce_csrf(request, session, csrf_token)
+    persona = persona.strip()
+    if persona and persona not in config.PERSONA_PRESETS:
+        return _chat_return(lead_id, from_, err="bad_persona")
+    if persona:
+        try:
+            await _ensure_persona_agent(persona)
+        except timeweb_ai.TimewebAIError:
+            import logging
+            logging.getLogger("admin-panel").exception("ensure_persona_agent (диалог) не удался")
+            return _chat_return(lead_id, from_, err="persona_tw")
+    await db.set_lead_persona(
+        lead_id, persona, actor=session.actor, ip=_ip(request), user_agent=_ua(request)
+    )
+    base = "/dialogs" if from_ == "dialog" else "/leads"
+    return RedirectResponse(url=f"{base}/{lead_id}?staff=1#thread", status_code=303)
 
 
 def _chat_return(lead_id, from_: str, *, replied: bool = False,
@@ -740,6 +808,8 @@ def _reply_err_text(err: str | None) -> str | None:
         "bad_file": "Тип файла не поддерживается или содержимое не совпадает с расширением.",
         "file_too_big": "Файл превышает лимит загрузки.",
         "empty_reply": "Пустой ответ: добавьте текст или вложение.",
+        "bad_persona": "Неизвестный ИИ-сотрудник.",
+        "persona_tw": "Не удалось подготовить агента сотрудника у ИИ-сервиса. Сотрудник не сменён — попробуйте ещё раз.",
     }.get(err or "")
 
 
@@ -2986,29 +3056,36 @@ async def channels_set_persona(
     agent_access_id = ""
     prompt = ""
     if persona:
-        preset = config.PERSONA_PRESETS[persona]
-        prompt = preset["prompt"]
-        cp = await db.get_channel_personas((source,))
-        agent_access_id = cp["agents"].get(persona, "")
-        if not agent_access_id and config.TIMEWEB_AI_ENABLED:
-            # Первое назначение персоны: создаём её агента (cloud_ai-бэкенд зовёт его по
-            # access_id). Сбой создания → ничего не сохраняем (канал остаётся как был).
-            try:
-                agent_access_id = await timeweb_ai.create_agent(
-                    f'{preset["name"]} — {preset["role"]}', prompt,
-                    model_id=config.PERSONA_AGENT_MODEL_ID,
-                )
-            except timeweb_ai.TimewebAIError:
-                import logging
-                logging.getLogger("admin-panel").exception("create_agent персоны не удался")
-                return RedirectResponse(url="/channels?err=tw", status_code=303)
-            await db.save_persona_agent(persona, agent_access_id)
+        prompt = config.PERSONA_PRESETS[persona]["prompt"]
+        try:
+            agent_access_id = await _ensure_persona_agent(persona)
+        except timeweb_ai.TimewebAIError:
+            return RedirectResponse(url="/channels?err=tw", status_code=303)
 
     await db.set_channel_persona(
         source=source, persona=persona, agent_access_id=agent_access_id, prompt=prompt,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/channels?saved_persona=1", status_code=303)
+
+
+async def _ensure_persona_agent(slug: str) -> str:
+    """access_id cloud-ai агента персоны: из реестра (один агент на персону) или создаём
+    через API + сохраняем agent+prompt в реестры. Переиспользуется каналами И диалогами.
+    Нет токена ИИ → "" (per-lead/канал тогда полагается на промпт для gateway-бэкенда).
+    TimewebAIError (сбой создания) пробрасывается вызывающему — он решает, что показать."""
+    existing = await db.get_persona_agent(slug)
+    if existing:
+        return existing
+    preset = config.PERSONA_PRESETS[slug]
+    if not config.TIMEWEB_AI_ENABLED:
+        return ""
+    access_id = await timeweb_ai.create_agent(
+        f'{preset["name"]} — {preset["role"]}', preset["prompt"],
+        model_id=config.PERSONA_AGENT_MODEL_ID,
+    )
+    await db.save_persona_agent(slug, access_id, preset["prompt"])
+    return access_id
 
 
 # =========================================================================== #
