@@ -27,7 +27,9 @@
       <h1>Оплата подписки</h1>
       <p class="lead">Выберите тариф, укажите email и оплатите банковской картой. Платёж проходит через ЮKassa по защищённому соединению.</p>
 
-      <form class="pay-form" id="payForm" autocomplete="on">
+      <p class="pay-err" id="payErr" role="alert" hidden></p>
+
+      <form class="pay-form" id="payForm" method="POST" action="https://bizkon-risuy-ecosystem-a48b.twc1.net/service/subscribe" autocomplete="on">
         <div class="group">
           <label class="lbl">Тариф</label>
           <label class="pay-opt">
@@ -75,23 +77,39 @@
 
 <script>
 (function () {
-  // Предвыбор тарифа из ?plan=econom|start
   var params = new URLSearchParams(location.search);
+  // Предвыбор тарифа из ?plan=econom|start
   var plan = params.get('plan');
   if (plan) {
     var r = document.querySelector('input[name="plan"][value="' + plan + '"]');
     if (r) r.checked = true;
   }
+  // Показ ошибки из ?err= (бэкенд редиректит сюда при отказе) — клиентские формулировки.
+  var err = params.get('err');
+  if (err) {
+    var texts = {
+      bad_plan: 'Выберите тариф.',
+      bad_email: 'Укажите корректный email.',
+      no_consent: 'Чтобы продолжить, отметьте оба согласия.',
+      no_yookassa: 'Оплата временно недоступна. Попробуйте позже или напишите нам.',
+      yk_failed: 'Не удалось сформировать платёж. Попробуйте ещё раз через минуту.'
+    };
+    var box = document.getElementById('payErr');
+    if (box) {
+      box.textContent = texts[err] || 'Не удалось перейти к оплате. Попробуйте ещё раз.';
+      box.hidden = false;
+    }
+  }
+  // Сабмит: нативная валидация required → submit летит на бэкенд (БЕЗ preventDefault),
+  // показываем overlay-индикатор на время перехода. Невалидная форма submit не вызывает.
   var form = document.getElementById('payForm');
   var overlay = document.getElementById('payOverlay');
   var msg = document.getElementById('payMsg');
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    if (!form.reportValidity()) return;
+  form.addEventListener('submit', function () {
     var sel = document.querySelector('input[name="plan"]:checked');
     var amount = sel ? sel.getAttribute('data-amount') : '';
+    if (amount) msg.textContent = 'Формируем платёж на сумму ' + amount + ' и перенаправляем на защищённую форму оплаты ЮKassa.';
     overlay.classList.add('on');
-    msg.textContent = 'Формируем платёж на сумму ' + amount + ' и перенаправляем на защищённую форму оплаты ЮKassa.';
   });
 })();
 </script>

@@ -77,10 +77,11 @@ def _request(method: str, path: str, *, body: dict | None = None,
 
 async def create_payment(
     *, amount, currency: str, description: str, return_url: str,
-    idempotence_key: str, metadata: dict | None = None,
+    idempotence_key: str, metadata: dict | None = None, receipt: dict | None = None,
 ) -> dict:
     """Создать платёж. Возвращает dict ЮKassa (id, status, confirmation.confirmation_url).
-    capture=true — одностадийный платёж (списание сразу при оплате)."""
+    capture=true — одностадийный платёж (списание сразу при оплате).
+    receipt — чек 54-ФЗ (опц.): добавляется только если задан (магазин с фискализацией)."""
     body = {
         "amount": {"value": amount_str(amount), "currency": currency},
         "capture": True,
@@ -88,6 +89,8 @@ async def create_payment(
         "description": description[:128],
         "metadata": metadata or {},
     }
+    if receipt is not None:
+        body["receipt"] = receipt
     return await asyncio.to_thread(
         _request, "POST", "/payments", body=body, idempotence_key=idempotence_key
     )

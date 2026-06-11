@@ -2321,6 +2321,35 @@ def _service_err_text(err: str | None) -> str | None:
     }.get(err or "")
 
 
+# ---- Публичная оплата подписки с сайта сервиса (info.pro-agent-ai.ru) -------- #
+# Форма pay.html живёт на статическом сайте сервиса (без сессии/CSRF — внешний источник,
+# как вебхук). Поля формы валидируем здесь; сумму берём С СЕРВЕРА (из тарифа), не из формы.
+_CHECKBOX_ON = {"on", "1", "true", "yes"}
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _valid_email(value: str) -> bool:
+    return bool(value) and len(value) <= 254 and _EMAIL_RE.match(value) is not None
+
+
+def _service_receipt(email: str, description: str, amount) -> dict | None:
+    """Чек 54-ФЗ для платежа подписки (опц.): включён флагом + есть email → одна
+    позиция-услуга, электронный чек на email. Иначе None (платёж без чека, как было)."""
+    if not config.SERVICE_RECEIPT_ENABLED:
+        return None
+    return {
+        "customer": {"email": email},
+        "items": [{
+            "description": description[:128],
+            "quantity": "1.00",
+            "amount": {"value": yookassa.amount_str(amount), "currency": config.SERVICE_CURRENCY},
+            "vat_code": config.SERVICE_VAT_CODE,
+            "payment_subject": "service",
+            "payment_mode": "full_payment",
+        }],
+    }
+
+
 # ---- /subscription — текущий тариф + счётчик + история + «Выбрать тариф» ----- #
 @app.get("/subscription", response_class=HTMLResponse)
 async def subscription_page(
@@ -2430,6 +2459,59 @@ async def subscription_cancel(
         True, actor=session.actor, ip=_ip(request), user_agent=_ua(request)
     )
     return RedirectResponse(url="/subscription?canceled=1", status_code=303)
+
+
+# ---- /service/subscribe — ПУБЛИЧНАЯ оплата подписки с сайта сервиса --------- #
+@app.post("/service/subscribe")
+async def service_subscribe(
+    request: Request,
+    plan: str = Form(""),
+    email: str = Form(""),
+    agree_oferta: str = Form(""),
+    agree_pdn: str = Form(""),
+):
+    """Публичная форма оплаты с info.pro-agent-ai.ru/pay.html (БЕЗ сессии/CSRF — внешний
+    источник, как вебхук). Сумму берём С СЕРВЕРА (из тарифа), НЕ из формы — защита от подмены.
+    Email — только в чек (минимизация ПДн): не логируем, не кладём в metadata.
+    152-ФЗ: оба согласия (оферта + обработка ПДн) обязательны. Ошибки → назад на pay.html?err=."""
+    site = config.SERVICE_SITE_URL
+
+    def _back(err: str) -> RedirectResponse:
+        return RedirectResponse(url=f"{site}/pay.html?err={err}", status_code=303)
+
+    plan_obj = _plan(plan)
+    if plan_obj is None or not plan_obj.get("payable"):
+        return _back("bad_plan")
+    email = (email or "").strip()
+    if not _valid_email(email):
+        return _back("bad_email")
+    if agree_oferta not in _CHECKBOX_ON or agree_pdn not in _CHECKBOX_ON:
+        return _back("no_consent")
+    if not config.YOOKASSA_ENABLED:
+        return _back("no_yookassa")
+
+    amount = _plan_amount(plan_obj)
+    description = f"Подписка «ИИ-Агент Про» — {plan_obj['name']}"
+    import logging
+    lg = logging.getLogger("admin-panel")
+    try:
+        payment = await yookassa.create_payment(
+            amount=amount, currency=config.SERVICE_CURRENCY,
+            description=description, return_url=f"{site}/pay-success.html",
+            idempotence_key=uuid.uuid4().hex,
+            metadata={"kind": "service_landing", "plan": plan},
+            receipt=_service_receipt(email, description, amount),
+        )
+    except yookassa.YooKassaError:
+        lg.exception("service_subscribe create_payment failed")
+        return _back("yk_failed")
+
+    conf_url = (payment.get("confirmation") or {}).get("confirmation_url")
+    if not conf_url:
+        lg.warning("service_subscribe no confirmation_url (status=%s)", payment.get("status"))
+        return _back("yk_failed")
+    lg.info("service_subscribe payment created id=%s plan=%s", payment.get("id"), plan)
+    return RedirectResponse(url=conf_url, status_code=303)
 
 
 # ---- /webhooks/yookassa — публичный вебхук (без сессии/CSRF) --------------- #

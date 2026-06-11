@@ -305,6 +305,10 @@ SERVICE_PLAN_KEYS = tuple(SERVICE_PLANS.keys())
 # Куда ведёт «Оставить заявку» / «Связаться с техподдержкой» (опц.; пусто → mailto оператора).
 SERVICE_CONTACT_URL = os.environ.get("SERVICE_CONTACT_URL", "")
 
+# Публичный сайт сервиса (info.pro-agent-ai.ru). Нужен для return_url ЮKassa и редиректов
+# ошибок ПУБЛИЧНОЙ формы оплаты /service/subscribe (форма живёт на сайте, обрабатывает панель).
+SERVICE_SITE_URL = os.environ.get("SERVICE_SITE_URL", "https://info.pro-agent-ai.ru").rstrip("/")
+
 SERVICE_INVOICE_STATUSES = ("pending", "paid", "canceled")
 SERVICE_INVOICE_STATUS_LABELS = {
     "pending": "Ожидает оплаты",
@@ -320,6 +324,11 @@ YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_API_BASE = os.environ.get("YOOKASSA_API_BASE", "https://api.yookassa.ru/v3")
 YOOKASSA_ENABLED = bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+# Чек 54-ФЗ для платежей ПОДПИСКИ (публичная оплата с сайта /service/subscribe). Включается
+# флагом ТОЛЬКО если у магазина подписки подключена онлайн-касса — иначе ЮKassa отвергнет
+# платёж с receipt. Дефолт ВЫКЛ → чек не шлётся (поведение как было). Email берётся из формы.
+SERVICE_RECEIPT_ENABLED = os.environ.get("SERVICE_RECEIPT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+SERVICE_VAT_CODE = _opt_int("SERVICE_VAT_CODE", 1)  # 1 = без НДС (УСН «Доходы»)
 
 # ── ЮKassa МАГАЗИНА ШКОЛЫ (Phase 1B: продажи лидам) — ОТДЕЛЬНАЯ пара ключей ──
 # Деньги лидов идут ШКОЛЕ, биллинг сервиса — агентству: это разные магазины ЮKassa.
