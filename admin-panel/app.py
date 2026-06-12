@@ -41,7 +41,7 @@ import security
 import timeweb_ai
 import yookassa
 
-from shared import vault
+from shared import money, vault
 
 
 # --------------------------------------------------------------------------- #
@@ -2427,6 +2427,8 @@ def _service_err_text(err: str | None) -> str | None:
         "not_payable": "Этот тариф оформляется по заявке — нажмите «Оставить заявку».",
         "no_yookassa": "Онлайн-оплата выключена: не заданы ключи ЮKassa (YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY).",
         "bad_email": "Укажите корректный email — на него ЮKassa пришлёт чек (54-ФЗ).",
+        "no_tenant": "Сначала выберите клиента (раздел «Клиенты»).",
+        "bad_amount": "Сумма пополнения вне допустимых границ.",
         "yk_failed": "Не удалось создать платёж в ЮKassa. Попробуйте позже.",
     }.get(err or "")
 
@@ -2518,6 +2520,7 @@ async def subscription_page(
     session: auth.Session = Depends(require_session),
     paid: int = 0,
     canceled: int = 0,
+    detached: int = 0,
     err: str | None = None,
 ):
     sub = await _current_subscription()
@@ -2538,10 +2541,39 @@ async def subscription_page(
             "active": "subscription",
             "paid_flash": bool(paid),
             "canceled_flash": bool(canceled),
+            "detached_flash": bool(detached),
             "err": _service_err_text(err),
             "economics": await _ai_economics(session.role),
+            # Wave 2a: кошелёк тенанта (топап + история платежей платформы + отвязка карты)
+            "wallet": await _wallet_ctx(session),
         },
     )
+
+
+async def _wallet_ctx(session: auth.Session) -> dict | None:
+    """Кошелёк активного тенанта для раздела «Подписка». None — тенант не выбран."""
+    tid = session.active_tenant_id
+    if not tid:
+        return None
+    balance = await db.get_wallet_balance(tid)
+    pays = await db.list_platform_payments(tid, limit=15)
+    return {
+        "balance": money.micro_to_rub_str(balance),
+        "balance_negative": balance < 0,
+        "topup_min": config.WALLET_TOPUP_MIN_RUB,
+        "topup_max": config.WALLET_TOPUP_MAX_RUB,
+        "receipt_required": config.SERVICE_RECEIPT_ENABLED,
+        "saved_method": bool(await db.get_saved_payment_method(tid)),
+        "payments": [
+            {
+                "type": "Пополнение кошелька" if p["type"] == "topup" else "Подписка",
+                "amount": money.micro_to_rub_str(int(p["amount_microrub"])),
+                "status": p["status"],
+                "created_at": p["created_at"],
+            }
+            for p in pays
+        ],
+    }
 
 
 # ---- /subscription/select — выбрать тариф → счёт + платёж ЮKassa → оплата ---- #
@@ -2708,6 +2740,13 @@ async def yookassa_webhook(request: Request):
     payment_id = obj.get("id")
     if not payment_id:
         return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+    # Дедуп повторных доставок (Wave 2a, ТЗ §5.3): ЮKassa ретраит уведомления.
+    # Повтор уже виденного payment_id → 200 сразу, без повторной обработки
+    # (кошелёк/заказ не зачтутся дважды; сами ветки тоже идемпотентны — оборона в глубину).
+    event_key = f"yookassa:{payment_id}:{(body or {}).get('event') or 'payment'}"
+    if not await db.webhook_event_new(event_key, (body or {}).get("event"), body or {}):
+        return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+    processed_ok = True
     try:
         if config.SHOP_PAYMENTS_CONFIGURED and await db.order_exists_for_payment(payment_id):
             # Ветка ЗАКАЗА школы (платёж создан ботом-кнопкой или панелью-«счётом»).
@@ -2715,9 +2754,14 @@ async def yookassa_webhook(request: Request):
             if payment.get("status") == "succeeded" and payment.get("paid"):
                 await db.mark_order_paid_by_payment(payment_id)
         elif config.YOOKASSA_ENABLED:
-            # Ветка СЧЁТА ПОДПИСКИ (поведение до 1B, без изменений).
+            # Магазин платформы: топап кошелька (Wave 2a) ИЛИ счёт подписки (legacy).
             payment = await yookassa.get_payment(payment_id)
-            if payment.get("status") == "succeeded" and payment.get("paid"):
+            meta = payment.get("metadata") or {}
+            if meta.get("kind") == "platform_topup" and meta.get("tenant_id"):
+                if payment.get("status") == "succeeded" and payment.get("paid"):
+                    await db.mark_topup_succeeded(meta["tenant_id"], payment_id, payment)
+            elif payment.get("status") == "succeeded" and payment.get("paid"):
+                # Ветка СЧЁТА ПОДПИСКИ (поведение до 1B, без изменений).
                 card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
                 row = await db.mark_service_invoice_paid_by_payment(payment_id, card_last4=card)
                 # Оплата возобновляет подписку — снимаем флаг отмены (если стоял).
@@ -2725,8 +2769,13 @@ async def yookassa_webhook(request: Request):
                     await db.set_subscription_canceled(False, actor="yookassa-webhook",
                                                        ip=None, user_agent=None)
     except Exception:
+        processed_ok = False
         import logging
         logging.getLogger("admin-panel").exception("yookassa webhook verify failed")
+    try:
+        await db.webhook_event_done(event_key, processed_ok)
+    except Exception:
+        pass
     return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
 
 
@@ -3745,3 +3794,81 @@ async def keys_delete(
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/keys?deleted=1" if ok else "/keys?err=not_found", status_code=303)
+
+
+# --------------------------------------------------------------------------- #
+# Reseller Wave 2a: пополнение кошелька (топап) + отвязка карты автопродления.
+# Деньги ВНУТРЬ платформы (billing); списания наружу — Wave 3 (metering).
+# --------------------------------------------------------------------------- #
+@app.post("/wallet/topup")
+async def wallet_topup(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    amount: str = Form(""),
+    email: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/subscription?err=no_tenant", status_code=303)
+    if not config.YOOKASSA_ENABLED:
+        return RedirectResponse(url="/subscription?err=no_yookassa", status_code=303)
+    try:
+        amount_micro = money.rub_to_micro(amount)
+    except Exception:
+        return RedirectResponse(url="/subscription?err=bad_amount", status_code=303)
+    if not (config.WALLET_TOPUP_MIN_RUB * money.MICRO <= amount_micro
+            <= config.WALLET_TOPUP_MAX_RUB * money.MICRO):
+        return RedirectResponse(url="/subscription?err=bad_amount", status_code=303)
+    email = email.strip()
+    if config.SERVICE_RECEIPT_ENABLED and not _valid_email(email):
+        return RedirectResponse(url="/subscription?err=bad_email", status_code=303)
+
+    tid = session.active_tenant_id
+    idem = f"topup:{tid}:{uuid.uuid4().hex}"
+    row_id = await db.create_platform_payment(
+        tid, type_="topup", amount_microrub=amount_micro, idempotence_key=idem)
+    host = request.headers.get("host", "")
+    description = "Пополнение кошелька «ИИ-Агент Про»"
+    amount_str = money.micro_to_amount_str(amount_micro)
+    try:
+        payment = await yookassa.create_payment(
+            amount=amount_str, currency="RUB",
+            description=description,
+            return_url=f"https://{host}/subscription?paid=1",
+            idempotence_key=row_id,                      # наш id строки = Idempotence-Key
+            metadata={"kind": "platform_topup", "tenant_id": str(tid), "payment_row_id": row_id},
+            receipt=_service_receipt(email, description, amount_str),
+        )
+    except yookassa.YooKassaError:
+        import logging
+        logging.getLogger("admin-panel").exception("wallet topup create_payment failed")
+        return RedirectResponse(url="/subscription?err=yk_failed", status_code=303)
+    pid = payment.get("id")
+    conf_url = (payment.get("confirmation") or {}).get("confirmation_url")
+    if pid:
+        await db.attach_platform_payment_yk(row_id, tid, pid)
+    if not conf_url:
+        return RedirectResponse(url="/subscription?err=yk_failed", status_code=303)
+    await db.audit(actor=session.actor, action="wallet_topup_create",
+                   ip=_ip(request), user_agent=_ua(request),
+                   detail={"tenant_id": str(tid), "amount_microrub": amount_micro})
+    return RedirectResponse(url=conf_url, status_code=303)
+
+
+@app.post("/subscription/detach-card")
+async def subscription_detach_card(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    """«Отвязать карту»: требование ЮKassa к рекурренту — покупатель отключает
+    автопродление сам, без поддержки. Стираем сохранённый способ оплаты подписок тенанта."""
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/subscription?err=no_tenant", status_code=303)
+    await db.detach_payment_method(
+        session.active_tenant_id,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/subscription?detached=1", status_code=303)

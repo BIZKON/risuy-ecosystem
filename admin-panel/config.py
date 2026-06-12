@@ -620,3 +620,8 @@ TENANT_SECRET_KEYS = (
 )
 TENANT_SECRET_KEY_SET = {k for k, _ in TENANT_SECRET_KEYS}
 TENANT_SECRET_VALUE_MAX = 4096   # потолок длины значения секрета
+
+# Кошелёк платформы (Wave 2a): границы разового пополнения, ₽ (дефолт до решения
+# владельца по ТЗ §13.4 — зафиксировано в DECISIONS).
+WALLET_TOPUP_MIN_RUB = _opt_int("WALLET_TOPUP_MIN_RUB", 100)
+WALLET_TOPUP_MAX_RUB = _opt_int("WALLET_TOPUP_MAX_RUB", 100_000)

@@ -2790,3 +2790,154 @@ async def delete_tenant_secret(
                     detail={"tenant_id": str(tenant_id), "key_name": key_name},
                 )
             return deleted
+
+
+# ── Reseller Wave 2a: кошелёк + платежи платформы + дедуп вебхука (ТЗ §4.3/§5.3) ──
+# Все tenant-scoped запросы — в транзакции после set_config('app.tenant_id') (RLS).
+
+async def get_wallet_balance(tenant_id) -> int:
+    """Баланс кошелька тенанта в µRUB (0 — кошелька ещё нет: создаётся первым пополнением)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            v = await c.fetchval(
+                "select balance_microrub from credit_wallets where tenant_id = $1", tenant_id)
+            return int(v or 0)
+
+
+async def create_platform_payment(
+    tenant_id, *, type_: str, amount_microrub: int, idempotence_key: str,
+) -> str:
+    """Запись pending-платежа платформы (топап/подписка) ДО похода в ЮKassa.
+    Возвращает id строки (он же — наш Idempotence-Key запроса к ЮKassa)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return str(await c.fetchval(
+                """
+                insert into payments (tenant_id, type, idempotence_key, amount_microrub, status)
+                values ($1, $2, $3, $4, 'pending')
+                on conflict (idempotence_key) do update set idempotence_key = excluded.idempotence_key
+                returning id
+                """,
+                tenant_id, type_, idempotence_key, amount_microrub,
+            ))
+
+
+async def attach_platform_payment_yk(payment_row_id, tenant_id, yookassa_payment_id: str) -> None:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            await c.execute(
+                "update payments set yookassa_payment_id = $2 where id = $1",
+                payment_row_id, yookassa_payment_id,
+            )
+
+
+async def mark_topup_succeeded(tenant_id, yookassa_payment_id: str, raw: dict) -> bool:
+    """Вебхук-ветка топапа: платёж → succeeded + кошелёк += amount. ОДНА транзакция,
+    идемпотентно (повторный вебхук того же платежа кошелёк НЕ пополняет повторно).
+    Кошелёк блокируется for update (гонка с параллельным списанием metering)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            row = await c.fetchrow(
+                "select id, amount_microrub, status from payments "
+                "where yookassa_payment_id = $1 for update",
+                yookassa_payment_id,
+            )
+            if row is None or row["status"] == "succeeded":
+                return False                       # неизвестный или уже зачтён — no-op
+            await c.execute(
+                "update payments set status = 'succeeded', captured_at = now(), raw = $2 "
+                "where id = $1",
+                row["id"], json.dumps(raw)[:100_000],
+            )
+            await c.execute("select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
+            await c.execute(
+                """
+                insert into credit_wallets (tenant_id, balance_microrub, updated_at)
+                values ($1, $2, now())
+                on conflict (tenant_id) do update
+                set balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub,
+                    updated_at = now()
+                """,
+                tenant_id, int(row["amount_microrub"]),
+            )
+            await _insert_audit(
+                c, actor="yookassa-webhook", action="wallet_topup",
+                detail={"tenant_id": str(tenant_id), "payment_id": yookassa_payment_id,
+                        "amount_microrub": int(row["amount_microrub"])},
+            )
+            return True
+
+
+async def list_platform_payments(tenant_id, *, limit: int = 30) -> list[asyncpg.Record]:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                "select type, amount_microrub, status, created_at, captured_at "
+                "from payments where tenant_id = $1 order by created_at desc limit $2",
+                tenant_id, limit,
+            )
+
+
+async def webhook_event_new(external_id: str, event_type: str | None, payload: dict) -> bool:
+    """Дедуп входящих уведомлений (webhook_events.external_id unique).
+    True — событие новое (обрабатываем); False — повтор (сразу 200)."""
+    async with pool.acquire() as c:
+        inserted = await c.fetchval(
+            """
+            insert into webhook_events (external_id, event_type, payload)
+            values ($1, $2, $3)
+            on conflict (external_id) do nothing
+            returning id
+            """,
+            external_id, event_type, json.dumps(payload)[:100_000],
+        )
+        return inserted is not None
+
+
+async def webhook_event_done(external_id: str, ok: bool) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update webhook_events set status = $2, processed_at = now() where external_id = $1",
+            external_id, "processed" if ok else "failed",
+        )
+
+
+async def get_saved_payment_method(tenant_id) -> str | None:
+    """Сохранённый способ оплаты автопродления (subscriptions последней живой подписки)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetchval(
+                "select yookassa_payment_method_id from subscriptions "
+                "where tenant_id = $1 and status in ('trialing','active','past_due') "
+                "and yookassa_payment_method_id is not null "
+                "order by created_at desc limit 1",
+                tenant_id,
+            )
+
+
+async def detach_payment_method(
+    tenant_id, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """«Отвязать карту»: стереть сохранённый способ оплаты у живых подписок тенанта —
+    автопродление выключается (требование ЮKassa к рекурренту: покупатель отвязывает сам)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            res = await c.execute(
+                "update subscriptions set yookassa_payment_method_id = null "
+                "where tenant_id = $1 and yookassa_payment_method_id is not null",
+                tenant_id,
+            )
+            n = int(res.split()[-1] or 0)
+            if n:
+                await _insert_audit(
+                    c, actor=actor, action="payment_method_detach", ip=ip, user_agent=user_agent,
+                    detail={"tenant_id": str(tenant_id), "subscriptions": n},
+                )
+            return n > 0

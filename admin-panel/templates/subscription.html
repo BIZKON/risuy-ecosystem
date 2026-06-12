@@ -12,7 +12,65 @@
 
 {% if paid_flash %}{{ flash('Вы вернулись со страницы оплаты. Если платёж прошёл — тариф и счётчик обновятся в течение минуты (по уведомлению ЮKassa).', 'info') }}{% endif %}
 {% if canceled_flash %}{{ flash('Подписка отменена. Доступ сохранится до конца оплаченного периода.', 'ok') }}{% endif %}
+{% if detached_flash %}{{ flash('Карта отвязана: автопродление выключено. Продлевать подписку можно вручную в любой момент.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Кошелёк (Wave 2a): баланс + пополнение + история платежей платформы ── #}
+{% if wallet %}
+<section class="section" aria-label="Кошелёк">
+  <h2 class="section__title section__title--lg">Кошелёк</h2>
+  <div class="billing-card">
+    <p class="meter-box__stats">
+      Баланс: <b class="{% if wallet.balance_negative %}over-text{% endif %}">{{ wallet.balance }} ₽</b>
+      <span class="muted">· списания за работу ИИ идут с кошелька (детально — этап «Расход»)</span>
+    </p>
+    <form method="post" action="/wallet/topup" class="field-row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field">
+        <span class="field__label">Сумма пополнения, ₽</span>
+        <input class="field__input mono" type="number" name="amount" required
+               min="{{ wallet.topup_min }}" max="{{ wallet.topup_max }}" step="1"
+               placeholder="{{ wallet.topup_min }}–{{ wallet.topup_max }}">
+      </label>
+      {% if wallet.receipt_required %}
+      <label class="field">
+        <span class="field__label">Email для чека (54-ФЗ)</span>
+        <input class="field__input" type="email" name="email" required autocomplete="email"
+               placeholder="на него придёт чек">
+      </label>
+      {% endif %}
+      <button class="btn btn--dark" type="submit">Пополнить</button>
+    </form>
+    {% if wallet.saved_method %}
+    <form method="post" action="/subscription/detach-card">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn btn--soft" type="submit">Отвязать карту (выключить автопродление)</button>
+    </form>
+    {% else %}
+    <p class="hint">Сохранённой карты нет — автопродление не настроено. Карта сохраняется при оплате подписки с галочкой автопродления (появится после включения рекуррента ЮKassa).</p>
+    {% endif %}
+    {% if wallet.payments %}
+    <div class="table-wrap">
+      <table class="table table--compact table--zebra">
+        <thead><tr><th>Дата</th><th>Что</th><th>Сумма</th><th>Статус</th></tr></thead>
+        <tbody>
+          {% for p in wallet.payments %}
+          <tr>
+            <td class="nowrap">{{ p.created_at.strftime('%d.%m.%y %H:%M') }}</td>
+            <td>{{ p.type }}</td>
+            <td class="mono">{{ p.amount }} ₽</td>
+            <td>{% if p.status == 'succeeded' %}<span class="badge badge--ostatus" data-ostatus="paid">Зачислен</span>
+                {% elif p.status == 'pending' %}<span class="badge badge--ostatus" data-ostatus="pending">Ожидает</span>
+                {% else %}<span class="badge badge--ostatus" data-ostatus="canceled">{{ p.status }}</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
 
 {# ── Карточка текущего тарифа + счётчик ── #}
 <section class="billing-card">
