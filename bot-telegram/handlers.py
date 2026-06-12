@@ -16,6 +16,7 @@ from aiogram.types import (
 import ai
 import config
 import db
+import kb
 import messaging
 import texts
 import yookassa
@@ -282,7 +283,14 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     except Exception:
         pass
     data = await state.get_data()
-    answer, msg_id = await ai.ask_ai(message.text, data.get("ai_parent_id"), ai_cfg)
+    # RF-RAG (опц., тумблер kb_enabled в панели): подмешиваем справку из базы знаний в
+    # запрос агента. Выключено / эмбеддер недоступен / база пуста → user_text = исходный
+    # текст (поведение без изменений). retrieve_context не падает и не блокирует ответ.
+    user_text = message.text
+    if ai_cfg.get("kb_enabled"):
+        kb_context = await kb.retrieve_context(user_text, lead_persona)
+        user_text = kb.augment(user_text, kb_context)
+    answer, msg_id = await ai.ask_ai(user_text, data.get("ai_parent_id"), ai_cfg)
     if msg_id:
         await state.update_data(ai_parent_id=msg_id)
     # Гонка Лии (§4): ask_liya мог идти до 30с — оператор мог включить паузу за это

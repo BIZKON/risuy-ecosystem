@@ -802,6 +802,7 @@ async def get_active_lead_magnet_product() -> dict | None:
 _AI_SETTING_KEYS = (
     "ai_enabled", "ai_backend", "ai_agent_id", "ai_model",
     "ai_gateway_base_url", "ai_system_prompt", "ai_fallback_text",
+    "kb_enabled",  # RF-RAG: подмешивать справку из базы знаний (по умолчанию ВЫКЛ)
 )
 _AI_BACKENDS = ("cloud_ai", "gateway")
 
@@ -838,7 +839,7 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
     except Exception as e:  # noqa: BLE001 — сбой чтения не должен ломать авто-ответ
         logging.getLogger(__name__).warning("Не удалось прочитать настройки ИИ: %s", e)
         return {"enabled": True, "backend": "cloud_ai", "agent_id": "", "model": "",
-                "gateway_base_url": "", "system_prompt": "", "fallback": ""}
+                "gateway_base_url": "", "system_prompt": "", "fallback": "", "kb_enabled": False}
     kv = {r["key"]: (r["value"] or "") for r in rows}
     enabled_raw = kv.get("ai_enabled")  # None=нет строки; ''=выключено явно
     backend = (kv.get("ai_backend") or "").strip()
@@ -860,7 +861,38 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
         "gateway_base_url": (kv.get("ai_gateway_base_url") or "").strip(),
         "system_prompt": system_prompt,
         "fallback": kv.get("ai_fallback_text") or "",
+        "kb_enabled": bool((kv.get("kb_enabled") or "").strip()),
     }
+
+
+async def kb_search(
+    embedding: list[float], persona: str | None = None,
+    *, top_k: int = 4, max_distance: float = 0.55,
+) -> list[str]:
+    """Top-k чанков базы знаний по косинусной близости (pgvector `<=>`) + фильтр по роли.
+    Возвращает тексты ближайших чанков. Общая справка (metadata.role_tag пуст) видна ВСЕМ
+    ролям; чанки конкретной персоны — только ей. max_distance отсекает нерелевантное
+    (косинусная дистанция: 0 — идентично, 2 — противоположно; для e5 релевантное ~0.1–0.3).
+    Бот ходит под owner-ролью — грант на kb_chunks не нужен. Сбой/нет таблицы (DDL не
+    применён) → исключение пробрасываем: kb.retrieve_context его ловит и отключает RAG."""
+    if not embedding or pool is None:
+        return []
+    vec = "[" + ",".join(f"{x:.6f}" for x in embedding) + "]"
+    per = (persona or "").strip()
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select content
+              from kb_chunks
+             where embedding is not null
+               and (coalesce(metadata->>'role_tag', '') = '' or metadata->>'role_tag' = $2)
+               and (embedding <=> $1::vector) <= $3
+             order by embedding <=> $1::vector
+             limit $4
+            """,
+            vec, per, max_distance, top_k,
+        )
+    return [r["content"] for r in rows]
 
 
 # ── app_settings: НЕ-секретный снимок конфигурации бота (бот ПИШЕТ owner-ролью) ──

@@ -47,6 +47,14 @@ TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
 # base URL и модель берутся из app_settings (панель), ключ — секрет, только из env.
 AI_GATEWAY_TOKEN = os.environ.get("AI_GATEWAY_TOKEN", "")
 
+# ── RF-RAG: эмбеддер TEI (self-host, intfloat/multilingual-e5-base, 768-dim) ──
+# URL нашего TEI-сервиса на VM (напр. http://10.0.0.5:8080 во внутренней сети или
+# http://<vm-ip>:8080 за фаерволом). Пусто → RAG выключен полностью: retrieval не
+# выполняется, бот отвечает как раньше (см. kb.py — гейт). EMBEDDER_TOKEN — опц. Bearer,
+# если TEI закрыт reverse-proxy с проверкой токена (у самого TEI auth нет). Только из env.
+EMBEDDER_URL = os.environ.get("EMBEDDER_URL", "")
+EMBEDDER_TOKEN = os.environ.get("EMBEDDER_TOKEN", "")
+
 # ── Онлайн-оплата продаж школы — ЮKassa, МАГАЗИН ШКОЛЫ (Phase 1B) ────────────
 # ОТДЕЛЬНАЯ пара ключей от магазина подписки в панели (деньги лидов идут ШКОЛЕ,
 # биллинг сервиса — агентству; это разные магазины ЮKassa). Бот создаёт платёж по
