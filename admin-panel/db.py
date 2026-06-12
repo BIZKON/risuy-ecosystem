@@ -2562,8 +2562,10 @@ async def get_latest_paid_invoice() -> asyncpg.Record | None:
 
 
 async def list_service_invoices(*, limit: int = 60) -> list[asyncpg.Record]:
-    """Счета-периоды + использование (сообщений ИИ) за окно каждого периода — одним
-    запросом через lateral (для столбцов Использовано/Осталось/Превышение в истории)."""
+    """ОПЛАЧЕННЫЕ счета-периоды + использование (сообщений ИИ) за окно каждого периода —
+    одним запросом через lateral (столбцы Использовано/Осталось/Превышение в истории).
+    Показываем ТОЛЬКО status='paid': pending создаётся при «Выбрать тариф» ДО оплаты
+    (нужен, чтобы вебхук привязал платёж) и в истории покупок мелькать не должен."""
     q = f"""
         select {', '.join('i.' + col.strip() for col in _INVOICE_COLS.split(','))},
                coalesce(u.used, 0) as used
@@ -2574,6 +2576,7 @@ async def list_service_invoices(*, limit: int = 60) -> list[asyncpg.Record]:
             where m.source = 'liya' and m.direction = 'out'
               and m.created_at >= i.period_start and m.created_at < i.period_end
         ) u on true
+        where i.status = 'paid'
         order by i.created_at desc
         limit $1
     """
