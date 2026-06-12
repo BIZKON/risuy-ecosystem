@@ -143,6 +143,12 @@
           <form method="post" action="/subscription/select">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="plan_key" value="{{ p.key }}">
+            {% if receipt_required %}
+            <label class="field">
+              <span class="field__label vh">Email для чека</span>
+              <input class="field__input" type="email" name="email" placeholder="Email для чека (54-ФЗ)" required autocomplete="email">
+            </label>
+            {% endif %}
             <button class="btn btn--dark btn--block" type="submit"{% if not yookassa_enabled %} disabled{% endif %}>Выбрать тариф</button>
           </form>
           {% else %}

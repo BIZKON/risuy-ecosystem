@@ -2424,6 +2424,7 @@ def _service_err_text(err: str | None) -> str | None:
         "bad_plan": "Неизвестный тариф.",
         "not_payable": "Этот тариф оформляется по заявке — нажмите «Оставить заявку».",
         "no_yookassa": "Онлайн-оплата выключена: не заданы ключи ЮKassa (YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY).",
+        "bad_email": "Укажите корректный email — на него ЮKassa пришлёт чек (54-ФЗ).",
         "yk_failed": "Не удалось создать платёж в ЮKassa. Попробуйте позже.",
     }.get(err or "")
 
@@ -2476,6 +2477,7 @@ async def subscription_page(
             "plans": _plans_for_picker(sub.get("plan_key")),
             "invoices": invoices,
             "yookassa_enabled": config.YOOKASSA_ENABLED,
+            "receipt_required": config.SERVICE_RECEIPT_ENABLED,
             "contact_url": config.SERVICE_CONTACT_URL,
             "period_days": config.SERVICE_PLAN_PERIOD_DAYS,
             "csrf_token": session.csrf_token,
@@ -2494,6 +2496,7 @@ async def subscription_select(
     request: Request,
     session: auth.Session = Depends(require_session),
     plan_key: str = Form(""),
+    email: str = Form(""),
     csrf_token: str = Form(""),
 ):
     await _enforce_csrf(request, session, csrf_token)
@@ -2504,6 +2507,10 @@ async def subscription_select(
         return RedirectResponse(url="/subscription?err=not_payable", status_code=303)
     if not config.YOOKASSA_ENABLED:
         return RedirectResponse(url="/subscription?err=no_yookassa", status_code=303)
+    # Фискальный магазин (54-ФЗ): чек обязателен → нужен корректный email покупателя.
+    email = email.strip()
+    if config.SERVICE_RECEIPT_ENABLED and not _valid_email(email):
+        return RedirectResponse(url="/subscription?err=bad_email", status_code=303)
 
     # Превышение ПРОШЛОГО (текущего оплаченного) периода → доначисляем в этот счёт.
     latest = await db.get_latest_paid_invoice()
@@ -2533,12 +2540,14 @@ async def subscription_select(
 
     host = request.headers.get("host", "")
     return_url = f"https://{host}/subscription?paid=1"
+    description = f"{plan['name']} · {start:%d.%m.%Y}–{end:%d.%m.%Y}"
     try:
         payment = await yookassa.create_payment(
             amount=amount, currency=config.SERVICE_CURRENCY,
-            description=f"{plan['name']} · {start:%d.%m.%Y}–{end:%d.%m.%Y}",
+            description=description,
             return_url=return_url, idempotence_key=invoice_id,
             metadata={"invoice_id": invoice_id, "plan": plan_key},
+            receipt=_service_receipt(email, description, amount),
         )
     except yookassa.YooKassaError:
         import logging
