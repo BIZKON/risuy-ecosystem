@@ -2458,6 +2458,37 @@ def _service_receipt(email: str, description: str, amount) -> dict | None:
     }
 
 
+async def _ai_economics() -> dict | None:
+    """Экономика сервиса для «Подписки»: РЕАЛЬНЫЙ расход токенов ИИ (used_tokens агентов
+    Timeweb) × цена → оценка себестоимости, против выручки подписки, + баланс аккаунта.
+    Всё в try — сбой Timeweb-API не должен ронять страницу (None → блок скрыт)."""
+    if not config.TIMEWEB_AI_ENABLED:
+        return None
+    try:
+        agents = await timeweb_ai.list_agents()
+        fin = await timeweb_ai.account_finances()
+    except timeweb_ai.TimewebAIError:
+        return None
+    used = sum(int(a.get("used_tokens") or 0) for a in agents)
+    price = Decimal(str(config.AI_TOKEN_PRICE_RUB_PER_M))
+    cost = (Decimal(used) / Decimal(1_000_000) * price).quantize(Decimal("0.01"))
+    revenue = Decimal(str(await db.service_revenue_total() or 0))
+    margin = (revenue - cost).quantize(Decimal("0.01"))
+    balance, hours_left, monthly = fin.get("balance"), fin.get("hours_left"), fin.get("monthly_cost")
+    return {
+        "used_tokens": used,
+        "agents_n": len(agents),
+        "price_per_m": _fmt_amount(price),
+        "cost": _fmt_amount(cost),
+        "revenue": _fmt_amount(revenue),
+        "margin": _fmt_amount(margin),
+        "margin_negative": margin < 0,
+        "balance": _fmt_amount(Decimal(str(balance))) if balance is not None else None,
+        "monthly_cost": _fmt_amount(Decimal(str(monthly))) if monthly is not None else None,
+        "days_left": round(float(hours_left) / 24, 1) if hours_left else None,
+    }
+
+
 # ---- /subscription — текущий тариф + счётчик + история + «Выбрать тариф» ----- #
 @app.get("/subscription", response_class=HTMLResponse)
 async def subscription_page(
@@ -2486,6 +2517,7 @@ async def subscription_page(
             "paid_flash": bool(paid),
             "canceled_flash": bool(canceled),
             "err": _service_err_text(err),
+            "economics": await _ai_economics(),
         },
     )
 

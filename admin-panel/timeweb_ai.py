@@ -121,3 +121,10 @@ async def list_knowledge_bases() -> list[dict]:
     """Базы знаний (RAG). Каждая — платная векторная БД (dbaas_preset + сеть + токен-пакет)."""
     data = await asyncio.to_thread(_request, "GET", "/cloud-ai/knowledge-bases")
     return data.get("knowledge_bases", [])
+
+
+async def account_finances() -> dict:
+    """Баланс/расход аккаунта Timeweb — контроль, не кончается ли баланс.
+    Поля: balance, currency, monthly_cost, hourly_cost, hours_left, total_paid."""
+    data = await asyncio.to_thread(_request, "GET", "/account/finances")
+    return data.get("finances", data)

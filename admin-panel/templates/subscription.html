@@ -68,6 +68,30 @@
   {% endif %}
 </section>
 
+{# ── Экономика: реальный расход токенов ИИ (used_tokens Timeweb) vs выручка ── #}
+{% if economics %}
+<section class="section" aria-label="Экономика сервиса">
+  <h2 class="section__title section__title--lg">Экономика сервиса</h2>
+  <div class="billing-card">
+    <p class="meter-box__stats">
+      Расход ИИ: <b>{{ economics.used_tokens }}</b> токенов ≈ <b>{{ economics.cost }} ₽</b>
+      <span class="muted">· {{ economics.price_per_m }} ₽/млн · агентов: {{ economics.agents_n }}</span>
+    </p>
+    <p class="meter-box__stats">
+      Выручка подписки: <b>{{ economics.revenue }} ₽</b> ·
+      Маржа: <b class="{% if economics.margin_negative %}over-text{% endif %}">{{ economics.margin }} ₽</b>
+    </p>
+    {% if economics.balance %}
+    <p class="meter-box__stats">
+      Баланс Timeweb: <b>{{ economics.balance }} ₽</b>
+      {% if economics.days_left %}<span class="muted">≈ на {{ economics.days_left }} дн · расход {{ economics.monthly_cost }} ₽/мес</span>{% endif %}
+    </p>
+    {% endif %}
+    <p class="hint hint--block">Себестоимость ИИ — оценка: реальный расход токенов (Timeweb <code class="mono">used_tokens</code>) × цена. Уточните цену модели из ЛК в env <code class="mono">AI_TOKEN_PRICE_RUB_PER_M</code> (сейчас {{ economics.price_per_m }} ₽/млн). Выручка и маржа — нарастающим итогом.</p>
+  </div>
+</section>
+{% endif %}
+
 {# ── История периодов (раскрытие в транзакции) ── #}
 <section class="section" aria-label="История">
   <h2 class="section__title section__title--lg">История</h2>

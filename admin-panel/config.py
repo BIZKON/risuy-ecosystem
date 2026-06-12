@@ -26,6 +26,16 @@ def _opt_int(name: str, default: int) -> int:
         raise RuntimeError(f"Переменная {name} должна быть целым числом, получено: {raw!r}") from e
 
 
+def _opt_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw.replace(",", "."))
+    except ValueError as e:
+        raise RuntimeError(f"Переменная {name} должна быть числом, получено: {raw!r}") from e
+
+
 def _opt_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -536,6 +546,9 @@ AI_SYSTEM_PROMPT_MAX = 4000
 TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
 TIMEWEB_API_BASE = os.environ.get("TIMEWEB_API_BASE", "https://api.timeweb.cloud/api/v1")
 TIMEWEB_AI_ENABLED = bool(TIMEWEB_AI_TOKEN)
+# Оценка себестоимости ИИ: ₽ за 1 млн токенов модели (used_tokens агентов × цена). Timeweb НЕ
+# отдаёт цену через API — впишите фактическую из ЛК (тариф модели) в env для точности.
+AI_TOKEN_PRICE_RUB_PER_M = _opt_float("AI_TOKEN_PRICE_RUB_PER_M", 50.0)
 # Промпт агента — главный рычаг «обучения» (курсы/цены/расписание/правила). Контекст
 # модели огромный, поэтому потолок щедрый (в отличие от gateway-фолбэка на 4000).
 AI_AGENT_PROMPT_MAX = _opt_int("AI_AGENT_PROMPT_MAX", 20000)

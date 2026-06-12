@@ -2561,6 +2561,14 @@ async def get_latest_paid_invoice() -> asyncpg.Record | None:
         return await c.fetchrow(q)
 
 
+async def service_revenue_total():
+    """Сумма ОПЛАЧЕННЫХ счетов подписки (выручка сервиса за всё время) — блок «Экономика»."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select coalesce(sum(amount), 0) from service_invoices where status = 'paid'"
+        )
+
+
 async def list_service_invoices(*, limit: int = 60) -> list[asyncpg.Record]:
     """ОПЛАЧЕННЫЕ счета-периоды + использование (сообщений ИИ) за окно каждого периода —
     одним запросом через lateral (столбцы Использовано/Осталось/Превышение в истории).
