@@ -2696,3 +2696,97 @@ async def set_subscription_canceled(
                 action="subscription_cancel" if canceled else "subscription_resume",
                 ip=ip, user_agent=user_agent, detail={"canceled": canceled},
             )
+
+
+# ── Reseller-платформа Wave 1: tenancy + vault (ТЗ §4.1/§4.5) ────────────────
+# RLS: tenant_secrets закрыт политикой по current_setting('app.tenant_id') —
+# каждый запрос к нему идёт в транзакции ПОСЛЕ set_config(..., is_local=true).
+# tenants/memberships — без RLS (резолв доступов ДО установки контекста).
+
+async def list_tenants_for(actor: str, role: str) -> list[asyncpg.Record]:
+    """Тенанты, доступные актору. env-админ/admin — все живые; operator — по memberships."""
+    async with pool.acquire() as c:
+        if role == "admin":
+            return await c.fetch(
+                "select id, slug, name, status from tenants "
+                "where status in ('provisioning','active') order by created_at"
+            )
+        return await c.fetch(
+            """
+            select t.id, t.slug, t.name, t.status
+            from tenants t join memberships m on m.tenant_id = t.id
+            where m.username = $1 and t.status in ('provisioning','active')
+            order by t.created_at
+            """,
+            actor,
+        )
+
+
+async def tenant_accessible(actor: str, role: str, tenant_id) -> bool:
+    rows = await list_tenants_for(actor, role)
+    return any(str(r["id"]) == str(tenant_id) for r in rows)
+
+
+async def set_session_tenant(sid: str, tenant_id) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update admin_sessions set active_tenant_id = $2 where sid = $1",
+            sid, tenant_id,
+        )
+
+
+async def list_tenant_secrets(tenant_id) -> list[asyncpg.Record]:
+    """Метаданные секретов тенанта для UI «Ключи»: ИМЕНА и даты, БЕЗ ciphertext."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                "select key_name, created_at, last_used_at from tenant_secrets "
+                "where tenant_id = $1 order by key_name",
+                tenant_id,
+            )
+
+
+async def upsert_tenant_secret(
+    tenant_id, key_name: str, ciphertext: bytes, nonce: bytes, key_version: int,
+    *, actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Записать/заменить секрет (vault шифрует ДО вызова — сюда plaintext не попадает).
+    Аудит — только key_name (значение в detail НЕ живёт никогда, критерий §8.5)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            await c.execute(
+                """
+                insert into tenant_secrets (tenant_id, key_name, ciphertext, nonce, key_version)
+                values ($1, $2, $3, $4, $5)
+                on conflict (tenant_id, key_name) do update
+                set ciphertext = excluded.ciphertext, nonce = excluded.nonce,
+                    key_version = excluded.key_version, created_at = now(),
+                    last_used_at = null
+                """,
+                tenant_id, key_name, ciphertext, nonce, key_version,
+            )
+            await _insert_audit(
+                c, actor=actor, action="tenant_secret_set", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "key_name": key_name},
+            )
+
+
+async def delete_tenant_secret(
+    tenant_id, key_name: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            res = await c.execute(
+                "delete from tenant_secrets where tenant_id = $1 and key_name = $2",
+                tenant_id, key_name,
+            )
+            deleted = res.endswith("1")
+            if deleted:
+                await _insert_audit(
+                    c, actor=actor, action="tenant_secret_delete", ip=ip, user_agent=user_agent,
+                    detail={"tenant_id": str(tenant_id), "key_name": key_name},
+                )
+            return deleted

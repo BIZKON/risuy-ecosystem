@@ -214,6 +214,10 @@ class Session:
     # Серверное состояние поиска по телефону (§3.10): обратимый хеш живёт здесь,
     # а НЕ в query-string/истории/логах. None = активного поиска по телефону нет.
     search_phone_hash: str | None = None
+    # Reseller Wave 1: активный тенант сессии (admin_sessions.active_tenant_id).
+    # None = тенант не выбран (легаси-сессии до миграции) — маршруты резолвят дефолт.
+    active_tenant_id: str | None = None
+    active_tenant_name: str | None = None
 
 
 def _csrf_for_sid(sid: str) -> str:
@@ -240,12 +244,28 @@ async def create_session(actor: str, role: str = "operator") -> str:
                 "update admin_sessions set revoked = true where actor = $1 and revoked = false",
                 actor,
             )
+            # Активный тенант по умолчанию: env-админ — первый живой; оператор —
+            # первый по memberships; нет доступов → NULL (маршруты резолвят/покажут заглушку).
+            eff_role = "admin" if actor == config.ADMIN_USERNAME else role
+            if eff_role == "admin":
+                default_tenant = await c.fetchval(
+                    "select id from tenants where status in ('provisioning','active') "
+                    "order by created_at limit 1"
+                )
+            else:
+                default_tenant = await c.fetchval(
+                    "select t.id from tenants t join memberships m on m.tenant_id = t.id "
+                    "where m.username = $1 and t.status in ('provisioning','active') "
+                    "order by t.created_at limit 1",
+                    actor,
+                )
             await c.execute(
                 """
-                insert into admin_sessions (sid, actor, issued_at, last_seen, expires_at, revoked, role)
-                values ($1, $2, $3, $3, $4, false, $5)
+                insert into admin_sessions
+                    (sid, actor, issued_at, last_seen, expires_at, revoked, role, active_tenant_id)
+                values ($1, $2, $3, $3, $4, false, $5, $6)
                 """,
-                sid, actor, now, expires, role,
+                sid, actor, now, expires, role, default_tenant,
             )
     return sid
 
@@ -262,10 +282,12 @@ async def load_session(sid: str) -> Session | None:
         async with c.transaction():
             row = await c.fetchrow(
                 """
-                select sid, actor, last_seen, expires_at, revoked, role, search_phone_hash
-                from admin_sessions
-                where sid = $1
-                for update
+                select s.sid, s.actor, s.last_seen, s.expires_at, s.revoked, s.role,
+                       s.search_phone_hash, s.active_tenant_id, t.name as active_tenant_name
+                from admin_sessions s
+                left join tenants t on t.id = s.active_tenant_id
+                where s.sid = $1
+                for update of s
                 """,
                 sid,
             )
@@ -289,6 +311,8 @@ async def load_session(sid: str) -> Session | None:
                 csrf_token=_csrf_for_sid(sid_str),
                 role=role,
                 search_phone_hash=row["search_phone_hash"],
+                active_tenant_id=str(row["active_tenant_id"]) if row["active_tenant_id"] else None,
+                active_tenant_name=row["active_tenant_name"],
             )
 
 

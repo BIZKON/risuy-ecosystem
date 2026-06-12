@@ -41,6 +41,12 @@ COPY bot-telegram/ ./
 # --- Код панели: в подпапку /app/admin-panel → запускается своим run_cmd ---
 COPY admin-panel/ ./admin-panel/
 
+# --- shared/ (vault/money/metering, reseller-платформа): копия в ОБА корня ---
+# Бот работает из /app, панель — из /app/admin-panel (run_cmd делает cd);
+# двойная копия даёт `from shared import …` обоим без правки sys.path/run_cmd.
+COPY shared/ ./shared/
+COPY shared/ ./admin-panel/shared/
+
 # App Platform пробросит свой $PORT; бот поднимет на нём health-эндпоинт,
 # панель — uvicorn на ${PORT:-8080}.
 EXPOSE 8080

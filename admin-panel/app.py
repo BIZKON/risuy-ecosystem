@@ -41,6 +41,8 @@ import security
 import timeweb_ai
 import yookassa
 
+from shared import vault
+
 
 # --------------------------------------------------------------------------- #
 # Управляющие исключения авторизации (ловятся хендлерами ниже).
@@ -3608,3 +3610,138 @@ def _error_page(request: Request, status_code: int, message: str) -> Response:
             pass
     return JSONResponse({"detail": message}, status_code=status_code,
                         headers={"Cache-Control": "no-store"})
+
+
+# --------------------------------------------------------------------------- #
+# Reseller-платформа Wave 1 (ТЗ docs/reseller-platform-tz.md):
+#   /tenants — выбор активного клиента (тенанта) сессии;
+#   /keys    — «Ключи»: write-only секреты тенанта (vault, AES-GCM).
+# Значения секретов НИКОГДА не логируются и не рендерятся (критерий §8.5).
+# --------------------------------------------------------------------------- #
+
+def _keys_err_text(err: str | None) -> str | None:
+    return {
+        "no_tenant": "Сначала выберите клиента (раздел «Клиенты»).",
+        "no_vault": "Хранилище ключей не настроено: задайте VAULT_MASTER_KEY в env панели.",
+        "bad_key": "Неизвестное имя ключа.",
+        "empty": "Значение пустое — ключ не сохранён.",
+        "too_long": f"Значение длиннее {config.TENANT_SECRET_VALUE_MAX} символов.",
+        "not_found": "Такого ключа нет — удалять нечего.",
+    }.get(err or "")
+
+
+@app.get("/tenants", response_class=HTMLResponse)
+async def tenants_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    switched: int = 0,
+):
+    rows = await db.list_tenants_for(session.actor, session.role)
+    return templates.TemplateResponse(
+        request,
+        "tenants.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "tenants",
+            "tenants": rows,
+            "switched_flash": bool(switched),
+        },
+    )
+
+
+@app.post("/tenants/switch")
+async def tenants_switch(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    tenant_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tenant_id = tenant_id.strip()
+    if not tenant_id or not await db.tenant_accessible(session.actor, session.role, tenant_id):
+        # Чужой/несуществующий тенант — молча назад к списку (без подтверждения догадок).
+        return RedirectResponse(url="/tenants", status_code=303)
+    await db.set_session_tenant(session.sid, tenant_id)
+    await db.audit(
+        actor=session.actor, action="tenant_switch",
+        ip=_ip(request), user_agent=_ua(request), detail={"tenant_id": tenant_id},
+    )
+    return RedirectResponse(url="/tenants?switched=1", status_code=303)
+
+
+@app.get("/keys", response_class=HTMLResponse)
+async def keys_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    deleted: int = 0,
+    err: str | None = None,
+):
+    secrets_meta: list = []
+    if session.active_tenant_id and vault.enabled():
+        secrets_meta = await db.list_tenant_secrets(session.active_tenant_id)
+    known = {r["key_name"] for r in secrets_meta}
+    return templates.TemplateResponse(
+        request,
+        "keys.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "keys",
+            "vault_enabled": vault.enabled(),
+            "secret_keys": config.TENANT_SECRET_KEYS,
+            "secrets_meta": secrets_meta,
+            "known_keys": known,
+            "saved_flash": bool(saved),
+            "deleted_flash": bool(deleted),
+            "err": _keys_err_text(err),
+        },
+    )
+
+
+@app.post("/keys")
+async def keys_set(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    key_name: str = Form(""),
+    value: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/keys?err=no_tenant", status_code=303)
+    if not vault.enabled():
+        return RedirectResponse(url="/keys?err=no_vault", status_code=303)
+    key_name = key_name.strip()
+    if key_name not in config.TENANT_SECRET_KEY_SET:
+        return RedirectResponse(url="/keys?err=bad_key", status_code=303)
+    value = value.strip()
+    if not value:
+        return RedirectResponse(url="/keys?err=empty", status_code=303)
+    if len(value) > config.TENANT_SECRET_VALUE_MAX:
+        return RedirectResponse(url="/keys?err=too_long", status_code=303)
+    ct, nonce, ver = vault.encrypt(value, aad=f"{session.active_tenant_id}:{key_name}")
+    del value  # plaintext дальше этой строки не живёт (ни в БД, ни в аудите, ни в логах)
+    await db.upsert_tenant_secret(
+        session.active_tenant_id, key_name, ct, nonce, ver,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/keys?saved=1", status_code=303)
+
+
+@app.post("/keys/delete")
+async def keys_delete(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    key_name: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/keys?err=no_tenant", status_code=303)
+    ok = await db.delete_tenant_secret(
+        session.active_tenant_id, key_name.strip(),
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/keys?deleted=1" if ok else "/keys?err=not_found", status_code=303)

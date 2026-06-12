@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Ключи{% endblock %}
+{% block body_class %}page-keys{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Ключи и доступы</h1>
+  <p class="page-head__hint">Секреты клиента (токен бота, касса, VK) хранятся в зашифрованном виде. Значения видны только при вводе — после сохранения показываем лишь «задан». Замена = ввести заново.</p>
+</div>
+
+{% if saved_flash %}{{ flash('Ключ сохранён (зашифрован).', 'ok') }}{% endif %}
+{% if deleted_flash %}{{ flash('Ключ удалён.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{% if not session.active_tenant_id %}
+<p class="hint hint--block">⚠️ Не выбран активный клиент — раздел «Клиенты».</p>
+{% elif not vault_enabled %}
+<p class="hint hint--block">⚠️ Хранилище не настроено: задайте <code class="mono">VAULT_MASTER_KEY</code> в env панели (twc-set-env), затем передеплой.</p>
+{% else %}
+
+<section class="section" aria-label="Состояние ключей">
+  <h2 class="section__title section__title--lg">Состояние</h2>
+  <div class="table-wrap">
+    <table class="table table--compact table--zebra">
+      <thead><tr><th>Ключ</th><th>Статус</th><th>Обновлён</th><th>Использован</th><th></th></tr></thead>
+      <tbody>
+        {% for key, label in secret_keys %}
+        {% set meta = (secrets_meta | selectattr('key_name', 'equalto', key) | list | first) %}
+        <tr>
+          <td>{{ label }}</td>
+          <td>{% if key in known_keys %}<span class="badge">задан</span>{% else %}<span class="muted">не задан</span>{% endif %}</td>
+          <td class="mono">{{ meta.created_at.strftime('%d.%m.%y %H:%M') if meta else '—' }}</td>
+          <td class="mono">{{ meta.last_used_at.strftime('%d.%m.%y %H:%M') if meta and meta.last_used_at else '—' }}</td>
+          <td>
+            {% if key in known_keys %}
+            <form method="post" action="/keys/delete">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="key_name" value="{{ key }}">
+              <button class="btn btn--soft" type="submit">Удалить</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section" aria-label="Записать ключ">
+  <h2 class="section__title section__title--lg">Записать / заменить ключ</h2>
+  <form method="post" action="/keys" class="billing-card">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Какой ключ</span>
+      <select class="field__input" name="key_name" required>
+        {% for key, label in secret_keys %}
+        <option value="{{ key }}">{{ label }}{% if key in known_keys %} (задан — будет заменён){% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span class="field__label">Значение</span>
+      <input class="field__input mono" type="password" name="value" required
+             maxlength="4096" autocomplete="off" placeholder="Вставьте значение — после сохранения оно не отображается">
+      <span class="field__hint">Передаётся один раз и сразу шифруется (AES-GCM). В журналах и аудите значение не появляется.</span>
+    </label>
+    <button class="btn btn--dark" type="submit">Сохранить ключ</button>
+  </form>
+</section>
+
+{% endif %}
+{% endblock %}

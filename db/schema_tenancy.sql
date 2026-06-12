@@ -65,6 +65,11 @@ do $$ begin
     end if;
 end $$;
 
+-- ── Wave 1: активный тенант сессии (селектор тенантов в панели) ──────────────
+-- Хранится в строке сессии (НЕ в cookie): выбирается при логине (дефолт = первый
+-- доступный по memberships; env-админ — первый активный), меняется POST /tenant/switch.
+alter table admin_sessions add column if not exists active_tenant_id uuid references tenants(id);
+
 -- ── Гранты panel_rw (зеркалятся в panel_role.sql) ────────────────────────────
 do $$ begin
     if exists (select 1 from pg_roles where rolname = 'panel_rw') then

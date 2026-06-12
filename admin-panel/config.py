@@ -608,3 +608,15 @@ TEAM_USERNAME_MAX = 32
 TEAM_USERNAME_RE = r"^[a-z0-9_-]+$"   # лоуэркейс, без пробелов — совпадает с lower() актора
 TEAM_PASSWORD_MIN = 10
 TEAM_PASSWORD_MAX = 200
+
+# ── Reseller-платформа Wave 1 (ТЗ docs/reseller-platform-tz.md) ──────────────
+# Белый список имён секретов тенанта для раздела «Ключи» (vault, write-only UI).
+# Ключи вне списка не принимаются (защита от мусора в tenant_secrets).
+TENANT_SECRET_KEYS = (
+    ("telegram_bot_token",       "Токен Telegram-бота клиента"),
+    ("shop_yookassa_shop_id",    "Касса клиента: shopId"),
+    ("shop_yookassa_secret_key", "Касса клиента: секретный ключ"),
+    ("vk_token",                 "Токен VK (опционально)"),
+)
+TENANT_SECRET_KEY_SET = {k for k, _ in TENANT_SECRET_KEYS}
+TENANT_SECRET_VALUE_MAX = 4096   # потолок длины значения секрета

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Клиенты{% endblock %}
+{% block body_class %}page-tenants{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Клиенты платформы</h1>
+  <p class="page-head__hint">Каждый клиент — изолированный «ИИ-Агент Про»: свой бот, свои диалоги, своя база знаний и свой кошелёк. Выберите активного клиента — все разделы панели покажут его данные.</p>
+</div>
+
+{% if switched_flash %}{{ flash('Активный клиент переключён.', 'ok') }}{% endif %}
+
+{% if tenants %}
+<div class="table-wrap">
+  <table class="table table--zebra">
+    <thead>
+      <tr><th>Клиент</th><th>Идентификатор</th><th>Статус</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for t in tenants %}
+      <tr>
+        <td>{{ t.name|e }}{% if session.active_tenant_id == t.id|string %} <span class="badge">активный</span>{% endif %}</td>
+        <td class="mono">{{ t.slug|e }}</td>
+        <td>{% if t.status == 'active' %}работает{% elif t.status == 'provisioning' %}настраивается{% else %}{{ t.status|e }}{% endif %}</td>
+        <td>
+          {% if session.active_tenant_id != t.id|string %}
+          <form method="post" action="/tenants/switch">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="tenant_id" value="{{ t.id }}">
+            <button class="btn btn--soft" type="submit">Сделать активным</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <p class="empty__title">Доступных клиентов нет</p>
+  <p class="empty__text">Попросите администратора платформы выдать доступ (раздел «Команда» у клиента).</p>
+</div>
+{% endif %}
+<p class="hint hint--block">Создание нового клиента (онбординг) появится на следующем этапе платформы — Wave 2/3 дорожной карты.</p>
+{% endblock %}
