@@ -68,26 +68,43 @@
   {% endif %}
 </section>
 
-{# ── Экономика: реальный расход токенов ИИ (used_tokens Timeweb) vs выручка ── #}
+{# ── Экономика (ТОЛЬКО admin — клиент этого не видит): расходы по агентам vs выручка ── #}
 {% if economics %}
 <section class="section" aria-label="Экономика сервиса">
-  <h2 class="section__title section__title--lg">Экономика сервиса</h2>
+  <h2 class="section__title section__title--lg">Экономика сервиса <span class="muted">· видно только администратору</span></h2>
   <div class="billing-card">
+    <div class="table-wrap">
+      <table class="table table--compact table--zebra">
+        <thead>
+          <tr><th>ИИ-сотрудник (агент)</th><th>Токены (факт Timeweb)</th><th>Себестоимость</th></tr>
+        </thead>
+        <tbody>
+          {% for r in economics.rows %}
+          <tr>
+            <td>{{ r.name|e }}</td>
+            <td class="mono">{{ r.used_tokens }}</td>
+            <td class="mono">{{ r.cost }} ₽</td>
+          </tr>
+          {% endfor %}
+          <tr>
+            <td><b>Итого</b></td>
+            <td class="mono"><b>{{ economics.used_tokens }}</b></td>
+            <td class="mono"><b>{{ economics.cost }} ₽</b></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
     <p class="meter-box__stats">
-      Расход ИИ: <b>{{ economics.used_tokens }}</b> токенов ≈ <b>{{ economics.cost }} ₽</b>
-      <span class="muted">· {{ economics.price_per_m }} ₽/млн · агентов: {{ economics.agents_n }}</span>
-    </p>
-    <p class="meter-box__stats">
-      Выручка подписки: <b>{{ economics.revenue }} ₽</b> ·
+      Выручка подписки (оплачено): <b>{{ economics.revenue }} ₽</b> ·
       Маржа: <b class="{% if economics.margin_negative %}over-text{% endif %}">{{ economics.margin }} ₽</b>
     </p>
     {% if economics.balance %}
     <p class="meter-box__stats">
       Баланс Timeweb: <b>{{ economics.balance }} ₽</b>
-      {% if economics.days_left %}<span class="muted">≈ на {{ economics.days_left }} дн · расход {{ economics.monthly_cost }} ₽/мес</span>{% endif %}
+      {% if economics.days_left %}<span class="muted">≈ на {{ economics.days_left }} дн · общий расход аккаунта {{ economics.monthly_cost }} ₽/мес (вся инфраструктура, не только ИИ)</span>{% endif %}
     </p>
     {% endif %}
-    <p class="hint hint--block">Себестоимость ИИ — оценка: реальный расход токенов (Timeweb <code class="mono">used_tokens</code>) × цена. Уточните цену модели из ЛК в env <code class="mono">AI_TOKEN_PRICE_RUB_PER_M</code> (сейчас {{ economics.price_per_m }} ₽/млн). Выручка и маржа — нарастающим итогом.</p>
+    <p class="hint hint--block">Тариф DeepSeek V4 Pro Thinking: вход <b>{{ economics.price_in }} ₽/млн</b> · выход <b>{{ economics.price_out }} ₽/млн</b>. Timeweb отдаёт единый счётчик токенов без разбивки, поэтому считаем по смешанной цене <b>{{ economics.price_blended }} ₽/млн</b> (доля выходных токенов {{ economics.out_share_pct }}%). Подстройка: env <code class="mono">AI_PRICE_IN_RUB_PER_M</code> / <code class="mono">AI_PRICE_OUT_RUB_PER_M</code> / <code class="mono">AI_OUT_TOKENS_SHARE</code>.</p>
   </div>
 </section>
 {% endif %}

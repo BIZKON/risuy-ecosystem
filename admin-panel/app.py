@@ -2458,27 +2458,47 @@ def _service_receipt(email: str, description: str, amount) -> dict | None:
     }
 
 
-async def _ai_economics() -> dict | None:
-    """Экономика сервиса для «Подписки»: РЕАЛЬНЫЙ расход токенов ИИ (used_tokens агентов
-    Timeweb) × цена → оценка себестоимости, против выручки подписки, + баланс аккаунта.
-    Всё в try — сбой Timeweb-API не должен ронять страницу (None → блок скрыт)."""
-    if not config.TIMEWEB_AI_ENABLED:
+def _blended_token_price() -> Decimal:
+    """Смешанная цена ₽/млн токенов: used_tokens Timeweb не делит вход/выход, поэтому
+    (1-share)·вход + share·выход (тарифы и share — config/env)."""
+    share = Decimal(str(config.AI_OUT_TOKENS_SHARE))
+    return (Decimal(str(config.AI_PRICE_IN_RUB_PER_M)) * (1 - share)
+            + Decimal(str(config.AI_PRICE_OUT_RUB_PER_M)) * share)
+
+
+async def _ai_economics(role: str) -> dict | None:
+    """Экономика сервиса — ТОЛЬКО для роли admin (разработчик): клиент (операторы школы)
+    этого видеть не должен. Таблица расходов по агентам: РЕАЛЬНЫЙ used_tokens каждого
+    агента Timeweb × смешанная цена → себестоимость; против выручки подписки → маржа;
+    + баланс аккаунта. Всё в try — сбой Timeweb-API не должен ронять страницу (None → скрыт)."""
+    if role != "admin" or not config.TIMEWEB_AI_ENABLED:
         return None
     try:
         agents = await timeweb_ai.list_agents()
         fin = await timeweb_ai.account_finances()
     except timeweb_ai.TimewebAIError:
         return None
-    used = sum(int(a.get("used_tokens") or 0) for a in agents)
-    price = Decimal(str(config.AI_TOKEN_PRICE_RUB_PER_M))
-    cost = (Decimal(used) / Decimal(1_000_000) * price).quantize(Decimal("0.01"))
+    price = _blended_token_price()
+    rows, used_total = [], 0
+    for a in agents:
+        used = int(a.get("used_tokens") or 0)
+        used_total += used
+        rows.append({
+            "name": a.get("name") or f"агент {a.get('id')}",
+            "used_tokens": used,
+            "cost": _fmt_amount((Decimal(used) / Decimal(1_000_000) * price).quantize(Decimal("0.01"))),
+        })
+    cost = (Decimal(used_total) / Decimal(1_000_000) * price).quantize(Decimal("0.01"))
     revenue = Decimal(str(await db.service_revenue_total() or 0))
     margin = (revenue - cost).quantize(Decimal("0.01"))
     balance, hours_left, monthly = fin.get("balance"), fin.get("hours_left"), fin.get("monthly_cost")
     return {
-        "used_tokens": used,
-        "agents_n": len(agents),
-        "price_per_m": _fmt_amount(price),
+        "rows": rows,
+        "used_tokens": used_total,
+        "price_in": _fmt_amount(Decimal(str(config.AI_PRICE_IN_RUB_PER_M))),
+        "price_out": _fmt_amount(Decimal(str(config.AI_PRICE_OUT_RUB_PER_M))),
+        "price_blended": _fmt_amount(price.quantize(Decimal("0.01"))),
+        "out_share_pct": int(Decimal(str(config.AI_OUT_TOKENS_SHARE)) * 100),
         "cost": _fmt_amount(cost),
         "revenue": _fmt_amount(revenue),
         "margin": _fmt_amount(margin),
@@ -2517,7 +2537,7 @@ async def subscription_page(
             "paid_flash": bool(paid),
             "canceled_flash": bool(canceled),
             "err": _service_err_text(err),
-            "economics": await _ai_economics(),
+            "economics": await _ai_economics(session.role),
         },
     )
 
