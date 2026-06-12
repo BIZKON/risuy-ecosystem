@@ -470,11 +470,20 @@ CHANNEL_PROMPT_KEY = "ai_system_prompt__{source}"
 PERSONA_AGENT_REGISTRY_KEY = "ai_persona_agent__{slug}"      # slug → access_id агента (вызов ботом)
 PERSONA_AGENT_NID_KEY = "ai_persona_agent_nid__{slug}"       # slug → числовой id агента (PATCH промпта)
 PERSONA_PROMPT_REGISTRY_KEY = "ai_persona_prompt__{slug}"    # slug → ЭФФЕКТИВНЫЙ промпт (инструкция+знания)
-PERSONA_INSTRUCTION_KEY = "ai_persona_instruction__{slug}"  # slug → инструкция роли (без знаний)
+PERSONA_INSTRUCTION_KEY = "ai_persona_instruction__{slug}"  # legacy: старое единое поле «инструкция» (миграция → behavior)
 PERSONA_KNOWLEDGE_KEY = "ai_persona_knowledge__{slug}"      # slug → база знаний роли (промптом, РФ)
+# Инструкция роли разбита на 3 поля (роль / задачи / поведение) — большой промпт удобнее
+# вписывать по частям; «поведение» практически без лимита (DeepSeek 1М контекста справится).
+PERSONA_ROLE_KEY = "ai_persona_role__{slug}"                # slug → кто такой агент (короткая роль)
+PERSONA_TASKS_KEY = "ai_persona_tasks__{slug}"              # slug → задачи, которые решает бот
+PERSONA_BEHAVIOR_KEY = "ai_persona_behavior__{slug}"        # slug → правила поведения (можно/нельзя), БОЛЬШОЙ промпт
 PERSONA_AGENT_MODEL_ID = _opt_int("PERSONA_AGENT_MODEL_ID", 133)  # DeepSeek V4 Pro (как агент Лии)
-PERSONA_INSTRUCTION_MAX = 4000      # потолок инструкции роли (= AI_SYSTEM_PROMPT_MAX)
-PERSONA_KNOWLEDGE_MAX = 15000       # потолок базы знаний роли (промптом); инструкция+знания ≤ 20000
+PERSONA_ROLE_MAX = 600              # потолок поля «Роль»
+PERSONA_TASKS_MAX = 4000            # потолок поля «Задачи»
+PERSONA_BEHAVIOR_MAX = 200000       # «безлимит» поля «Инструкция поведения» (~50k токенов)
+PERSONA_KNOWLEDGE_MAX = 15000       # потолок базы знаний роли (промптом)
+PERSONA_INSTRUCTION_MAX = 4000      # legacy (старое единое поле)
+PERSONA_POST_MAX_BYTES = 2 * 1024 * 1024  # body-лимит POST /agents/role/<slug> (большой промпт ≠ 64 КБ)
 
 # Карточки «лучших практик» по ролям (обучающий контент для владельца — КАК прокачать агента).
 # Это не промпт: подсказки, что вписать в инструкцию/знания, чтобы роль работала сильно.

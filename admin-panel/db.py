@@ -1784,12 +1784,16 @@ async def get_persona_agent(slug: str) -> str:
 
 
 async def get_persona_role(slug: str) -> dict:
-    """Всё для страницы управления ролью: инструкция, знания, эффективный промпт,
-    access_id и числовой id агента. Дефолт инструкции — каркас из PERSONA_PRESETS."""
+    """Всё для страницы управления ролью: роль/задачи/поведение (бывш. единая «инструкция»),
+    знания, эффективный промпт, access_id и числовой id агента. Если ничего не задано — в
+    «поведение» подставляется каркас из PERSONA_PRESETS (его и редактируют). Старое единое поле
+    «инструкция» (legacy) мигрируется в «поведение»."""
     keys = {
-        "instruction": config.PERSONA_INSTRUCTION_KEY.format(slug=slug),
+        "role": config.PERSONA_ROLE_KEY.format(slug=slug),
+        "tasks": config.PERSONA_TASKS_KEY.format(slug=slug),
+        "behavior": config.PERSONA_BEHAVIOR_KEY.format(slug=slug),
+        "instruction": config.PERSONA_INSTRUCTION_KEY.format(slug=slug),  # legacy
         "knowledge": config.PERSONA_KNOWLEDGE_KEY.format(slug=slug),
-        "prompt": config.PERSONA_PROMPT_REGISTRY_KEY.format(slug=slug),
         "access_id": config.PERSONA_AGENT_REGISTRY_KEY.format(slug=slug),
         "nid": config.PERSONA_AGENT_NID_KEY.format(slug=slug),
     }
@@ -1800,10 +1804,15 @@ async def get_persona_role(slug: str) -> dict:
         )
     kv = {r["key"]: (r["value"] or "") for r in rows}
     preset = config.PERSONA_PRESETS.get(slug) or {}
-    instr = kv.get(keys["instruction"], "")
+    role = kv.get(keys["role"], "")
+    tasks = kv.get(keys["tasks"], "")
+    behavior_saved = kv.get(keys["behavior"], "") or kv.get(keys["instruction"], "")  # миграция legacy
+    is_default = not (role or tasks or behavior_saved)
     return {
-        "instruction": instr if instr else (preset.get("prompt") or ""),
-        "instruction_is_default": not bool(instr),
+        "role": role,
+        "tasks": tasks,
+        "behavior": behavior_saved if behavior_saved else (preset.get("prompt") or ""),
+        "is_default": is_default,
         "knowledge": kv.get(keys["knowledge"], ""),
         "access_id": kv.get(keys["access_id"], "").strip(),
         "nid": kv.get(keys["nid"], "").strip(),
@@ -1831,13 +1840,16 @@ async def save_persona_agent(slug: str, access_id: str, numeric_id, prompt: str)
 
 
 async def set_persona_role(
-    slug: str, *, instruction: str, knowledge: str, prompt: str,
+    slug: str, *, role: str, tasks: str, behavior: str, knowledge: str, prompt: str,
     actor: str, ip: str | None, user_agent: str | None,
 ) -> None:
-    """Сохранить инструкцию + знания роли + эффективный промпт (склейку, читает бот) — в одной
-    транзакции с аудитом. Пуш на живого cloud-ai агента (если создан) делает вызывающий через API."""
+    """Сохранить роль/задачи/поведение + знания роли + эффективный промпт (склейку, читает бот)
+    — в одной транзакции с аудитом. Пуш на живого cloud-ai агента (если создан) делает
+    вызывающий через API. Legacy-ключ инструкции больше не пишем (поведение его заменяет)."""
     pairs = (
-        (config.PERSONA_INSTRUCTION_KEY.format(slug=slug), instruction),
+        (config.PERSONA_ROLE_KEY.format(slug=slug), role),
+        (config.PERSONA_TASKS_KEY.format(slug=slug), tasks),
+        (config.PERSONA_BEHAVIOR_KEY.format(slug=slug), behavior),
         (config.PERSONA_KNOWLEDGE_KEY.format(slug=slug), knowledge),
         (config.PERSONA_PROMPT_REGISTRY_KEY.format(slug=slug), prompt),
     )
@@ -1853,8 +1865,8 @@ async def set_persona_role(
                 )
             await _insert_audit(
                 c, actor=actor, action="persona_role_set", ip=ip, user_agent=user_agent,
-                detail={"persona": slug, "instruction_len": len(instruction),
-                        "knowledge_len": len(knowledge)},
+                detail={"persona": slug, "role_len": len(role), "tasks_len": len(tasks),
+                        "behavior_len": len(behavior), "knowledge_len": len(knowledge)},
             )
 
 

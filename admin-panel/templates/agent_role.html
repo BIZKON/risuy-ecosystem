@@ -8,7 +8,7 @@
 <div class="page-head">
   <a class="btn btn--secondary btn--sm" href="/agents">← Все сотрудники</a>
   <h1 class="page-head__title" style="margin-top:10px">{{ name }} — {{ role_title }}</h1>
-  <p class="page-head__hint">Обучите этого ИИ-сотрудника под его роль: <b>инструкция</b> (характер и правила) + <b>база знаний</b> (факты: продукты, цены, FAQ, скрипты). Применяется там, куда сотрудник назначен — на канал или на диалог.</p>
+  <p class="page-head__hint">Обучите этого ИИ-сотрудника: <b>Роль</b> (кто он), <b>Задачи</b> (что делает), <b>Инструкция поведения</b> (правила, можно вставить большой промпт) + <b>База знаний роли</b> (факты). Применяется там, куда сотрудник назначен — на канал или на диалог.</p>
 </div>
 
 {% if saved %}{{ flash('Сотрудник обучен. ' ~ ('Изменения отправлены живому агенту — применятся со следующего ответа.' if agent_ready else 'Вступят, когда вы назначите сотрудника на канал или диалог.'), 'ok') }}{% endif %}
@@ -41,17 +41,31 @@
   <form method="post" action="/agents/role/{{ slug }}" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
-    <label class="field">
-      <span class="field__label">Инструкция сотрудника <span class="field__hint">кто он, тон, что можно и нельзя</span></span>
-      <textarea class="field__input field__textarea field__textarea--lg" name="instruction"
-                maxlength="{{ instruction_max }}" rows="10"
-                placeholder="Ты — …, роль …. Тон: …. Правила: не выдумывай цены; сложное передавай менеджеру; не проси коды и данные карт…">{{ instruction }}</textarea>
-    </label>
-    {% if instruction_is_default %}
-    <p class="hint hint--block">⚠️ Сейчас показан готовый <b>шаблон роли</b> — отредактируйте под свой бизнес (замените текст в [скобках]) и сохраните. До {{ instruction_max }} символов.</p>
-    {% else %}
-    <p class="hint hint--block">Характер и правила сотрудника. До {{ instruction_max }} символов.</p>
+    {% if is_default %}
+    <p class="hint hint--block">⚠️ Ниже в поле «Инструкция поведения» показан готовый <b>шаблон роли</b> — отредактируйте под свой бизнес (замените текст в [скобках]) и сохраните. Удобно разнести: кто это — в «Роль», что делает — в «Задачи», правила — в «Инструкция поведения».</p>
     {% endif %}
+
+    <label class="field">
+      <span class="field__label">Роль <span class="field__hint">кто этот сотрудник (1–2 фразы)</span></span>
+      <textarea class="field__input field__textarea" name="role"
+                maxlength="{{ role_max }}" rows="2"
+                placeholder="Ты — Лия, ИИ-администратор школы рисунка им. Лесова. Общаешься тепло, на «вы».">{{ role }}</textarea>
+    </label>
+
+    <label class="field">
+      <span class="field__label">Задачи <span class="field__hint">что сотрудник должен делать</span></span>
+      <textarea class="field__input field__textarea" name="tasks"
+                maxlength="{{ tasks_max }}" rows="5"
+                placeholder="Отвечать на вопросы о курсах, ценах и расписании. Помогать выбрать курс. Доводить до записи или заявки. Сложное и возвраты — передавать менеджеру.">{{ tasks }}</textarea>
+    </label>
+
+    <label class="field">
+      <span class="field__label">Инструкция поведения <span class="field__hint">что можно и что нельзя · без лимита символов</span></span>
+      <textarea class="field__input field__textarea field__textarea--lg" name="behavior"
+                rows="16"
+                placeholder="Правила: опирайся только на факты из базы знаний, не выдумывай цены и условия. Не давай медицинских/юридических советов. Не проси пароли, коды из СМС и данные карт. Тон общения: …. Примеры ответов: …">{{ behavior }}</textarea>
+    </label>
+    <p class="hint hint--block">Главное поле — сюда можно вставить большой промпт целиком (правила, тон, примеры, что можно и нельзя). <b>Лимита символов нет</b> — модель с контекстом 1М справится.</p>
 
     <label class="field">
       <span class="field__label">База знаний роли <span class="field__hint">факты, по которым отвечает</span></span>

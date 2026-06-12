@@ -89,6 +89,11 @@ app.add_middleware(
     per_path_limits={
         "/broadcasts": config.MAX_UPLOAD_BYTES,
         "/products": config.MAX_PRODUCT_FILE_BYTES,
+        # Загрузка файла в базу знаний (≤10 МБ) и большой промпт роли (роль/задачи/поведение)
+        # не должны упираться в глобальные 64 КБ. /agents/role/<slug> — динамический, поэтому
+        # точечные записи на каждый известный слаг персоны.
+        "/knowledge/upload": config.MAX_KB_FILE_BYTES,
+        **{f"/agents/role/{slug}": config.PERSONA_POST_MAX_BYTES for slug in config.PERSONA_PRESETS},
     },
     # Динамический путь вложения личного ответа POST /leads/{uuid}/reply — точный
     # per_path не выписать (uuid в середине), поэтому суффикс-матч. Лимит = потолок
@@ -2733,7 +2738,7 @@ async def agents_page(
             "slug": k, "name": p["name"], "role": p["role"],
             "agent_ready": bool(r["access_id"]),
             "has_knowledge": bool((r["knowledge"] or "").strip()),
-            "customized": not r["instruction_is_default"],
+            "customized": not r["is_default"],
             "leads": s["leads"], "converted": s["converted"], "conv_pct": s["conv_pct"],
         })
     return templates.TemplateResponse(
@@ -2844,13 +2849,16 @@ async def agent_role_page(
         "agent_role.html",
         {
             "slug": slug, "name": preset["name"], "role_title": preset["role"],
-            "instruction": role["instruction"], "knowledge": role["knowledge"],
-            "instruction_is_default": role["instruction_is_default"],
+            "role": role["role"], "tasks": role["tasks"], "behavior": role["behavior"],
+            "knowledge": role["knowledge"],
+            "is_default": role["is_default"],
             "agent_ready": bool(role["access_id"]),
             "access_tail": role["access_id"][-6:] if role["access_id"] else "",
             "best_practices": config.PERSONA_BEST_PRACTICES.get(slug, []),
             "leads": s["leads"], "converted": s["converted"], "conv_pct": s["conv_pct"],
-            "instruction_max": config.PERSONA_INSTRUCTION_MAX,
+            "role_max": config.PERSONA_ROLE_MAX,
+            "tasks_max": config.PERSONA_TASKS_MAX,
+            "behavior_max": config.PERSONA_BEHAVIOR_MAX,
             "knowledge_max": config.PERSONA_KNOWLEDGE_MAX,
             "tw_enabled": config.TIMEWEB_AI_ENABLED,
             "kb_count": kb_count, "tw_error": tw_error,
@@ -2866,29 +2874,33 @@ async def agent_role_save(
     request: Request,
     slug: str,
     session: auth.Session = Depends(require_session),
-    instruction: str = Form(""),
+    role: str = Form(""),
+    tasks: str = Form(""),
+    behavior: str = Form(""),
     knowledge: str = Form(""),
     csrf_token: str = Form(""),
 ):
-    """Сохранить инструкцию + базу знаний роли. Эффективный промпт (склейка) пишется в реестр
-    (его берёт gateway-бэкенд и создание агента) и, если агент роли уже создан, пушится на
-    живого cloud-ai агента (PATCH по числовому id). Сбой пуша не теряет сохранённое → warn."""
+    """Сохранить роль + задачи + правила поведения + базу знаний роли. Эффективный промпт
+    (склейка) пишется в реестр (его берёт gateway-бэкенд и создание агента) и, если агент роли
+    уже создан, пушится на живого cloud-ai агента (PATCH). Сбой пуша не теряет сохранённое → warn."""
     await _enforce_csrf(request, session, csrf_token)
     if slug not in config.PERSONA_PRESETS:
         raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
-    instruction = instruction.strip()[: config.PERSONA_INSTRUCTION_MAX]
+    role = role.strip()[: config.PERSONA_ROLE_MAX]
+    tasks = tasks.strip()[: config.PERSONA_TASKS_MAX]
+    behavior = behavior.strip()[: config.PERSONA_BEHAVIOR_MAX]
     knowledge = knowledge.strip()[: config.PERSONA_KNOWLEDGE_MAX]
-    if not instruction:
+    if not (role or behavior):
         return RedirectResponse(url=f"/agents/role/{slug}?err=empty", status_code=303)
-    prompt = _persona_effective_prompt(instruction, knowledge)
+    prompt = _persona_effective_prompt(role, tasks, behavior, knowledge)
     await db.set_persona_role(
-        slug, instruction=instruction, knowledge=knowledge, prompt=prompt,
+        slug, role=role, tasks=tasks, behavior=behavior, knowledge=knowledge, prompt=prompt,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
-    role = await db.get_persona_role(slug)
-    if config.TIMEWEB_AI_ENABLED and role["nid"]:
+    saved_role = await db.get_persona_role(slug)
+    if config.TIMEWEB_AI_ENABLED and saved_role["nid"]:
         try:
-            await timeweb_ai.set_system_prompt(int(role["nid"]), prompt)
+            await timeweb_ai.set_system_prompt(int(saved_role["nid"]), prompt)
         except (timeweb_ai.TimewebAIError, ValueError):
             import logging
             logging.getLogger("admin-panel").exception("push persona-role prompt failed")
@@ -2921,9 +2933,6 @@ def _present_agent(a: dict) -> dict:
 
 def _knowledge_err_text(err: str | None) -> str | None:
     return {
-        "tw": "Не удалось обратиться к ИИ-сервису. Проверьте токен ИИ в окружении панели и повторите.",
-        "no_agent": "Агент не найден.",
-        "empty": "Системный промпт не может быть пустым.",
         "kb_off": "Загрузка недоступна: не задан EMBEDDER_URL в окружении панели.",
         "kb_nofile": "Выберите файл для загрузки.",
         "kb_ext": "Поддерживаются только файлы txt, md, csv, pdf.",
@@ -2938,33 +2947,20 @@ def _knowledge_err_text(err: str | None) -> str | None:
 async def knowledge_page(
     request: Request,
     session: auth.Session = Depends(require_session),
-    saved: int = 0,
     kb_saved: int = 0,
     err: str | None = None,
 ):
-    agents, kbs, tw_error = [], [], False
-    if config.TIMEWEB_AI_ENABLED:
-        try:
-            raw_agents = await timeweb_ai.list_agents()
-            agents = [_present_agent(a) for a in raw_agents]
-            kbs = await timeweb_ai.list_knowledge_bases()
-        except timeweb_ai.TimewebAIError:
-            tw_error = True
+    # Раздел теперь — только своя база знаний (загрузка файлов). Промпт/инструкции агента
+    # живут в «ИИ-Агенты» → карточка роли (/agents/role/<slug>).
     kb_docs = await db.kb_list_documents()
     kb_enabled = await db.get_kb_enabled()
     return templates.TemplateResponse(
         request,
         "knowledge.html",
         {
-            "tw_enabled": config.TIMEWEB_AI_ENABLED,
-            "tw_error": tw_error,
-            "agents": agents,
-            "knowledge_bases": kbs,
-            "prompt_max": config.AI_AGENT_PROMPT_MAX,
             "csrf_token": session.csrf_token,
             "session": session,
             "active": "knowledge",
-            "saved": bool(saved),
             "err": _knowledge_err_text(err),
             # RF-RAG — своя база знаний (загрузка файлов в pgvector)
             "kb_docs": kb_docs,
@@ -2975,35 +2971,6 @@ async def knowledge_page(
             "kb_max_mb": config.MAX_KB_FILE_BYTES // 1024 // 1024,
         },
     )
-
-
-@app.post("/knowledge/prompt")
-async def knowledge_set_prompt(
-    request: Request,
-    session: auth.Session = Depends(require_session),
-    agent_id: str = Form(""),
-    prompt: str = Form(""),
-    csrf_token: str = Form(""),
-):
-    await _enforce_csrf(request, session, csrf_token)
-    agent_id = agent_id.strip()
-    prompt = prompt.strip()[: config.AI_AGENT_PROMPT_MAX]
-    if not agent_id.isdigit():
-        return RedirectResponse(url="/knowledge?err=no_agent", status_code=303)
-    if not prompt:
-        return RedirectResponse(url="/knowledge?err=empty", status_code=303)
-    try:
-        await timeweb_ai.set_system_prompt(int(agent_id), prompt)
-    except timeweb_ai.TimewebAIError:
-        import logging
-        logging.getLogger("admin-panel").exception("timeweb set_system_prompt failed")
-        return RedirectResponse(url="/knowledge?err=tw", status_code=303)
-    await db.audit(
-        actor=session.actor, action="agent_prompt_set",
-        ip=_ip(request), user_agent=_ua(request),
-        detail={"agent_id": agent_id, "prompt_len": len(prompt)},
-    )
-    return RedirectResponse(url="/knowledge?saved=1", status_code=303)
 
 
 # ── RF-RAG: своя база знаний (загрузка файлов в pgvector) ── #
@@ -3301,15 +3268,24 @@ async def channels_set_persona(
     return RedirectResponse(url="/channels?saved_persona=1", status_code=303)
 
 
-def _persona_effective_prompt(instruction: str, knowledge: str) -> str:
-    """Системный промпт агента роли = инструкция + (опц.) база знаний промптом. Знания
-    подаются как факты, по которым агент обязан отвечать (РФ-комплаентный «RAG промптом»)."""
-    instruction = (instruction or "").strip()
+def _persona_effective_prompt(role: str, tasks: str, behavior: str, knowledge: str) -> str:
+    """Системный промпт агента роли = роль + задачи + правила поведения + (опц.) база знаний
+    промптом. Пустые секции опускаются. Знания подаются как факты, по которым агент обязан
+    отвечать (РФ-комплаентный «RAG промптом»)."""
+    role = (role or "").strip()
+    tasks = (tasks or "").strip()
+    behavior = (behavior or "").strip()
     knowledge = (knowledge or "").strip()
+    parts: list[str] = []
+    if role:
+        parts.append(role)
+    if tasks:
+        parts.append(f"## Твои задачи:\n{tasks}")
+    if behavior:
+        parts.append(f"## Правила поведения (что можно и нельзя):\n{behavior}")
     if knowledge:
-        return (f"{instruction}\n\n## База знаний — отвечай СТРОГО по этим фактам, "
-                f"не выдумывай:\n{knowledge}")
-    return instruction
+        parts.append(f"## База знаний — отвечай СТРОГО по этим фактам, не выдумывай:\n{knowledge}")
+    return "\n\n".join(parts)
 
 
 async def _ensure_persona_agent(slug: str) -> str:
@@ -3324,7 +3300,7 @@ async def _ensure_persona_agent(slug: str) -> str:
     if not config.TIMEWEB_AI_ENABLED:
         return ""
     role = await db.get_persona_role(slug)
-    prompt = _persona_effective_prompt(role["instruction"], role["knowledge"])
+    prompt = _persona_effective_prompt(role["role"], role["tasks"], role["behavior"], role["knowledge"])
     preset = config.PERSONA_PRESETS[slug]
     created = await timeweb_ai.create_agent(
         f'{preset["name"]} — {preset["role"]}', prompt, model_id=config.PERSONA_AGENT_MODEL_ID,
