@@ -36,6 +36,7 @@ from starlette.responses import StreamingResponse
 import auth
 import config
 import db
+import kb
 import security
 import timeweb_ai
 import yookassa
@@ -2923,6 +2924,13 @@ def _knowledge_err_text(err: str | None) -> str | None:
         "tw": "Не удалось обратиться к ИИ-сервису. Проверьте токен ИИ в окружении панели и повторите.",
         "no_agent": "Агент не найден.",
         "empty": "Системный промпт не может быть пустым.",
+        "kb_off": "Загрузка недоступна: не задан EMBEDDER_URL в окружении панели.",
+        "kb_nofile": "Выберите файл для загрузки.",
+        "kb_ext": "Поддерживаются только файлы txt, md, csv, pdf.",
+        "kb_big": f"Файл слишком большой (лимит {config.MAX_KB_FILE_BYTES // 1024 // 1024} МБ).",
+        "kb_empty": "В файле не нашлось текста для загрузки.",
+        "kb_embed": "Не удалось обработать файл (эмбеддер недоступен или ошибка чтения). Попробуйте ещё раз.",
+        "kb_nodoc": "Документ не найден.",
     }.get(err or "")
 
 
@@ -2931,6 +2939,7 @@ async def knowledge_page(
     request: Request,
     session: auth.Session = Depends(require_session),
     saved: int = 0,
+    kb_saved: int = 0,
     err: str | None = None,
 ):
     agents, kbs, tw_error = [], [], False
@@ -2941,6 +2950,8 @@ async def knowledge_page(
             kbs = await timeweb_ai.list_knowledge_bases()
         except timeweb_ai.TimewebAIError:
             tw_error = True
+    kb_docs = await db.kb_list_documents()
+    kb_enabled = await db.get_kb_enabled()
     return templates.TemplateResponse(
         request,
         "knowledge.html",
@@ -2955,6 +2966,13 @@ async def knowledge_page(
             "active": "knowledge",
             "saved": bool(saved),
             "err": _knowledge_err_text(err),
+            # RF-RAG — своя база знаний (загрузка файлов в pgvector)
+            "kb_docs": kb_docs,
+            "kb_enabled": kb_enabled,
+            "embedder_enabled": config.EMBEDDER_ENABLED,
+            "kb_roles": config.PERSONA_PRESETS,
+            "kb_saved": kb_saved,
+            "kb_max_mb": config.MAX_KB_FILE_BYTES // 1024 // 1024,
         },
     )
 
@@ -2986,6 +3004,93 @@ async def knowledge_set_prompt(
         detail={"agent_id": agent_id, "prompt_len": len(prompt)},
     )
     return RedirectResponse(url="/knowledge?saved=1", status_code=303)
+
+
+# ── RF-RAG: своя база знаний (загрузка файлов в pgvector) ── #
+@app.post("/knowledge/toggle")
+async def knowledge_toggle(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    kb_enabled: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Тумблер поиска по базе знаний (app_settings['kb_enabled'], бот читает его при retrieval)."""
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_kb_enabled(
+        kb_enabled.strip() == "1",
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/knowledge", status_code=303)
+
+
+@app.post("/knowledge/upload")
+async def knowledge_upload(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    title: str = Form(""),
+    role: str = Form(""),
+    csrf_token: str = Form(""),
+    file: UploadFile | None = File(None),
+):
+    """Файл (txt/md/csv/pdf) → текст → чанки → эмбеддинг (TEI) → pgvector. role '' = общая
+    справка (все роли). Эмбеддер должен быть задан в env панели (EMBEDDER_URL)."""
+    await _enforce_csrf(request, session, csrf_token)
+    if not config.EMBEDDER_ENABLED:
+        return RedirectResponse(url="/knowledge?err=kb_off", status_code=303)
+    if file is None or not (file.filename or ""):
+        return RedirectResponse(url="/knowledge?err=kb_nofile", status_code=303)
+    fname = file.filename
+    ext = ("." + fname.rsplit(".", 1)[-1].lower()) if "." in fname else ""
+    if ext not in config.KB_ALLOWED_EXT:
+        return RedirectResponse(url="/knowledge?err=kb_ext", status_code=303)
+    data = await security.read_upload_capped(file, max_bytes=config.MAX_KB_FILE_BYTES)
+    if data is None:
+        return RedirectResponse(url="/knowledge?err=kb_big", status_code=303)
+    if not data:
+        return RedirectResponse(url="/knowledge?err=kb_nofile", status_code=303)
+    try:
+        text = kb.extract_text(fname, data)
+        chunks = kb.chunk_text(text)
+        if not chunks:
+            return RedirectResponse(url="/knowledge?err=kb_empty", status_code=303)
+        embeddings = await kb.embed_passages(chunks)
+    except kb.KBError:
+        import logging
+        logging.getLogger("admin-panel").exception("kb upload failed")
+        return RedirectResponse(url="/knowledge?err=kb_embed", status_code=303)
+    role = role.strip()
+    if role and role not in config.PERSONA_PRESETS:
+        role = ""
+    doc_title = (title.strip() or fname)[: config.KB_TITLE_MAX]
+    n = await db.kb_insert_document(
+        title=doc_title, source=fname[:200], role_tag=role, content=text,
+        chunks=chunks, embeddings=embeddings,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url=f"/knowledge?kb_saved={n}", status_code=303)
+
+
+@app.post("/knowledge/delete")
+async def knowledge_delete(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    doc_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Удалить документ базы знаний (каскад чистит чанки)."""
+    await _enforce_csrf(request, session, csrf_token)
+    doc_id = doc_id.strip()
+    if not doc_id:
+        return RedirectResponse(url="/knowledge?err=kb_nodoc", status_code=303)
+    try:
+        await db.kb_delete_document(
+            doc_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request)
+        )
+    except Exception:
+        import logging
+        logging.getLogger("admin-panel").exception("kb delete failed")
+        return RedirectResponse(url="/knowledge?err=kb_nodoc", status_code=303)
+    return RedirectResponse(url="/knowledge", status_code=303)
 
 
 # =========================================================================== #

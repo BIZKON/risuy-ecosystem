@@ -531,6 +531,20 @@ TIMEWEB_AI_ENABLED = bool(TIMEWEB_AI_TOKEN)
 # модели огромный, поэтому потолок щедрый (в отличие от gateway-фолбэка на 4000).
 AI_AGENT_PROMPT_MAX = _opt_int("AI_AGENT_PROMPT_MAX", 20000)
 
+# ── RF-RAG: своя база знаний (pgvector + self-host эмбеддер TEI) ──────────────
+# URL/токен нашего TEI-сервиса (тот же, что у бота). Панель эмбедит загруженные файлы
+# при заливке; retrieval — из бота. Пусто → раздел показывает, что загрузка недоступна,
+# пока EMBEDDER_URL не задан в env панели. Секреты только из env.
+EMBEDDER_URL = os.environ.get("EMBEDDER_URL", "")
+EMBEDDER_TOKEN = os.environ.get("EMBEDDER_TOKEN", "")
+EMBEDDER_ENABLED = bool(EMBEDDER_URL)
+KB_ENABLED_SETTING_KEY = "kb_enabled"            # тумблер RAG (бот читает; зеркало bot/db.py)
+MAX_KB_FILE_BYTES = _opt_int("MAX_KB_FILE_MB", 10) * 1024 * 1024   # ≤10 МБ на файл
+KB_ALLOWED_EXT = (".txt", ".md", ".csv", ".pdf")  # pdf → извлечение текста (pypdf)
+KB_CHUNK_TARGET = 700                              # символов в чанке (≈ абзац-два)
+KB_CHUNK_OVERLAP = 100                             # перекрытие соседних чанков
+KB_TITLE_MAX = 200
+
 # ── Раздел «Интеграции»: статус-борд + ссылка-гайд через app_settings ─────────
 # Ссылка-гайд (выдаётся после воронки) была ТОЛЬКО в env бота (GUIDE_URL = заглушка у
 # живых лидов). Теперь панель пишет app_settings['guide_url'], бот ЧИТАЕТ её ПОВЕРХ env

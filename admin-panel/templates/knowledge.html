@@ -62,24 +62,67 @@
 </div>
 {% endif %}
 
-{# ── Базы знаний (RAG) — статус + честно про цену ── #}
-<section class="section" aria-label="Базы знаний">
-  <h2 class="section__title section__title--lg">Базы знаний (RAG)</h2>
-  {% if knowledge_bases %}
-  <ul class="kb-list">
-    {% for kb in knowledge_bases %}
-    <li class="card">
-      <strong>{{ kb.name|e if kb.name else ('KB #' ~ kb.id) }}</strong>
-      <span class="pill {% if kb.status == 'active' %}pill--ok{% else %}pill--muted{% endif %}">{{ kb.status|e if kb.status else '—' }}</span>
-    </li>
-    {% endfor %}
-  </ul>
+{% endif %}
+
+{# ── Своя база знаний (RF-RAG): загрузка файлов в pgvector (без сторонних сервисов) ── #}
+<section class="section" aria-label="База знаний">
+  <h2 class="section__title section__title--lg">База знаний — загрузка файлов</h2>
+  <p class="page-head__hint">Большие объёмы (прайс, FAQ, условия, методички) загрузите файлом — бот находит нужное по смыслу и подмешивает в ответ. Данные в РФ, без сторонних сервисов.</p>
+
+  {% if kb_saved %}{{ flash('Файл загружен: ' ~ kb_saved ~ ' фрагм. добавлено в базу. Бот учтёт со следующего ответа.', 'ok') }}{% endif %}
+
+  {# тумблер поиска по базе #}
+  <form method="post" action="/knowledge/toggle" class="card" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="kb_enabled" value="{{ '0' if kb_enabled else '1' }}">
+    <p class="card__note">Поиск по базе знаний: <b>{{ 'включён' if kb_enabled else 'выключен' }}</b> — когда выключен, бот отвечает только по промпту.</p>
+    <div class="form-actions"><button class="btn {{ 'btn--muted' if kb_enabled else 'btn--dark' }}" type="submit">{{ 'Выключить поиск' if kb_enabled else 'Включить поиск' }}</button></div>
+  </form>
+
+  {% if not embedder_enabled %}
+  <p class="hint hint--block">⚠️ Загрузка файлов недоступна: не задан <code>EMBEDDER_URL</code> в окружении панели. Добавьте его скриптом деплоя (как у бота) — и появится форма загрузки.</p>
   {% else %}
-  <div class="empty empty--inline">
-    <p class="empty__title">Баз знаний пока нет</p>
-    <p class="empty__text">Лия учится промптом выше — для школы этого обычно достаточно. База знаний нужна при больших объёмах документов и создаётся отдельно: каждая = <b>платная управляемая векторная БД</b> (~500 ₽/мес+) + пакет токенов на эмбеддинги. Скажите — заведу (платно).</p>
+  {# форма загрузки #}
+  <form method="post" action="/knowledge/upload" enctype="multipart/form-data" autocomplete="off" class="card">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Файл <span class="field__hint">txt, md, csv, pdf · до {{ kb_max_mb }} МБ</span></span>
+      <input class="field__input" type="file" name="file" accept=".txt,.md,.csv,.pdf" required>
+    </label>
+    <label class="field">
+      <span class="field__label">Название <span class="field__hint">необязательно</span></span>
+      <input class="field__input" type="text" name="title" maxlength="200" placeholder="Напр.: Прайс и условия записи">
+    </label>
+    <label class="field">
+      <span class="field__label">Для кого</span>
+      <select class="field__input" name="role">
+        <option value="">Для всех ролей (общая справка)</option>
+        {% for slug, p in kb_roles.items() %}<option value="{{ slug }}">{{ p.name|e }} — {{ p.role|e }}</option>{% endfor %}
+      </select>
+    </label>
+    <p class="hint hint--block">Таблицы лучше грузить как CSV. Из PDF берётся только текст (картинки и схемы не попадут). Один файл = один документ.</p>
+    <div class="form-actions"><button class="btn btn--dark" type="submit">Загрузить в базу</button></div>
+  </form>
+
+  {# список документов #}
+  {% if kb_docs %}
+  <h3 class="section__title">Загруженные документы ({{ kb_docs|length }})</h3>
+  {% for d in kb_docs %}
+  <div class="card">
+    <strong>{{ d.title|e }}</strong>
+    {% if d.role_tag %}<span class="pill">{{ (kb_roles.get(d.role_tag) or {}).get('name', d.role_tag)|e }}</span>{% else %}<span class="pill pill--muted">все роли</span>{% endif %}
+    <span class="pill pill--ok">{{ d.chunks }} фрагм.</span>
+    <p class="card__note muted">{{ d.source|e }} · {{ d.created }}</p>
+    <form method="post" action="/knowledge/delete">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="doc_id" value="{{ d.id }}">
+      <button class="btn btn--muted" type="submit">Удалить</button>
+    </form>
   </div>
+  {% endfor %}
+  {% else %}
+  <p class="empty__text">База пуста. Загрузите первый файл выше.</p>
+  {% endif %}
   {% endif %}
 </section>
-{% endif %}
 {% endblock %}

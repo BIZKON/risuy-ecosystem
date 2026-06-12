@@ -1661,6 +1661,96 @@ async def set_ai_settings(
             )
 
 
+# ── RF-RAG: своя база знаний (pgvector) — раздел «Базы знаний» (загрузка файлов) ──
+def _vec_literal(v: list[float]) -> str:
+    return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
+
+
+async def get_kb_enabled() -> bool:
+    """Тумблер RAG (app_settings['kb_enabled']). Бот читает его же при retrieval."""
+    async with pool.acquire() as c:
+        v = await c.fetchval(
+            "select value from app_settings where key = $1", config.KB_ENABLED_SETTING_KEY
+        )
+    return bool((v or "").strip())
+
+
+async def set_kb_enabled(enabled: bool, *, actor: str, ip: str | None, user_agent: str | None) -> None:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "insert into app_settings (key, value) values ($1, $2) "
+                "on conflict (key) do update set value = excluded.value",
+                config.KB_ENABLED_SETTING_KEY, "1" if enabled else "",
+            )
+            await _insert_audit(
+                c, actor=actor, action="kb_enabled_set", ip=ip, user_agent=user_agent,
+                detail={"enabled": enabled},
+            )
+
+
+async def kb_list_documents() -> list[asyncpg.Record]:
+    """Документы базы знаний + число чанков (для списка с удалением)."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            """
+            select d.id, d.title, d.source, d.role_tag, d.created_by,
+                   to_char(d.created_at, 'YYYY-MM-DD HH24:MI') as created,
+                   count(ch.id) as chunks
+              from kb_documents d
+              left join kb_chunks ch on ch.document_id = d.id
+             group by d.id
+             order by d.created_at desc
+            """
+        )
+
+
+async def kb_insert_document(
+    *, title: str, source: str, role_tag: str, content: str,
+    chunks: list[str], embeddings: list[list[float]],
+    actor: str, ip: str | None, user_agent: str | None,
+) -> int:
+    """Документ + его чанки (с эмбеддингами) в ОДНОЙ транзакции + аудит. Возвращает число
+    чанков. role_tag '' → NULL (общая справка для всех ролей). Вектор кладём text→::vector."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            doc = await c.fetchval(
+                "insert into kb_documents (title, source, role_tag, content, created_by) "
+                "values ($1, $2, $3, $4, $5) returning id",
+                title, source, (role_tag or None), content, actor,
+            )
+            await c.executemany(
+                "insert into kb_chunks (document_id, chunk_index, content, embedding, metadata) "
+                "values ($1, $2, $3, $4::vector, $5::jsonb)",
+                [
+                    (doc, i, ch, _vec_literal(emb),
+                     json.dumps({"role_tag": role_tag or "", "title": title[:120], "source": source},
+                                ensure_ascii=False))
+                    for i, (ch, emb) in enumerate(zip(chunks, embeddings))
+                ],
+            )
+            await _insert_audit(
+                c, actor=actor, action="kb_doc_upload", ip=ip, user_agent=user_agent,
+                detail={"title": title[:120], "chunks": len(chunks), "role_tag": role_tag or None},
+            )
+    return len(chunks)
+
+
+async def kb_delete_document(doc_id: str, *, actor: str, ip: str | None, user_agent: str | None) -> bool:
+    """Удалить документ (каскад чистит чанки) + аудит. Возвращает True, если что-то удалено."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "delete from kb_documents where id = $1::uuid returning title", doc_id
+            )
+            if row:
+                await _insert_audit(
+                    c, actor=actor, action="kb_doc_delete", ip=ip, user_agent=user_agent,
+                    detail={"doc_id": str(doc_id), "title": (row["title"] or "")[:120]},
+                )
+    return bool(row)
+
+
 # ── «ИИ-сотрудник на канал» (страница «Каналы») ──────────────────────────────
 async def get_channel_personas(sources: tuple[str, ...]) -> dict:
     """{source: persona_slug} назначений «ИИ-сотрудника» по каналам + реестр агентов
