@@ -114,15 +114,18 @@ for r in rows:
         cards.append((title, text))
 vecs = embed([f"passage: {t}" for _, t in cards])
 assert len(vecs) == len(cards), f"{len(vecs)} != {len(cards)}"
+# Wave 3: kb_documents/kb_chunks — tenant-scoped (tenant_id NOT NULL, DEFAULT снят
+# миграцией 3d). Каталог — всегда тенант Школы; tid резолвим в do-блоке и пишем явно.
 seed = ["delete from kb_documents where source='google-sheet:catalog';",
-        "do $$ declare doc uuid; begin",
-        "insert into kb_documents(title,source,role_tag,content,created_by) values "
-        f"('Каталог программ Школы Лесова','google-sheet:catalog',null,'Каталог из Google-таблицы ({len(cards)} карточек)','script') returning id into doc;",
-        "insert into kb_chunks(document_id,chunk_index,content,embedding,metadata) values"]
+        "do $$ declare doc uuid; tid uuid; begin",
+        "  select id into tid from tenants where slug='lesov-school';",
+        "insert into kb_documents(title,source,role_tag,content,created_by,tenant_id) values "
+        f"('Каталог программ Школы Лесова','google-sheet:catalog',null,'Каталог из Google-таблицы ({len(cards)} карточек)','script',tid) returning id into doc;",
+        "insert into kb_chunks(document_id,chunk_index,content,embedding,metadata,tenant_id) values"]
 vals = []
 for i, ((title, text), v) in enumerate(zip(cards, vecs)):
     meta = json.dumps({"role_tag": "", "title": title[:120], "source": "google-sheet:catalog"}, ensure_ascii=False)
-    vals.append(f"(doc,{i},'{q(text)}','{vlit(v)}'::vector,'{q(meta)}'::jsonb)")
+    vals.append(f"(doc,{i},'{q(text)}','{vlit(v)}'::vector,'{q(meta)}'::jsonb,tid)")
 seed.append(",\n".join(vals) + ";")
 seed.append("end $$;")
 seed.append("insert into app_settings(key,value) values('kb_enabled','1') on conflict (key) do update set value=excluded.value;")
@@ -154,11 +157,12 @@ ivec = embed([f"passage: {index_text}"])[0]
 imeta = json.dumps({"role_tag": "", "title": "Полный список программ", "source": "catalog-index"}, ensure_ascii=False)
 open("/tmp/kb_index.sql", "w", encoding="utf-8").write(
     "delete from kb_documents where source='catalog-index';\n"
-    "do $$ declare doc uuid; begin\n"
-    "insert into kb_documents(title,source,role_tag,content,created_by) "
-    f"values('Полный список программ','catalog-index',null,'{q(index_text)}','script') returning id into doc;\n"
-    "insert into kb_chunks(document_id,chunk_index,content,embedding,metadata) "
-    f"values(doc,0,'{q(index_text)}','{vlit(ivec)}'::vector,'{q(imeta)}'::jsonb);\n"
+    "do $$ declare doc uuid; tid uuid; begin\n"
+    "  select id into tid from tenants where slug='lesov-school';\n"
+    "insert into kb_documents(title,source,role_tag,content,created_by,tenant_id) "
+    f"values('Полный список программ','catalog-index',null,'{q(index_text)}','script',tid) returning id into doc;\n"
+    "insert into kb_chunks(document_id,chunk_index,content,embedding,metadata,tenant_id) "
+    f"values(doc,0,'{q(index_text)}','{vlit(ivec)}'::vector,'{q(imeta)}'::jsonb,tid);\n"
     "end $$;"
 )
 

@@ -98,6 +98,9 @@ async def main() -> None:
     ap.add_argument("--token", default="", help="опц. Bearer для TEI (если за reverse-proxy)")
     ap.add_argument("--title", required=True, help="заголовок документа (ключ идемпотентности)")
     ap.add_argument("--role", default="", help="слаг персоны; пусто = общая справка для всех")
+    # Wave 3: kb_documents/kb_chunks tenant-scoped (tenant_id NOT NULL, DEFAULT снят 3d).
+    ap.add_argument("--tenant-slug", default="lesov-school",
+                    help="тенант справки (по умолчанию Школа Лесова)")
     ap.add_argument("--file", nargs="+", required=True, help="один или несколько текстовых файлов")
     args = ap.parse_args()
 
@@ -132,15 +135,20 @@ async def main() -> None:
                 "delete from kb_documents where title = $1 and coalesce(role_tag,'') = $2",
                 args.title, role,
             )
+            tid = await conn.fetchval(
+                "select id from tenants where slug = $1", args.tenant_slug)
+            if tid is None:
+                raise SystemExit(f"Тенант '{args.tenant_slug}' не найден в tenants")
             doc_id = await conn.fetchval(
-                """insert into kb_documents (title, source, role_tag, content, created_by)
-                   values ($1, $2, nullif($3,''), $4, 'script') returning id""",
-                args.title, source, role, content,
+                """insert into kb_documents (title, source, role_tag, content, created_by, tenant_id)
+                   values ($1, $2, nullif($3,''), $4, 'script', $5) returning id""",
+                args.title, source, role, content, tid,
             )
             meta = {"role_tag": role, "title": args.title, "source": source}
             await conn.executemany(
-                """insert into kb_chunks (document_id, chunk_index, content, embedding, metadata)
-                   values ($1, $2, $3, $4::vector, $5::jsonb)""",
+                """insert into kb_chunks (document_id, chunk_index, content, embedding, metadata, tenant_id)
+                   values ($1, $2, $3, $4::vector, $5::jsonb,
+                           (select tenant_id from kb_documents where id = $1))""",
                 [
                     (doc_id, i, ch, _vec_literal(vec),
                      json.dumps({**meta, "chunk_index": i}, ensure_ascii=False))

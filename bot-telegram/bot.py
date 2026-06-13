@@ -23,6 +23,7 @@ from aiohttp import web
 import config
 import db
 import metering_worker
+import multiplex
 import nurture
 import retention
 import worker
@@ -181,6 +182,9 @@ async def main() -> None:
     worker_task = asyncio.create_task(worker.run(bot))
     retention_task = asyncio.create_task(retention.run())
     metering_task = asyncio.create_task(metering_worker.run(bot))  # Wave 3: снапшоты+списания
+    # Wave 3: мультиплекс тенант-ботов. Школа НЕ здесь (она = эта главная таска из
+    # env); при пустом реестре non-default active-тенантов — строго no-op (§8.7).
+    multiplex_task = asyncio.create_task(multiplex.run())
     try:
         # ЕДИНСТВЕННЫЙ set_my_commands со ВСЕМИ командами меню (§5.8): второй вызов сотрёт
         # /start из меню (механизм запуска воронки). /start — запуск; /stop — отписка.
@@ -214,6 +218,7 @@ async def main() -> None:
         worker_task.cancel()
         retention_task.cancel()
         metering_task.cancel()
+        multiplex_task.cancel()
         await health.cleanup()
         await db.close()
         await bot.session.close()
