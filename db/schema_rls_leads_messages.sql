@@ -13,8 +13,8 @@
 -- (и вебхук конвертации) ослепнут под deny-by-default. Откат мгновенный:
 --   alter table leads/messages/outbox disable row level security;
 --
--- link_clicks / broadcast_recipients (трекинг, tenant_id есть) — НЕ трогаем; параллельный
--- follow-up при необходимости (ниже PII-чувствительность).
+-- link_clicks / broadcast_recipients (трекинг, tenant_id есть) — закрыты отдельной волной
+-- db/schema_rls_link_clicks_broadcast.sql (тот же паттерн; код-хук уже в проде → без деплоя).
 
 alter table leads    enable row level security;
 alter table messages enable row level security;
