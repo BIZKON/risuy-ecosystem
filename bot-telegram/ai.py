@@ -4,12 +4,19 @@
 для api.telegram.org). На любой сбой возвращаем мягкий фолбэк, чтобы пользователь
 не остался без ответа. Логику воронки модуль не трогает.
 """
+import asyncio
 import json
 import logging
+import time
+import uuid
+from decimal import Decimal
 
 import aiohttp
 
 import config
+import db
+from shared.metering import charge_usage, get_tenant_plan
+from shared.money import ceil_mul
 
 logger = logging.getLogger(__name__)
 
@@ -96,18 +103,22 @@ _DEFAULT_MODEL = "deepseek-v4-pro"
 async def ask_gateway(
     text: str, *, base_url: str | None = None, model: str | None = None,
     system_prompt: str | None = None, fallback: str | None = None,
-) -> str:
+) -> tuple[str, dict | None]:
     """Спрашивает модель через Timeweb AI Gateway — OpenAI-совместимый /chat/completions.
     Однооборотно: system (если задан) + текущее сообщение пользователя; контекст диалога
     НЕ сохраняется (в отличие от cloud-ai агента). Ключ — config.AI_GATEWAY_TOKEN (env,
-    секрет). На любой сбой — мягкий фолбэк, чтобы пользователь не остался без ответа."""
+    секрет). На любой сбой — мягкий фолбэк, чтобы пользователь не остался без ответа.
+
+    Возвращает (ответ, meta|None): meta = {model, usage, request_id} для метеринга
+    (gateway, в отличие от cloud-ai, отдаёт usage в каждом ответе — ТЗ §5.2);
+    None — фолбэк/нет usage, списывать нечего."""
     eff_base = (base_url or "").strip().rstrip("/") or _GATEWAY_DEFAULT_BASE
     eff_model = (model or "").strip() or _DEFAULT_MODEL
     eff_fallback = (fallback or "").strip() or _FALLBACK
 
     if not config.AI_GATEWAY_TOKEN:
         logger.warning("AI Gateway не настроен: пуст AI_GATEWAY_TOKEN")
-        return eff_fallback
+        return eff_fallback, None
 
     url = f"{eff_base}/chat/completions"
     headers = {
@@ -128,23 +139,119 @@ async def ask_gateway(
                 raw = await resp.text()
     except Exception as e:  # таймаут, сеть, DNS и т.п.
         logger.error("AI Gateway запрос не удался: %s", e)
-        return eff_fallback
+        return eff_fallback, None
 
     if status != 200:
         logger.error("AI Gateway HTTP %s: %s", status, raw[:300])
-        return eff_fallback
+        return eff_fallback, None
 
     try:
         data = json.loads(raw)
         answer = (data["choices"][0]["message"]["content"] or "").strip()
     except Exception as e:  # не-JSON / неожиданная схема ответа
         logger.error("AI Gateway ответ не разобран: %s | %s", e, raw[:200])
-        return eff_fallback
+        return eff_fallback, None
 
     if not answer:
         logger.error("AI Gateway пустой ответ: %s", raw[:200])
-        return eff_fallback
-    return answer
+        return eff_fallback, None
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    meta = {
+        "model": (data.get("model") or "").strip() or eff_model,
+        "usage": usage,
+        "request_id": (data.get("id") or "").strip() or uuid.uuid4().hex,
+    } if usage else None
+    return answer, meta
+
+
+# ── Cost-capture gateway-вызова (Wave 3, ТЗ §5.2; DECISIONS п.16) ─────────────
+# Точный per-call метеринг: usage из ответа → себестоимость по model_prices →
+# charge_usage сразу.
+#
+# ⚠️ Надёжность v1 — AT-MOST-ONCE (DECISIONS п.16): списание идёт fire-and-forget
+# после ответа лиду; idempotence_key gw:{tid}:{request_id} страхует от ДУБЛЯ, но
+# НЕ гарантирует доставку — при рестарте/недоступности БД в момент ответа
+# gateway-списание теряется НЕВОССТАНОВИМО (usage живёт только в памяти; снапшоты
+# used_tokens покрывают cloud-ai, но НЕ gateway — у него отдельный счётчик).
+# Допустимо для v1: дефолтный бэкенд — cloud_ai (метрируется снапшотами), gateway
+# включается опционально. Durable-outbox для gateway — отдельная волна (DECISIONS п.16).
+_PRICE_WARN_INTERVAL = 3600.0
+_price_warned: dict[str, float] = {}
+# Держим ссылки на летящие capture-таски: иначе event loop хранит их слабо и GC
+# может собрать незавершённую таску до списания. done_callback снимает ссылку.
+_capture_tasks: set = set()
+
+
+def schedule_gateway_capture(meta: dict) -> None:
+    """Ставит cost-capture gateway-вызова фоновой таской (ответ лиду её не ждёт)."""
+    task = asyncio.create_task(_capture_gateway_usage(meta))
+    _capture_tasks.add(task)
+    task.add_done_callback(_capture_tasks.discard)
+
+
+async def _capture_gateway_usage(meta: dict) -> None:
+    model = "?"
+    try:
+        tid = db.tenant_id()
+        if tid is None:
+            return
+        usage = meta.get("usage") or {}
+        # Парсинг usage — ВНУТРИ try: нечисловой ответ шлюза не должен ронять таску
+        # «молча» через необработанное исключение (Task exception never retrieved).
+        t_in = int(usage.get("prompt_tokens") or 0)
+        t_out = int(usage.get("completion_tokens") or 0)
+        if t_in + t_out <= 0:
+            return
+        model = meta.get("model") or "?"
+        async with db.pool.acquire() as conn:
+            plan = await get_tenant_plan(conn, tid)
+            if plan["billing_mode"] == "per_message":
+                return  # такие планы метрирует скан сообщений (metering_worker)
+            price = await conn.fetchrow(
+                "select price_in_microrub_per_1k as pin, price_out_microrub_per_1k as pout "
+                "from model_prices where provider = 'timeweb-ai-gateway' and model = $1 "
+                "order by effective_from desc limit 1",
+                model,
+            )
+            if price is None:
+                # Цены НЕ выдумываем (guardrail ТЗ §10) — не списываем и зовём
+                # владельца вписать тариф из ЛК. Лог рейт-лимитирован.
+                now = time.monotonic()
+                if now - _price_warned.get(model, 0.0) > _PRICE_WARN_INTERVAL:
+                    _price_warned[model] = now
+                    logger.error(
+                        "Метеринг gateway: нет цены модели %r (provider=timeweb-ai-gateway) "
+                        "в model_prices — расход НЕ списывается. Впишите тариф из ЛК Timeweb.",
+                        model,
+                    )
+                return
+            # µRUB: (вход×цена_1k + выход×цена_1k) / 1000, округление вверх один раз.
+            cost = ceil_mul(t_in * price["pin"] + t_out * price["pout"], Decimal("0.001"))
+            await charge_usage(
+                conn, tid, cost,
+                {
+                    "kind": "llm", "provider": "timeweb-ai-gateway", "model": model,
+                    "units": {"tokens_in": t_in, "tokens_out": t_out,
+                              "tokens_total": t_in + t_out},
+                    "request_id": meta.get("request_id"),
+                },
+                f"gw:{tid}:{meta.get('request_id')}",
+                allow_negative=True,
+            )
+            # Блокировка — по ТЕКУЩЕМУ балансу (а не balance_after возможной dup-строки,
+            # финдинг №3), на том же conn (без второго acquire — финдинг №6). Тенант по
+            # умолчанию (Школа) не блокируется никогда (§8.7, финдинг №8).
+            if plan["prepaid"] and tid != db.default_tenant_id():
+                bal = await conn.fetchval(
+                    "select balance_microrub from credit_wallets where tenant_id = $1", tid)
+                if bal is not None and int(bal) <= 0:
+                    await db.set_ai_wallet_blocked(tid, True, conn=conn)
+                    logger.error(
+                        "Кошелёк тенанта %s исчерпан (баланс %s µRUB) — ИИ на мягкой паузе",
+                        tid, bal,
+                    )
+    except Exception:  # noqa: BLE001 — метеринг не должен ронять ответивший путь
+        logger.warning("Метеринг gateway-вызова не записан (model=%s)", model, exc_info=True)
 
 
 async def ask_ai(text: str, parent_message_id: str | None, cfg: dict) -> tuple[str, str | None]:
@@ -152,10 +259,15 @@ async def ask_ai(text: str, parent_message_id: str | None, cfg: dict) -> tuple[s
     Возвращает (ответ, msg_id|None). Для gateway msg_id=None (серверного контекста нет);
     для cloud_ai — id ответа агента (хранится в FSM как parent_message_id след. запроса)."""
     if cfg.get("backend") == "gateway":
-        answer = await ask_gateway(
+        answer, meta = await ask_gateway(
             text, base_url=cfg.get("gateway_base_url"), model=cfg.get("model"),
             system_prompt=cfg.get("system_prompt"), fallback=cfg.get("fallback"),
         )
+        if meta:
+            # Fire-and-forget: ответ лиду не ждёт списания. Таска наследует
+            # contextvar tenant_id текущей задачи (create_task копирует контекст);
+            # ссылка держится в _capture_tasks, чтобы GC не съел до завершения.
+            schedule_gateway_capture(meta)
         return answer, None
     return await ask_liya(
         text, parent_message_id,

@@ -237,6 +237,7 @@ grant select, insert                 on usage_ledger          to panel_rw;
 grant select, insert                 on model_prices          to panel_rw;
 grant select, insert                 on agent_token_snapshots to panel_rw;
 grant select, insert, update, delete on tenant_secrets        to panel_rw;
+grant select, insert, update, delete on tenant_agents         to panel_rw;  -- Wave 3: реестр агент→тенант
 -- usage_ledger/model_prices/agent_token_snapshots — identity-PK → грант на sequence не нужен.
 -- Остальные новые таблицы — uuid-PK (gen_random_uuid), секвенсов нет.
 

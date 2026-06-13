@@ -77,6 +77,45 @@ ORDER_REUSE_MINUTES = int(os.environ.get("ORDER_REUSE_MINUTES", "30"))
 # Просроченные pending-заказы онлайн-оплаты → failed (часов; чистит retention-цикл).
 ORDER_STALE_HOURS = int(os.environ.get("ORDER_STALE_HOURS", "24"))
 
+# ── Метеринг (Wave 3, ТЗ §5.2) ────────────────────────────────────────────────
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    """int из env с фолбэком на дефолт при мусоре (не валим импорт → нет crash-loop)."""
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        val = int(raw) if raw else default
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r не int — беру дефолт %s", name, raw, default)
+        val = default
+    return max(val, minimum) if minimum is not None else val
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip().replace(",", ".")
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r не float — беру дефолт %s", name, raw, default)
+        return default
+
+
+# Тенант env-бота (Школа): его tenant_id резолвится по slug при старте и пишется
+# во все вставки tenant-scoped таблиц явно. DEFAULT в БД на этих колонках пока
+# стоит (переходник, DECISIONS п.12) и СНИМЕТСЯ отдельной миграцией Wave 3 (3d).
+DEFAULT_TENANT_SLUG = os.environ.get("DEFAULT_TENANT_SLUG", "lesov-school")
+# Период снапшот-воркера used_tokens, сек (зажат снизу 30: METERING_INTERVAL=0
+# дал бы горячий цикл — молотьба БД и Timeweb API). Дельта списывается
+# идемпотентно — частота влияет только на гранулярность строк леджера.
+METERING_INTERVAL = _env_int("METERING_INTERVAL", 300, minimum=30)
+# Доля выходных токенов в смешанной цене (used_tokens не делит вход/выход).
+# 0.5 — прод-факт для thinking-моделей (DECISIONS п.5). ⚠️ Тот же ключ есть в env
+# панели (блок «Экономика сервиса»); держите ОБА значения равными, иначе
+# себестоимость метеринга разойдётся с цифрой маржи в панели.
+AI_OUT_TOKENS_SHARE = _env_float("AI_OUT_TOKENS_SHARE", 0.5)
+# База management-API Timeweb (снапшоты used_tokens агентов; тот же токен TIMEWEB_AI_TOKEN).
+TIMEWEB_API_BASE = os.environ.get("TIMEWEB_API_BASE", "https://api.timeweb.cloud/api/v1")
+
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
 

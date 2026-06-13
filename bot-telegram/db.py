@@ -1,5 +1,7 @@
 """Слой доступа к Postgres через asyncpg. Простой пул + функции по шагам воронки."""
+import contextvars
 import logging
+import uuid
 
 import asyncpg
 
@@ -10,13 +12,43 @@ pool: asyncpg.Pool | None = None
 # Разрешённые колонки касаний — защита от подстановки имени колонки в SQL.
 _FOLLOWUP_COLS = {"follow_up_1_at", "follow_up_2_at", "follow_up_3_at"}
 
+# ── Тенант-контекст (Wave 3, ТЗ §5.4) ─────────────────────────────────────────
+# Каждая вставка в tenant-scoped таблицу пишет tenant_id ЯВНО (DEFAULT снимается
+# миграцией Wave 3). Мультиплекс выставляет current_tenant_id per-polling-таска;
+# главный env-бот (Школа) живёт без контекста — фолбэк _default_tenant_id
+# (резолв по slug при старте; до резолва вставки шли бы с NULL — поэтому init()
+# не поднимает бота, пока тенант не найден).
+current_tenant_id: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
+    "current_tenant_id", default=None
+)
+_default_tenant_id: uuid.UUID | None = None
+
+
+def tenant_id() -> uuid.UUID | None:
+    """Активный тенант: контекст мультиплекс-таски, иначе env-тенант (Школа)."""
+    return current_tenant_id.get() or _default_tenant_id
+
+
+def default_tenant_id() -> uuid.UUID | None:
+    """Тенант env-бота (Школа) — мультиплекс исключает его из своего реестра."""
+    return _default_tenant_id
+
 
 async def init() -> None:
-    global pool
+    global pool, _default_tenant_id
     # max_size=10 (§5.4 плана): воркеры рассылки/outbox + polling-хендлеры воронки
     # делят один пул; при 5 voronka голодала. Соединение НИКОГДА не держится через
     # await send — claim/запись результата идут отдельными короткими транзакциями.
     pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
+    _default_tenant_id = await pool.fetchval(
+        "select id from tenants where slug = $1", config.DEFAULT_TENANT_SLUG
+    )
+    if _default_tenant_id is None:
+        # Без тенанта вставки невозможны (tenant_id NOT NULL) — падаем громко на
+        # старте, а не молча теряем лидов посреди воронки.
+        raise RuntimeError(
+            f"Тенант по умолчанию '{config.DEFAULT_TENANT_SLUG}' не найден в tenants"
+        )
 
 
 async def close() -> None:
@@ -29,11 +61,11 @@ async def upsert_start(tg_user_id: int, source: str) -> None:
     async with pool.acquire() as c:
         await c.execute(
             """
-            insert into leads (tg_user_id, messenger, source, status)
-            values ($1, 'tg', $2, 'new')
+            insert into leads (tg_user_id, messenger, source, status, tenant_id)
+            values ($1, 'tg', $2, 'new', $3)
             on conflict (tg_user_id) do update set updated_at = now()
             """,
-            tg_user_id, source,
+            tg_user_id, source, tenant_id(),
         )
 
 
@@ -206,10 +238,12 @@ async def log_message(
             await c.execute(
                 """
                 insert into messages
-                    (lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id, source)
-                values ($1, $2, $3, $4, $5, $6, $7, $8)
+                    (lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id,
+                     source, tenant_id)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """,
                 lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id, source,
+                tenant_id(),
             )
     except Exception:  # noqa: BLE001 — изоляция: переписка-лог не критична к доставке
         logging.getLogger(__name__).warning(
@@ -355,8 +389,10 @@ async def materialize_recipients(broadcast_id: int) -> int:
     использовании трекинг-ссылки (см. ensure_click_token) — здесь оставляем null.
     """
     q = f"""
-        insert into broadcast_recipients (broadcast_id, lead_id, tg_user_id)
-        select $1, id, tg_user_id from leads where {_AUDIENCE_WHERE}
+        insert into broadcast_recipients (broadcast_id, lead_id, tg_user_id, tenant_id)
+        select $1, id, tg_user_id,
+               (select tenant_id from broadcasts where id = $1)
+        from leads where {_AUDIENCE_WHERE}
         on conflict (broadcast_id, lead_id) do nothing
     """
     async with pool.acquire() as c:
@@ -427,8 +463,9 @@ async def ensure_click_token(recipient_id: int, broadcast_id: int, lead_id: str,
         token = secrets.token_urlsafe(16)
         async with c.transaction():
             await c.execute(
-                "insert into link_tokens (token, target_url, broadcast_id, lead_id) "
-                "values ($1, $2, $3, $4) on conflict (token) do nothing",
+                "insert into link_tokens (token, target_url, broadcast_id, lead_id, tenant_id) "
+                "values ($1, $2, $3, $4, (select tenant_id from broadcasts where id = $3)) "
+                "on conflict (token) do nothing",
                 token, target_url, broadcast_id, lead_id,
             )
             await c.execute(
@@ -865,6 +902,126 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
     }
 
 
+# ── Мультиплекс (Wave 3, ТЗ §5.4): реестр тенантов + секреты + настройки ──────
+async def list_active_tenants() -> list[dict]:
+    """Живые тенанты для реестра мультиплекса (бот — owner, RLS обходит)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch("select id, slug from tenants where status = 'active'")
+    return [dict(r) for r in rows]
+
+
+async def get_tenant_secret(tid, key_name: str) -> str | None:
+    """Расшифрованный секрет тенанта из vault. Обновляет last_used_at (витрина
+    «Ключей» панели). Значение НИКОГДА не логируется (§8.5); VaultError поднимается
+    наружу без plaintext'а. None — секрет не задан."""
+    from shared import vault
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "update tenant_secrets set last_used_at = now() "
+            "where tenant_id = $1 and key_name = $2 "
+            "returning ciphertext, nonce, key_version",
+            tid, key_name,
+        )
+    if row is None:
+        return None
+    # aad зеркалит запись панели: f"{tenant_id}:{key_name}" (uuid в канонике).
+    return vault.decrypt(
+        bytes(row["ciphertext"]), bytes(row["nonce"]), row["key_version"],
+        aad=f"{tid}:{key_name}",
+    )
+
+
+async def get_tenant_setting(tid, key: str) -> str | None:
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select value from tenant_settings where tenant_id = $1 and key = $2",
+            tid, key,
+        )
+
+
+async def get_tenant_ai_overrides(tid) -> dict:
+    """Настройки ИИ тенант-бота из tenant_settings (зеркало get_ai_overrides, но
+    tenant-scoped и без слоёв канал/персона — v1 мультиплекса). Дефолты те же:
+    enabled=True, backend='cloud_ai'; kb_enabled выключен (RAG Школы не делится).
+    Сбой чтения → «нет переопределений», Лия тенанта не молчит из-за БД."""
+    keys = ["ai_enabled", "ai_backend", "ai_agent_id", "ai_model",
+            "ai_gateway_base_url", "ai_system_prompt", "ai_fallback_text"]
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "select key, value from tenant_settings "
+                "where tenant_id = $1 and key = any($2::text[])",
+                tid, keys,
+            )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Не удалось прочитать настройки ИИ тенанта %s", tid, exc_info=True)
+        rows = []
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    enabled_raw = kv.get("ai_enabled")
+    backend = (kv.get("ai_backend") or "").strip()
+    if backend not in _AI_BACKENDS:
+        backend = "cloud_ai"
+    return {
+        "enabled": True if enabled_raw is None else bool(enabled_raw.strip()),
+        "backend": backend,
+        "agent_id": (kv.get("ai_agent_id") or "").strip(),
+        "model": (kv.get("ai_model") or "").strip(),
+        "gateway_base_url": (kv.get("ai_gateway_base_url") or "").strip(),
+        "system_prompt": kv.get("ai_system_prompt") or "",
+        "fallback": kv.get("ai_fallback_text") or "",
+        "kb_enabled": False,
+    }
+
+
+# ── Метеринг (Wave 3): мягкая пауза ИИ при пустом кошельке prepaid-тенанта ────
+async def is_ai_wallet_blocked() -> bool:
+    """True — кошелёк активного тенанта пуст и ИИ на мягкой паузе (флаг ставит
+    снапшот-воркер, снимает топап-вебхук панели). Тенант без плана (Школа до
+    Wave 4) флага не получает никогда — §8.7 держится при любом балансе.
+    Сбой чтения трактуем как «не заблокирован»: Лия не должна молчать из-за БД."""
+    tid = tenant_id()
+    if tid is None:
+        return False
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval(
+                "select value from tenant_settings "
+                "where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tid,
+            )
+        return bool((v or "").strip())
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Не удалось прочитать ai_wallet_blocked", exc_info=True)
+        return False
+
+
+async def set_ai_wallet_blocked(tid, on: bool, *, conn=None) -> None:
+    """Ставит/снимает флаг паузы ИИ тенанта (бот — owner, RLS обходит).
+
+    conn — если передан, работаем на нём (вызов ИЗНУТРИ удержанного соединения:
+    нельзя брать второе из пула max_size=10, иначе дедлок — финдинг ревью №6).
+    Без conn — берём своё короткое соединение."""
+    async def _do(c) -> None:
+        if on:
+            await c.execute(
+                "insert into tenant_settings (tenant_id, key, value) "
+                "values ($1, 'ai_wallet_blocked', '1') "
+                "on conflict (tenant_id, key) do update set value = '1', updated_at = now()",
+                tid,
+            )
+        else:
+            await c.execute(
+                "delete from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tid,
+            )
+    if conn is not None:
+        await _do(conn)
+    else:
+        async with pool.acquire() as c:
+            await _do(c)
+
+
 async def kb_search(
     embedding: list[float], persona: str | None = None,
     *, top_k: int = 4, max_distance: float = 0.55,
@@ -954,8 +1111,9 @@ async def log_link_click(token: str, broadcast_id, lead_id, ua: str | None, ip: 
     """Лог клика. ua обрезается [:512]. Вызывать fire-and-forget — редирект важнее лога."""
     async with pool.acquire() as c:
         await c.execute(
-            "insert into link_clicks (token, broadcast_id, lead_id, ua, ip) "
-            "values ($1, $2, $3, $4, $5::inet)",
+            "insert into link_clicks (token, broadcast_id, lead_id, ua, ip, tenant_id) "
+            "values ($1, $2, $3, $4, $5::inet, "
+            "        (select tenant_id from link_tokens where token = $1))",
             token, broadcast_id, lead_id,
             (ua[:512] if ua else None),
             ip,
@@ -1097,8 +1255,10 @@ async def create_or_reuse_pending_order(
             )
             row = await c.fetchrow(
                 """
-                insert into orders (lead_id, product_id, amount, currency, status, source, created_by)
-                values ($1, $2, $3, $4, 'pending', 'yookassa', 'bot')
+                insert into orders (lead_id, product_id, amount, currency, status, source,
+                                    created_by, tenant_id)
+                values ($1, $2, $3, $4, 'pending', 'yookassa', 'bot',
+                        (select tenant_id from leads where id = $1))
                 returning id
                 """,
                 lead_id, product_id, amount, currency,

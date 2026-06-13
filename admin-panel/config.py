@@ -549,11 +549,13 @@ TIMEWEB_AI_ENABLED = bool(TIMEWEB_AI_TOKEN)
 # Себестоимость ИИ (блок «Экономика» — ТОЛЬКО для роли admin, клиент не видит).
 # Тарифы из ЛК Timeweb, DeepSeek V4 Pro Thinking: вход 234,9 ₽/млн · выход 469,8 ₽/млн.
 # used_tokens Timeweb — единый счётчик без разбивки вход/выход → считаем по смешанной цене:
-# cost = used × ((1-share)·in + share·out); share — доля выходных токенов (короткие ответы
-# Лии при длинном промпте+RAG ≈ 0.2; повысить = оценка консервативнее).
+# cost = used × ((1-share)·in + share·out); share — доля выходных токенов.
+# ⚠️ Дефолт 0.5 — прод-факт для thinking-моделей (DECISIONS п.5) и ОБЯЗАН совпадать
+# с дефолтом бота (bot-telegram/config.py): по этой доле метеринг РЕАЛЬНО списывает,
+# а здесь панель показывает маржу — расхождение даст ложную картину экономики.
 AI_PRICE_IN_RUB_PER_M = _opt_float("AI_PRICE_IN_RUB_PER_M", 234.9)
 AI_PRICE_OUT_RUB_PER_M = _opt_float("AI_PRICE_OUT_RUB_PER_M", 469.8)
-AI_OUT_TOKENS_SHARE = _opt_float("AI_OUT_TOKENS_SHARE", 0.2)
+AI_OUT_TOKENS_SHARE = _opt_float("AI_OUT_TOKENS_SHARE", 0.5)
 # Промпт агента — главный рычаг «обучения» (курсы/цены/расписание/правила). Контекст
 # модели огромный, поэтому потолок щедрый (в отличие от gateway-фолбэка на 4000).
 AI_AGENT_PROMPT_MAX = _opt_int("AI_AGENT_PROMPT_MAX", 20000)

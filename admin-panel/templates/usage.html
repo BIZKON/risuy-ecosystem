@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Расход{% endblock %}
+{% block body_class %}page-usage{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Расход ИИ</h1>
+  <p class="page-head__hint">Списания за работу ИИ-сотрудников из кошелька. Пополнить кошелёк можно в разделе «Подписка».</p>
+</div>
+
+{% if not session.active_tenant_id %}
+<p class="hint hint--block">⚠️ Не выбран активный клиент — раздел «Клиенты».</p>
+{% else %}
+
+{% if ai_blocked %}
+{{ flash('Кошелёк пуст — ИИ-ответы на паузе. Пополните кошелёк в разделе «Подписка», и ответы возобновятся автоматически.', 'error') }}
+{% endif %}
+
+<section class="section" aria-label="Сводка">
+  <div class="billing-card">
+    <p class="billing-card__row">
+      <span>Баланс кошелька</span>
+      <b class="mono{% if balance_negative %} is-negative{% endif %}">{{ balance }} ₽</b>
+    </p>
+    <p class="billing-card__row">
+      <span>Списано за 14 дней</span>
+      <b class="mono">{{ charged_14d }} ₽</b>
+    </p>
+    <p class="hint">Пополнение — в разделе <a href="/subscription">«Подписка»</a>.</p>
+  </div>
+</section>
+
+{% if daily %}
+<section class="section" aria-label="По дням">
+  <h2 class="section__title section__title--lg">По дням (14 дней)</h2>
+  <div class="table-wrap">
+    <table class="table table--compact table--zebra">
+      <thead><tr><th>День</th><th>Операций</th><th>Списано</th></tr></thead>
+      <tbody>
+        {% for d in daily %}
+        <tr>
+          <td class="mono">{{ d.day.strftime('%d.%m.%y') }}</td>
+          <td class="mono">{{ d.ops }}</td>
+          <td class="mono">{{ d.charged }} ₽</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="section" aria-label="Последние списания">
+  <h2 class="section__title section__title--lg">Последние списания</h2>
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="table table--compact table--zebra">
+      <thead><tr><th>Когда</th><th>Тип</th><th>Объём</th><th>Списано</th><th>Баланс после</th></tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td class="mono">{{ r.occurred_at.strftime('%d.%m.%y %H:%M') }}</td>
+          <td>{{ r.kind_label }}</td>
+          <td class="mono">{{ r.volume }}</td>
+          <td class="mono">{{ r.charged }} ₽</td>
+          <td class="mono{% if r.balance_negative %} is-negative{% endif %}">{{ r.balance_after }} ₽</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Списаний пока нет — они появятся после первых ответов ИИ.</p>
+  {% endif %}
+</section>
+
+{% endif %}
+{% endblock %}

@@ -35,6 +35,7 @@
 {%- elif name == 'team' -%}<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8M21 20a6 6 0 0 0-4-5.6"/>
 {%- elif name == 'payments' -%}<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
 {%- elif name == 'subscription' -%}<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v4.5h-4.5"/>
+{%- elif name == 'usage' -%}<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
 {%- elif name == 'keys' -%}<circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 9-9M16 5l3 3M13 8l2 2"/>
 {%- elif name == 'tenants' -%}<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
 {%- elif name == 'logout' -%}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
@@ -62,7 +63,7 @@
   'dashboard': 'Статистика', 'dialogs': 'Диалоги', 'agents': 'ИИ-агенты',
   'knowledge': 'Базы знаний', 'integrations': 'Интеграции', 'channels': 'Каналы',
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
-  'subscription': 'Подписка', 'team': 'Команда',
+  'subscription': 'Подписка', 'usage': 'Расход', 'team': 'Команда',
   'keys': 'Ключи', 'tenants': 'Клиенты',
 } %}
 
@@ -88,6 +89,7 @@
       {{ nav_item('products',     '/products',   'Продукты',   active) }}
       {{ nav_item('payments',     '/payments',   'Платежи',    active) }}
       {{ nav_item('subscription', '/subscription', 'Подписка',  active) }}
+      {{ nav_item('usage',        '/usage',        'Расход',     active) }}
       {{ nav_item('keys',         '/keys',        'Ключи',      active) }}
       {%- if session and session.role == 'admin' %}{{ nav_item('team', '/team', 'Команда', active) }}{% endif %}
       {%- if session and session.role == 'admin' %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import secrets
 import uuid
@@ -1606,7 +1607,8 @@ async def product_save(
         await db.create_product_with_audit(
             name=name_val, kind=kind, price=price_val, currency=currency,
             caption=caption_val, link=link_val, file_meta=file_meta,
-            status=status_val, actor=session.actor,
+            status=status_val, tenant_id=session.active_tenant_id,
+            actor=session.actor,
             ip=_ip(request), user_agent=_ua(request),
         )
         return RedirectResponse(url="/products?saved=1", status_code=303)
@@ -1880,6 +1882,7 @@ async def broadcast_create(
         title=title_val, messenger=audience["messenger"], kind=kind,
         body_template=body, audience=audience, recipient_estimate=estimate,
         file_meta=file_meta, target_url=link_url, product_id=product_id_val,
+        tenant_id=session.active_tenant_id,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url=f"/broadcasts/{bid}", status_code=303)
@@ -2304,6 +2307,7 @@ async def payment_create(
     await db.create_order_with_audit(
         lead_id=lead_uuid, product_id=pid, amount=amount_val, currency=currency,
         status=status, note=note_val, mark_converted=mark_conv,
+        tenant_id=session.active_tenant_id,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/payments?saved=1", status_code=303)
@@ -3144,6 +3148,7 @@ async def knowledge_upload(
     n = await db.kb_insert_document(
         title=doc_title, source=fname[:200], role_tag=role, content=text,
         chunks=chunks, embeddings=embeddings,
+        tenant_id=session.active_tenant_id,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url=f"/knowledge?kb_saved={n}", status_code=303)
@@ -3717,6 +3722,80 @@ async def tenants_switch(
         ip=_ip(request), user_agent=_ua(request), detail={"tenant_id": tenant_id},
     )
     return RedirectResponse(url="/tenants?switched=1", status_code=303)
+
+
+# ---- /usage — «Расход»: лента списаний ИИ из кошелька (Wave 3, ТЗ §6) ------- #
+# Клиент видит ТОЛЬКО charged: себестоимость и множитель в контекст шаблона не
+# попадают вовсе (db.list_usage их не выбирает). Платформенная экономика — блок
+# «Экономика сервиса» в «Подписке» (только роль admin).
+_USAGE_KIND_LABELS = {
+    "llm": "Ответ ИИ",
+    "embedding": "База знаний",
+    "message": "Сообщение ИИ",
+    "other": "Другое",
+}
+
+
+def _usage_volume(kind: str, units: dict) -> str:
+    """Человекочитаемый объём операции из units (jsonb)."""
+    if kind == "message":
+        return "1 сообщение"
+    total = units.get("tokens_total") or 0
+    if total:
+        return f"{int(total):,} ткн".replace(",", " ")
+    return "—"
+
+
+@app.get("/usage", response_class=HTMLResponse)
+async def usage_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+):
+    rows_ctx: list[dict] = []
+    daily_ctx: list[dict] = []
+    balance = 0
+    ai_blocked = False
+    if session.active_tenant_id:
+        tid = session.active_tenant_id
+        balance = await db.get_wallet_balance(tid)
+        ai_blocked = await db.is_tenant_ai_blocked(tid)
+        for r in await db.list_usage(tid, limit=100):
+            units = r["units"] if isinstance(r["units"], dict) else json.loads(r["units"] or "{}")
+            rows_ctx.append({
+                "occurred_at": r["occurred_at"],
+                "kind_label": _USAGE_KIND_LABELS.get(r["kind"], r["kind"]),
+                "volume": _usage_volume(r["kind"], units),
+                "charged": money.micro_to_rub_str(int(r["charged_microrub"])),
+                "balance_after": money.micro_to_rub_str(int(r["balance_after_microrub"])),
+                "balance_negative": int(r["balance_after_microrub"]) < 0,
+            })
+        daily_rows = await db.usage_daily(tid, days=14)
+        daily_ctx = [
+            {
+                "day": d["day"],
+                "ops": int(d["ops"]),
+                "charged": money.micro_to_rub_str(int(d["charged_microrub"] or 0)),
+            }
+            for d in daily_rows
+        ]
+        charged_14d_micro = sum(int(d["charged_microrub"] or 0) for d in daily_rows)
+    else:
+        charged_14d_micro = 0
+    return templates.TemplateResponse(
+        request,
+        "usage.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "usage",
+            "rows": rows_ctx,
+            "daily": daily_ctx,
+            "balance": money.micro_to_rub_str(balance),
+            "balance_negative": balance < 0,
+            "charged_14d": money.micro_to_rub_str(charged_14d_micro),
+            "ai_blocked": ai_blocked,
+        },
+    )
 
 
 @app.get("/keys", response_class=HTMLResponse)

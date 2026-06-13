@@ -22,6 +22,7 @@ from aiohttp import web
 
 import config
 import db
+import metering_worker
 import nurture
 import retention
 import worker
@@ -179,6 +180,7 @@ async def main() -> None:
     nurture_task = asyncio.create_task(nurture.run(bot))
     worker_task = asyncio.create_task(worker.run(bot))
     retention_task = asyncio.create_task(retention.run())
+    metering_task = asyncio.create_task(metering_worker.run(bot))  # Wave 3: снапшоты+списания
     try:
         # ЕДИНСТВЕННЫЙ set_my_commands со ВСЕМИ командами меню (§5.8): второй вызов сотрёт
         # /start из меню (механизм запуска воронки). /start — запуск; /stop — отписка.
@@ -211,6 +213,7 @@ async def main() -> None:
         nurture_task.cancel()
         worker_task.cancel()
         retention_task.cancel()
+        metering_task.cancel()
         await health.cleanup()
         await db.close()
         await bot.session.close()

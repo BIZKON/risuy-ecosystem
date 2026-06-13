@@ -278,6 +278,13 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     ai_cfg = await db.get_ai_overrides(lead_source, lead_persona)
     if not ai_cfg["enabled"]:
         return
+    # Wave 3 (ТЗ §5.1): кошелёк prepaid-тенанта пуст → ИИ на мягкой паузе, но лид
+    # без ответа не остаётся. Школа (без плана) флага не получает никогда (§8.7).
+    if await db.is_ai_wallet_blocked():
+        await messaging.send_text(
+            bot, message.from_user.id, texts.WALLET_PAUSED, source="system"
+        )
+        return
     try:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:

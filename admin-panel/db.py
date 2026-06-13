@@ -626,8 +626,10 @@ async def enqueue_manual_reply(
             count = 0
             if text:
                 await c.execute(
-                    "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by) "
-                    "values ($1, $2, 'text', $3, 'queued', $4)",
+                    "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by, "
+                    "                    tenant_id) "
+                    "values ($1, $2, 'text', $3, 'queued', $4, "
+                    "        (select tenant_id from leads where id = $1))",
                     lead_id, tg, text, actor,
                 )
                 count += 1
@@ -636,8 +638,9 @@ async def enqueue_manual_reply(
                     """
                     insert into outbox
                         (lead_id, tg_user_id, kind, text, status, created_by,
-                         file_bytes, file_name, file_mime)
-                    values ($1, $2, $3, null, 'queued', $4, $5, $6, $7)
+                         file_bytes, file_name, file_mime, tenant_id)
+                    values ($1, $2, $3, null, 'queued', $4, $5, $6, $7,
+                            (select tenant_id from leads where id = $1))
                     """,
                     lead_id, tg, a["kind"], actor, a["bytes"], a["name"], a["mime"],
                 )
@@ -747,6 +750,7 @@ async def create_broadcast_with_audit(
     file_meta: dict[str, Any] | None,
     target_url: str | None,
     product_id: int | None = None,
+    tenant_id,                    # uuid активного тенанта сессии (Wave 3)
     actor: str,
     ip: str | None,
     user_agent: str | None,
@@ -780,18 +784,20 @@ async def create_broadcast_with_audit(
                 """
                 insert into broadcasts
                     (title, messenger, kind, body_template, audience_filter,
-                     status, recipient_count, created_by, product_id)
-                values ($1, $2, $3, $4, $5::jsonb, 'draft', null, $6, $7)
+                     status, recipient_count, created_by, product_id, tenant_id)
+                values ($1, $2, $3, $4, $5::jsonb, 'draft', null, $6, $7, $8)
                 returning id
                 """,
                 title, messenger, kind, body_template, audience_json, actor, product_ref,
+                tenant_id,
             )
             bid = int(bid)
             if file_meta is not None:
                 await c.execute(
                     """
-                    insert into broadcast_files (broadcast_id, filename, mime, bytes)
-                    values ($1, $2, $3, $4)
+                    insert into broadcast_files (broadcast_id, filename, mime, bytes, tenant_id)
+                    values ($1, $2, $3, $4,
+                            (select tenant_id from broadcasts where id = $1))
                     """,
                     bid, file_meta.get("filename"), file_meta.get("mime"),
                     file_meta.get("bytes"),
@@ -801,8 +807,9 @@ async def create_broadcast_with_audit(
                 token = secrets.token_urlsafe(16)
                 await c.execute(
                     """
-                    insert into link_tokens (token, target_url, broadcast_id)
-                    values ($1, $2, $3)
+                    insert into link_tokens (token, target_url, broadcast_id, tenant_id)
+                    values ($1, $2, $3,
+                            (select tenant_id from broadcasts where id = $3))
                     """,
                     token, target_url, bid,
                 )
@@ -1224,6 +1231,7 @@ async def create_product_with_audit(
     link: str | None,
     file_meta: dict | None,     # {"bytes","filename","mime"} | None
     status: str,
+    tenant_id,                  # uuid активного тенанта сессии (Wave 3)
     actor: str,
     ip: str | None,
     user_agent: str | None,
@@ -1242,12 +1250,12 @@ async def create_product_with_audit(
                 """
                 insert into products
                     (name, kind, price, currency, caption, link,
-                     file, file_name, file_mime, status, created_by)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     file, file_name, file_mime, status, created_by, tenant_id)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 returning id
                 """,
                 name, kind, price, currency, caption, link,
-                file_bytes, fb.get("filename"), fb.get("mime"), status, actor,
+                file_bytes, fb.get("filename"), fb.get("mime"), status, actor, tenant_id,
             )
             pid = int(pid)
             await _insert_audit(
@@ -1708,20 +1716,25 @@ async def kb_list_documents() -> list[asyncpg.Record]:
 async def kb_insert_document(
     *, title: str, source: str, role_tag: str, content: str,
     chunks: list[str], embeddings: list[list[float]],
+    tenant_id,
     actor: str, ip: str | None, user_agent: str | None,
 ) -> int:
     """Документ + его чанки (с эмбеддингами) в ОДНОЙ транзакции + аудит. Возвращает число
-    чанков. role_tag '' → NULL (общая справка для всех ролей). Вектор кладём text→::vector."""
+    чанков. role_tag '' → NULL (общая справка для всех ролей). Вектор кладём text→::vector.
+    tenant_id — активный тенант сессии (Wave 3); чанки наследуют тенанта документа."""
     async with pool.acquire() as c:
         async with c.transaction():
             doc = await c.fetchval(
-                "insert into kb_documents (title, source, role_tag, content, created_by) "
-                "values ($1, $2, $3, $4, $5) returning id",
-                title, source, (role_tag or None), content, actor,
+                "insert into kb_documents (title, source, role_tag, content, created_by, "
+                "                          tenant_id) "
+                "values ($1, $2, $3, $4, $5, $6) returning id",
+                title, source, (role_tag or None), content, actor, tenant_id,
             )
             await c.executemany(
-                "insert into kb_chunks (document_id, chunk_index, content, embedding, metadata) "
-                "values ($1, $2, $3, $4::vector, $5::jsonb)",
+                "insert into kb_chunks (document_id, chunk_index, content, embedding, metadata, "
+                "                       tenant_id) "
+                "values ($1, $2, $3, $4::vector, $5::jsonb, "
+                "        (select tenant_id from kb_documents where id = $1))",
                 [
                     (doc, i, ch, _vec_literal(emb),
                      json.dumps({"role_tag": role_tag or "", "title": title[:120], "source": source},
@@ -2288,6 +2301,7 @@ async def create_order_with_audit(
     status: str,
     note: str | None,
     mark_converted: bool,
+    tenant_id,                    # uuid сессии — фолбэк, когда продажа без лида (Wave 3)
     actor: str,
     ip: str | None,
     user_agent: str | None,
@@ -2305,12 +2319,13 @@ async def create_order_with_audit(
                 """
                 insert into orders
                     (lead_id, product_id, amount, currency, status, source,
-                     note, created_by, paid_at)
+                     note, created_by, paid_at, tenant_id)
                 values ($1, $2, $3, $4, $5, 'manual', $6, $7,
-                        case when $5 = 'paid' then now() else null end)
+                        case when $5 = 'paid' then now() else null end,
+                        coalesce((select tenant_id from leads where id = $1), $8))
                 returning id
                 """,
-                lead_id, product_id, amount, currency, status, note, actor,
+                lead_id, product_id, amount, currency, status, note, actor, tenant_id,
             )
             converted = False
             if mark_converted and lead_id is not None:
@@ -2406,8 +2421,10 @@ async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
                 )
                 if lead is not None and lead["tg_user_id"] is not None:
                     await c.execute(
-                        "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by) "
-                        "values ($1, $2, 'text', $3, 'queued', 'yookassa-webhook')",
+                        "insert into outbox (lead_id, tg_user_id, kind, text, status, "
+                        "                    created_by, tenant_id) "
+                        "values ($1, $2, 'text', $3, 'queued', 'yookassa-webhook', "
+                        "        (select tenant_id from leads where id = $1))",
                         upd["lead_id"], lead["tg_user_id"], config.ORDER_PAID_MESSAGE,
                     )
             await _insert_audit(
@@ -2443,8 +2460,10 @@ async def create_invoice_order_with_audit(
                 return None
             row = await c.fetchrow(
                 """
-                insert into orders (lead_id, product_id, amount, currency, status, source, created_by)
-                values ($1, $2, $3, $4, 'pending', 'yookassa', $5)
+                insert into orders (lead_id, product_id, amount, currency, status, source,
+                                    created_by, tenant_id)
+                values ($1, $2, $3, $4, 'pending', 'yookassa', $5,
+                        (select tenant_id from leads where id = $1))
                 returning id
                 """,
                 lead_id, product_id, amount, currency, actor,
@@ -2475,8 +2494,9 @@ async def enqueue_invoice_message(lead_id, tg_user_id: int, text: str, *, actor:
     """Положить лиду сообщение-счёт в outbox (ссылку на оплату доставит БОТ)."""
     async with pool.acquire() as c:
         await c.execute(
-            "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by) "
-            "values ($1, $2, 'text', $3, 'queued', $4)",
+            "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by, tenant_id) "
+            "values ($1, $2, 'text', $3, 'queued', $4, "
+            "        (select tenant_id from leads where id = $1))",
             lead_id, tg_user_id, text, actor,
         )
 
@@ -2864,6 +2884,13 @@ async def mark_topup_succeeded(tenant_id, yookassa_payment_id: str, raw: dict) -
                 """,
                 tenant_id, int(row["amount_microrub"]),
             )
+            # Wave 3: деньги пришли → мягкая пауза ИИ снимается (флаг ставит
+            # снапшот-воркер бота при балансе ≤ 0; здесь — единственная точка снятия).
+            await c.execute(
+                "delete from tenant_settings "
+                "where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tenant_id,
+            )
             await _insert_audit(
                 c, actor="yookassa-webhook", action="wallet_topup",
                 detail={"tenant_id": str(tenant_id), "payment_id": yookassa_payment_id,
@@ -2881,6 +2908,55 @@ async def list_platform_payments(tenant_id, *, limit: int = 30) -> list[asyncpg.
                 "from payments where tenant_id = $1 order by created_at desc limit $2",
                 tenant_id, limit,
             )
+
+
+# ── Wave 3: раздел «Расход» — лента usage_ledger тенанта ─────────────────────
+# Клиенту отдаётся ТОЛЬКО charged (ТЗ §6): себестоимость cost_microrub и
+# multiplier этими запросами НЕ ВЫБИРАЮТСЯ вовсе — их нет даже в контексте
+# шаблона. Платформенная экономика — отдельный admin-блок «Экономика сервиса».
+async def list_usage(tenant_id, *, limit: int = 100) -> list[asyncpg.Record]:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                "select occurred_at, kind, model, units, charged_microrub, "
+                "       balance_after_microrub "
+                "from usage_ledger where tenant_id = $1 "
+                "order by occurred_at desc, id desc limit $2",
+                tenant_id, limit,
+            )
+
+
+async def usage_daily(tenant_id, *, days: int = 14) -> list[asyncpg.Record]:
+    """Агрегат по дням: число операций + сумма charged (для сводки раздела)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                """
+                select date_trunc('day', occurred_at) as day,
+                       count(*)                       as ops,
+                       sum(charged_microrub)          as charged_microrub
+                from usage_ledger
+                where tenant_id = $1 and occurred_at >= now() - make_interval(days => $2)
+                group by 1
+                order by 1 desc
+                """,
+                tenant_id, days,
+            )
+
+
+async def is_tenant_ai_blocked(tenant_id) -> bool:
+    """Флаг мягкой паузы ИИ (кошелёк пуст) — для баннера в «Расходе»."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            v = await c.fetchval(
+                "select value from tenant_settings "
+                "where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tenant_id,
+            )
+    return bool((v or "").strip())
 
 
 async def webhook_event_new(external_id: str, event_type: str | None, payload: dict) -> bool:
