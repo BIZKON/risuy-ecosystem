@@ -378,10 +378,12 @@ async def claim_broadcast_to_send() -> dict | None:
                 select id, title, messenger, kind, body_template, recipient_count, product_id
                 from broadcasts
                 where status = 'queued' and recipient_count is not null
+                  and tenant_id = $1
                 order by id
                 limit 1
                 for update skip locked
-                """
+                """,
+                tenant_id(),  # воркер берёт рассылки ТОЛЬКО своего тенанта (бот=owner, RLS обходит)
             )
             if row is None:
                 return None
@@ -400,11 +402,15 @@ async def materialize_recipients(broadcast_id: int) -> int:
     получателей (после вставки). per-recipient click_token генерится позже, при первом
     использовании трекинг-ссылки (см. ensure_click_token) — здесь оставляем null.
     """
+    # tenant-скоуп: адресаты — ТОЛЬКО лиды тенанта рассылки (бот=owner → RLS на leads его
+    # не ограничивает; без этого фильтра рассылка одного клиента ушла бы лидам всех тенантов).
     q = f"""
         insert into broadcast_recipients (broadcast_id, lead_id, tg_user_id, tenant_id)
         select $1, id, tg_user_id,
                (select tenant_id from broadcasts where id = $1)
-        from leads where {_AUDIENCE_WHERE}
+        from leads
+        where {_AUDIENCE_WHERE}
+          and tenant_id = (select tenant_id from broadcasts where id = $1)
         on conflict (broadcast_id, lead_id) do nothing
     """
     async with pool.acquire() as c:
@@ -1185,12 +1191,13 @@ async def due_for_erase(after_days: int) -> list[str]:
             """
             select id from leads
             where erase_requested_at is not null
+              and tenant_id = $2
               and erase_requested_at + make_interval(days => $1) <= now()
               and (name is not null or phone is not null
                    or phone_hash is not null or notes is not null)
             limit 100
             """,
-            after_days,
+            after_days, tenant_id(),  # стираем ПДн ТОЛЬКО своего тенанта (152-ФЗ; бот=owner обходит RLS)
         )
     return [r["id"] for r in rows]
 
@@ -1242,9 +1249,10 @@ async def purge_old_message_text(ttl_days: int) -> int:
             """
             update messages set text = null, file_id = null
             where created_at < now() - make_interval(days => $1)
+              and tenant_id = $2
               and (text is not null or file_id is not null)
             """,
-            ttl_days,
+            ttl_days, tenant_id(),  # чистим переписку ТОЛЬКО своего тенанта (бот=owner обходит RLS)
         )
     return _affected(res)
 
@@ -1352,8 +1360,9 @@ async def mark_stale_yookassa_orders_failed(hours: int) -> int:
             """
             update orders set status = 'failed', note = coalesce(note, 'не оплачен (истёк срок)')
             where status = 'pending' and source = 'yookassa'
+              and tenant_id = $2
               and created_at < now() - make_interval(hours => $1)
             """,
-            hours,
+            hours, tenant_id(),  # просрочка заказов ТОЛЬКО своего тенанта
         )
     return _affected(res)

@@ -59,7 +59,9 @@ class ctx:
 
 
 async def _cleanup(c):
-    await c.execute("delete from leads where tg_user_id = $1", TG)
+    await c.execute("delete from broadcasts where tenant_id in "
+                    "(select id from tenants where slug like 'smoke-lead-%')")
+    await c.execute("delete from leads where tg_user_id = $1", TG)  # cascade: messages, broadcast_recipients
     await c.execute("delete from tenants where slug like 'smoke-lead-%'")
 
 
@@ -139,6 +141,35 @@ async def main() -> None:
         due_b = await db.get_due_followups(col, 60)
     check("прогрев тенанта A НЕ видит лид B", TG not in due_a, f"due_a={due_a}")
     check("прогрев тенанта B видит свой лид B", TG in due_b)
+
+    # ── 5. Обезличивание (due_for_erase) изолировано по тенанту (152-ФЗ, фикс ревью) ──
+    print("5. due_for_erase изолирован по тенанту:")
+    async with pool.acquire() as c:
+        await c.execute(
+            "update leads set erase_requested_at = now() - interval '60 days' where tg_user_id = $1", TG)
+    with ctx(ta):
+        due_a = await db.due_for_erase(30)
+    with ctx(tb):
+        due_b = await db.due_for_erase(30)
+    check("ctx A → к стиранию ТОЛЬКО лид A", lid_a in due_a and lid_b not in due_a, f"{due_a}")
+    check("ctx B → к стиранию ТОЛЬКО лид B", lid_b in due_b and lid_a not in due_b, f"{due_b}")
+
+    # ── 6. Материализация рассылки — только лиды тенанта рассылки (фикс ревью) ──
+    print("6. materialize_recipients изолирован по тенанту рассылки:")
+    async with pool.acquire() as c:
+        await c.execute(
+            "update leads set erase_requested_at = null, consent = true, "
+            "unsubscribed_at = null, bot_paused = false where tg_user_id = $1", TG)
+        bid = await c.fetchval(
+            "insert into broadcasts(title,messenger,kind,body_template,status,recipient_count,"
+            "created_by,tenant_id) values('тест','tg','text','привет {link}','queued',0,'smoke',$1) "
+            "returning id", ta)
+    await db.materialize_recipients(bid)
+    async with pool.acquire() as c:
+        rec = await c.fetch("select lead_id from broadcast_recipients where broadcast_id = $1", bid)
+    rec_leads = [r["lead_id"] for r in rec]
+    check("рассылка тенанта A → получатель = лид A", lid_a in rec_leads, f"{rec_leads}")
+    check("рассылка тенанта A → лид B (тот же tg_user_id) НЕ получатель", lid_b not in rec_leads)
 
     async with pool.acquire() as c:  # чистка
         await _cleanup(c)
