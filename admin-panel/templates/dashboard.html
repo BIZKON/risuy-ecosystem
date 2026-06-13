@@ -5,6 +5,53 @@
 {% block body_class %}page-dashboard{% endblock %}
 
 {% block content %}
+
+{# Платформенная сводка по всем подключённым клиентам (тенантам) — ТОЛЬКО роль admin
+   (платформенный владелец). Клиент-оператор контекст platform не получает → блок скрыт. #}
+{% if platform %}
+<section class="section" aria-label="Клиенты платформы">
+  <div class="page-head">
+    <h1 class="page-head__title">Платформа · клиенты</h1>
+    <p class="page-head__hint">Сводка по всем подключённым клиентам сервиса. Видна только администратору платформы. «Выручка» — реальные поступления ЮKassa; «маржа метеринга» — начислено за ИИ минус себестоимость токенов.</p>
+  </div>
+  <div class="stats stats--aux">
+    {{ stat_card('Клиентов', platform.clients, '/tenants', 'accent', 'подключённых тенантов') }}
+    {{ stat_card('Выручка', platform.totals.payments, '', '', 'поступления ЮKassa') }}
+    {{ stat_card('Себестоимость ИИ', platform.totals.cost, '', '', 'токены Timeweb') }}
+    {{ stat_card('Маржа метеринга', platform.totals.margin, '', ('muted' if platform.margin_negative else 'accent'), 'начислено − себестоимость') }}
+    {{ stat_card('На кошельках', platform.totals.wallet, '', '', 'предоплата клиентов') }}
+  </div>
+  {% if platform.tenants %}
+  <table class="table table--compact">
+    <thead>
+      <tr>
+        <th scope="col">Клиент</th>
+        <th scope="col">Статус</th>
+        <th scope="col" class="num">Выручка</th>
+        <th scope="col" class="num">Начислено ИИ</th>
+        <th scope="col" class="num">Себестоимость</th>
+        <th scope="col" class="num">Маржа</th>
+        <th scope="col" class="num">Кошелёк</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in platform.tenants %}
+      <tr>
+        <td>{{ t.name|e }}</td>
+        <td class="muted">{{ t.status }}</td>
+        <td class="num">{{ t.payments }}</td>
+        <td class="num">{{ t.charged }}</td>
+        <td class="num muted">{{ t.cost }}</td>
+        <td class="num">{{ t.margin }}</td>
+        <td class="num{% if t.wallet_negative %} muted{% endif %}">{{ t.wallet }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
 <div class="page-head">
   <h1 class="page-head__title">Воронка</h1>
   <p class="page-head__hint">Статус — текущее состояние лида, не история. «Достиг этапа» оценивается по порядку статусов — допущение внутренней панели.</p>

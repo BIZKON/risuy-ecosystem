@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any
@@ -2753,6 +2754,63 @@ async def set_session_tenant(sid: str, tenant_id) -> None:
             "update admin_sessions set active_tenant_id = $2 where sid = $1",
             sid, tenant_id,
         )
+
+
+async def platform_summary() -> dict:
+    """Платформенная сводка по ВСЕМ подключённым клиентам (тенантам) — раздел admin
+    на дашборде (ТЗ §6 «сводка по всем тенантам»). Только для роли admin (вызывающий
+    гейтит): экономику платформы клиент-оператор не видит.
+
+    Деньги лежат в tenant-scoped таблицах под RLS (`credit_wallets`/`usage_ledger`/
+    `payments`, политика `app.tenant_id`), panel_rw без bypassrls → читаем СКАНОМ по
+    тенантам (set_config('app.tenant_id') в транзакции, как list_tenant_secrets/renewal).
+    N тенантов мал (цель 3–5), N+1 acquire допустим. Всё в µRUB (int) — форматирует
+    вызывающий. Сбой одного тенанта логируется и не валит сводку.
+
+    Возвращает: clients (число живых тенантов), totals (payments/charged/cost/margin/
+    wallet по всем) и tenants (та же разбивка на каждого). Определения:
+      • payments — сумма succeeded-платежей ЮKassa (подписки + пополнения), деньги «зашли»;
+      • charged  — начислено клиентам за ИИ (с наценкой ×множитель), списано из кошельков;
+      • cost     — НАША себестоимость токенов Timeweb (до наценки);
+      • margin   — charged − cost (заработок на наценке метеринга);
+      • wallet   — остаток предоплаты на кошельках (минус = postpaid/переходник Школы)."""
+    async with pool.acquire() as c:
+        tenants = await c.fetch(
+            "select id, slug, name, status from tenants "
+            "where status in ('provisioning', 'active') order by created_at"
+        )
+    rows: list[dict] = []
+    tot = {"payments": 0, "charged": 0, "cost": 0, "wallet": 0}
+    for t in tenants:
+        try:
+            async with pool.acquire() as c:
+                async with c.transaction():
+                    await c.execute(
+                        "select set_config('app.tenant_id', $1, true)", str(t["id"]))
+                    pay = int(await c.fetchval(
+                        "select coalesce(sum(amount_microrub), 0) from payments "
+                        "where status = 'succeeded'") or 0)
+                    led = await c.fetchrow(
+                        "select coalesce(sum(charged_microrub), 0) as charged, "
+                        "coalesce(sum(cost_microrub), 0) as cost from usage_ledger")
+                    bal = int(await c.fetchval(
+                        "select coalesce(sum(balance_microrub), 0) from credit_wallets") or 0)
+        except Exception:  # noqa: BLE001 — сбой одного тенанта не валит всю сводку
+            logging.getLogger(__name__).warning(
+                "platform_summary: сбой по тенанту %s", t["id"], exc_info=True)
+            continue
+        charged, cost = int(led["charged"]), int(led["cost"])
+        rows.append({
+            "name": t["name"], "slug": t["slug"], "status": t["status"],
+            "payments": pay, "charged": charged, "cost": cost,
+            "margin": charged - cost, "wallet": bal,
+        })
+        tot["payments"] += pay
+        tot["charged"] += charged
+        tot["cost"] += cost
+        tot["wallet"] += bal
+    tot["margin"] = tot["charged"] - tot["cost"]
+    return {"clients": len(tenants), "tenants": rows, "totals": tot}
 
 
 async def list_tenant_secrets(tenant_id) -> list[asyncpg.Record]:

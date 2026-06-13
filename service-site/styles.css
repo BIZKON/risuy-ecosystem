@@ -143,6 +143,14 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 .top--dark .nav a:not(.btn){color:var(--on-dark-muted)}
 .top--dark .nav a:not(.btn):hover{color:var(--on-dark)}
 
+/* «Войти в кабинет» — вход в личный кабинет (панель). Класс .btn → элемент НЕ
+   скрывается на мобиле (плейн-ссылки nav прячутся ≤760px). order:99 — всегда крайним
+   справа независимо от позиции в DOM. Тема (свет/тёмная шапка) — по предку .top--dark. */
+.nav .nav-login{order:99; background:transparent; color:var(--ink); border:1px solid var(--line)}
+.nav .nav-login:hover{border-color:var(--primary); color:var(--primary); text-decoration:none}
+.top--dark .nav .nav-login{color:var(--on-dark); border-color:var(--line-dark)}
+.top--dark .nav .nav-login:hover{border-color:var(--on-dark); color:var(--on-dark); text-decoration:none}
+
 /* ---------- 5. Hero (тёмный) ---------- */
 .hero{
   background:

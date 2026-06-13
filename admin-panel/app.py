@@ -387,6 +387,10 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
         for r in by_source_rows
     ]
 
+    # Платформенная сводка (клиенты + экономика по всем тенантам) — ТОЛЬКО роль admin
+    # (клиент-оператор её не видит, как и блок «Экономика сервиса»). None → шаблон скрыт.
+    platform = await _platform_ctx(session.role)
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -394,12 +398,45 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
             "counts": dict(counts),
             "conversion": conversion,
             "by_source": by_source,
+            "platform": platform,
             "session": session,
             "csrf_token": session.csrf_token,
             "status_labels": config.STATUS_LABELS,
             "active": "dashboard",
         },
     )
+
+
+async def _platform_ctx(role: str) -> dict | None:
+    """Сводка по всем подключённым клиентам для дашборда (только admin). Деньги из
+    db.platform_summary (µRUB) форматируем в рубли для UI. Сбой → None (блок скрыт,
+    дашборд не падает)."""
+    if role != "admin":
+        return None
+    try:
+        ps = await db.platform_summary()
+    except Exception:  # noqa: BLE001 — сводка не должна ронять дашборд
+        import logging
+        logging.getLogger("admin-panel").warning("platform_summary упал", exc_info=True)
+        return None
+
+    def rub(micro: int) -> str:
+        return money.micro_to_rub_str(int(micro)) + " ₽"
+
+    return {
+        "clients": ps["clients"],
+        "totals": {k: rub(v) for k, v in ps["totals"].items()},
+        "margin_negative": ps["totals"]["margin"] < 0,
+        "tenants": [
+            {
+                "name": t["name"], "status": t["status"],
+                "payments": rub(t["payments"]), "charged": rub(t["charged"]),
+                "cost": rub(t["cost"]), "margin": rub(t["margin"]),
+                "wallet": rub(t["wallet"]), "wallet_negative": t["wallet"] < 0,
+            }
+            for t in ps["tenants"]
+        ],
+    }
 
 
 # ---- /leads — список + фильтры + пагинация -------------------------------- #
