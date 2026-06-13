@@ -63,7 +63,7 @@ async def upsert_start(tg_user_id: int, source: str) -> None:
             """
             insert into leads (tg_user_id, messenger, source, status, tenant_id)
             values ($1, 'tg', $2, 'new', $3)
-            on conflict (tg_user_id) do update set updated_at = now()
+            on conflict (tenant_id, tg_user_id) do update set updated_at = now()
             """,
             tg_user_id, source, tenant_id(),
         )
@@ -72,29 +72,33 @@ async def upsert_start(tg_user_id: int, source: str) -> None:
 async def set_consent(tg_user_id: int, value: bool) -> None:
     async with pool.acquire() as c:
         await c.execute(
-            "update leads set consent = $2 where tg_user_id = $1", tg_user_id, value
+            "update leads set consent = $2 where tg_user_id = $1 and tenant_id = $3",
+            tg_user_id, value, tenant_id(),
         )
 
 
 async def set_name(tg_user_id: int, name: str) -> None:
     async with pool.acquire() as c:
         await c.execute(
-            "update leads set name = $2 where tg_user_id = $1", tg_user_id, name
+            "update leads set name = $2 where tg_user_id = $1 and tenant_id = $3",
+            tg_user_id, name, tenant_id(),
         )
 
 
 async def set_phone(tg_user_id: int, phone: str, phone_hash: str) -> None:
     async with pool.acquire() as c:
         await c.execute(
-            "update leads set phone = $2, phone_hash = $3 where tg_user_id = $1",
-            tg_user_id, phone, phone_hash,
+            "update leads set phone = $2, phone_hash = $3 "
+            "where tg_user_id = $1 and tenant_id = $4",
+            tg_user_id, phone, phone_hash, tenant_id(),
         )
 
 
 async def set_subscribed(tg_user_id: int, value: bool) -> None:
     async with pool.acquire() as c:
         await c.execute(
-            "update leads set subscribed = $2 where tg_user_id = $1", tg_user_id, value
+            "update leads set subscribed = $2 where tg_user_id = $1 and tenant_id = $3",
+            tg_user_id, value, tenant_id(),
         )
 
 
@@ -105,9 +109,9 @@ async def mark_guide_sent(tg_user_id: int) -> None:
             """
             update leads
             set status = 'guide_sent', guide_sent_at = coalesce(guide_sent_at, now())
-            where tg_user_id = $1
+            where tg_user_id = $1 and tenant_id = $2
             """,
-            tg_user_id,
+            tg_user_id, tenant_id(),
         )
 
 
@@ -116,9 +120,12 @@ async def get_due_followups(col: str, delay_seconds: int) -> list[int]:
     assert col in _FOLLOWUP_COLS
     # +2 фильтра (§4 плана): прогрев = маркетинг, подавляется отпиской и ручным
     # перехватом. Фильтр на ЧТЕНИИ — касание не помечается отправленным, resume бесплатный.
+    # tenant-скоуп ($2): прогрев — Школин воркер (tenant_id() = тенант по умолчанию), не
+    # должен задеть лидов других тенантов (у тенант-ботов своей воронки пока нет, item B).
     q = f"""
         select tg_user_id from leads
         where messenger = 'tg'
+          and tenant_id = $2
           and tg_user_id is not null
           and guide_sent_at is not null
           and {col} is null
@@ -128,15 +135,16 @@ async def get_due_followups(col: str, delay_seconds: int) -> list[int]:
         limit 100
     """
     async with pool.acquire() as c:
-        rows = await c.fetch(q, float(delay_seconds))
+        rows = await c.fetch(q, float(delay_seconds), tenant_id())
     return [r["tg_user_id"] for r in rows]
 
 
 async def mark_followup_sent(col: str, tg_user_id: int) -> None:
     assert col in _FOLLOWUP_COLS
-    q = f"update leads set {col} = now(), status = 'nurturing' where tg_user_id = $1"
+    q = (f"update leads set {col} = now(), status = 'nurturing' "
+         "where tg_user_id = $1 and tenant_id = $2")
     async with pool.acquire() as c:
-        await c.execute(q, tg_user_id)
+        await c.execute(q, tg_user_id, tenant_id())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,7 +168,8 @@ async def get_lead_source(tg_user_id: int) -> str | None:
     try:
         async with pool.acquire() as c:
             return await c.fetchval(
-                "select source from leads where tg_user_id = $1", tg_user_id
+                "select source from leads where tg_user_id = $1 and tenant_id = $2",
+                tg_user_id, tenant_id(),
             )
     except Exception as e:  # noqa: BLE001 — выбор персоны не должен ломать авто-ответ
         logging.getLogger(__name__).warning("Не удалось прочитать source лида: %s", e)
@@ -173,7 +182,8 @@ async def get_lead_persona(tg_user_id: int) -> str | None:
     try:
         async with pool.acquire() as c:
             return await c.fetchval(
-                "select ai_persona from leads where tg_user_id = $1", tg_user_id
+                "select ai_persona from leads where tg_user_id = $1 and tenant_id = $2",
+                tg_user_id, tenant_id(),
             )
     except Exception as e:  # noqa: BLE001 — выбор персоны не должен ломать авто-ответ
         logging.getLogger(__name__).warning("Не удалось прочитать ai_persona лида: %s", e)
@@ -185,8 +195,9 @@ async def is_bot_paused(tg_user_id: int) -> bool:
     """True, если оператор взял ручное управление этим лидом. Нет строки → False."""
     async with pool.acquire() as c:
         val = await c.fetchval(
-            "select coalesce(bot_paused, false) from leads where tg_user_id = $1",
-            tg_user_id,
+            "select coalesce(bot_paused, false) from leads "
+            "where tg_user_id = $1 and tenant_id = $2",
+            tg_user_id, tenant_id(),
         )
     return bool(val)
 
@@ -197,8 +208,8 @@ async def set_unsubscribed(tg_user_id: int) -> None:
     async with pool.acquire() as c:
         await c.execute(
             "update leads set unsubscribed_at = coalesce(unsubscribed_at, now()) "
-            "where tg_user_id = $1",
-            tg_user_id,
+            "where tg_user_id = $1 and tenant_id = $2",
+            tg_user_id, tenant_id(),
         )
 
 
@@ -207,7 +218,7 @@ async def resolve_lead_id(tg_user_id: int) -> str | None:
     """uuid лида по tg_user_id (может ещё не существовать → None). Мягко, без исключений."""
     async with pool.acquire() as c:
         return await c.fetchval(
-            "select id from leads where tg_user_id = $1", tg_user_id
+            "select id from leads where tg_user_id = $1 and tenant_id = $2", tg_user_id, tenant_id()
         )
 
 
@@ -233,7 +244,7 @@ async def log_message(
         async with pool.acquire() as c:
             if lead_id is None:
                 lead_id = await c.fetchval(
-                    "select id from leads where tg_user_id = $1", tg_user_id
+                    "select id from leads where tg_user_id = $1 and tenant_id = $2", tg_user_id, tenant_id()
                 )
             await c.execute(
                 """
@@ -285,8 +296,9 @@ async def outbox_recheck_address(tg_user_id: int) -> str | None:
     """
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select tg_user_id, erase_requested_at from leads where tg_user_id = $1",
-            tg_user_id,
+            "select tg_user_id, erase_requested_at from leads "
+            "where tg_user_id = $1 and tenant_id = $2",
+            tg_user_id, tenant_id(),
         )
     if row is None or row["tg_user_id"] is None:
         return "no_address"
@@ -1255,7 +1267,8 @@ async def get_lead_for_purchase(tg_user_id: int) -> dict | None:
     54-ФЗ, если включён). None — лида нет (заказ без лида не оформляем)."""
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select id, name, phone from leads where tg_user_id = $1", tg_user_id
+            "select id, name, phone from leads where tg_user_id = $1 and tenant_id = $2",
+            tg_user_id, tenant_id(),
         )
     return dict(row) if row else None
 
