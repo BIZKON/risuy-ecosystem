@@ -2636,7 +2636,11 @@ async def subscription_select(
             amount=amount, currency=config.SERVICE_CURRENCY,
             description=description,
             return_url=return_url, idempotence_key=invoice_id,
-            metadata={"invoice_id": invoice_id, "plan": plan_key},
+            # Wave 4: kind+tenant_id → вебхук активирует subscriptions + начислит
+            # included_credits (метеринг по тарифу). invoice_id/plan — для legacy UI.
+            metadata={"invoice_id": invoice_id, "plan": plan_key,
+                      "kind": "platform_subscription",
+                      "tenant_id": str(session.active_tenant_id) if session.active_tenant_id else ""},
             receipt=_service_receipt(email, description, amount),
         )
     except yookassa.YooKassaError:
@@ -2764,8 +2768,24 @@ async def yookassa_webhook(request: Request):
             if meta.get("kind") == "platform_topup" and meta.get("tenant_id"):
                 if payment.get("status") == "succeeded" and payment.get("paid"):
                     await db.mark_topup_succeeded(meta["tenant_id"], payment_id, payment)
+            elif meta.get("kind") == "platform_subscription" and meta.get("tenant_id"):
+                # Wave 4: оплата тарифа → (1) legacy service_invoice paid (UI-витрина
+                # /subscription) + (2) активация subscriptions + included_credits в
+                # кошелёк (источник тарифа для метеринга). Обе системы наполняются.
+                if payment.get("status") == "succeeded" and payment.get("paid"):
+                    card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
+                    row = await db.mark_service_invoice_paid_by_payment(payment_id, card_last4=card)
+                    if row is not None and await db.is_subscription_canceled():
+                        await db.set_subscription_canceled(False, actor="yookassa-webhook",
+                                                           ip=None, user_agent=None)
+                    amount_micro = money.rub_to_micro(
+                        (payment.get("amount") or {}).get("value") or "0")
+                    await db.activate_subscription_from_payment(
+                        meta["tenant_id"], meta.get("plan") or "", payment_id,
+                        amount_micro, config.SERVICE_PLAN_PERIOD_DAYS)
             elif payment.get("status") == "succeeded" and payment.get("paid"):
-                # Ветка СЧЁТА ПОДПИСКИ (поведение до 1B, без изменений).
+                # Ветка СЧЁТА ПОДПИСКИ без нового kind (legacy-фолбэк: старые/ручные
+                # платежи, публичный лендинг). Поведение до Wave 4, без изменений.
                 card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
                 row = await db.mark_service_invoice_paid_by_payment(payment_id, card_last4=card)
                 # Оплата возобновляет подписку — снимаем флаг отмены (если стоял).

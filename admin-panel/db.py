@@ -2899,6 +2899,66 @@ async def mark_topup_succeeded(tenant_id, yookassa_payment_id: str, raw: dict) -
             return True
 
 
+async def activate_subscription_from_payment(
+    tenant_id, plan_code: str, yk_payment_id: str, amount_microrub: int, period_days: int,
+) -> bool:
+    """Wave 4: оплата тарифа → активация подписки + начисление included_credits.
+
+    Одной транзакцией, идемпотентно по yookassa_payment_id (payments-журнал, как
+    mark_topup_succeeded). Связывает СТАРУЮ оплату (service_invoices, для UI-витрины
+    панели — помечается paid отдельно в вебхуке) с НОВЫМ метерингом:
+      • payments(type='subscription', succeeded) — журнал + идемпотентность;
+      • subscriptions(plan, active, период) — источник тарифа для get_tenant_plan;
+      • tenants.plan_id — фолбэк для get_tenant_plan;
+      • credit_wallets += included_credits плана (квота тарифа в кредитах);
+      • снятие ai_wallet_blocked (кредиты пришли — пауза ИИ не нужна).
+    Возвращает True — активирована (первый раз); False — план не найден/не покупаемый
+    (custom) или платёж уже обработан (повтор вебхука). Кошелёк for update — гонка с
+    параллельным списанием metering. amount пишем в payments для аудита; кредиты —
+    из плана (included_credits), НЕ из amount (overage в кредиты не идёт)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            plan = await c.fetchrow(
+                "select id, included_credits_microrub from plans where code = $1", plan_code)
+            if plan is None:
+                return False                       # custom/неизвестный план — подписку не активируем
+            # Идемпотентность: повторный вебхук того же платежа → строка уже есть → no-op.
+            row = await c.fetchrow(
+                "insert into payments (tenant_id, type, yookassa_payment_id, idempotence_key, "
+                "                      amount_microrub, status, captured_at) "
+                "values ($1, 'subscription', $2, $3, $4, 'succeeded', now()) "
+                "on conflict (yookassa_payment_id) do nothing returning id",
+                tenant_id, yk_payment_id, f"sub:{yk_payment_id}", max(int(amount_microrub), 1))
+            if row is None:
+                return False                       # уже обработан
+            await c.execute(
+                "insert into subscriptions (tenant_id, plan_id, status, "
+                "                           current_period_start, current_period_end) "
+                "values ($1, $2, 'active', now(), now() + make_interval(days => $3))",
+                tenant_id, plan["id"], period_days)
+            await c.execute("update tenants set plan_id = $2 where id = $1", tenant_id, plan["id"])
+            inc = int(plan["included_credits_microrub"])
+            if inc > 0:
+                await c.execute(
+                    "select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
+                await c.execute(
+                    "insert into credit_wallets (tenant_id, balance_microrub, updated_at) "
+                    "values ($1, $2, now()) "
+                    "on conflict (tenant_id) do update "
+                    "set balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub, "
+                    "    updated_at = now()",
+                    tenant_id, inc)
+            await c.execute(
+                "delete from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tenant_id)
+            await _insert_audit(
+                c, actor="yookassa-webhook", action="subscription_activated",
+                detail={"tenant_id": str(tenant_id), "plan": plan_code,
+                        "payment_id": yk_payment_id, "credited_microrub": inc})
+            return True
+
+
 async def list_platform_payments(tenant_id, *, limit: int = 30) -> list[asyncpg.Record]:
     async with pool.acquire() as c:
         async with c.transaction():
