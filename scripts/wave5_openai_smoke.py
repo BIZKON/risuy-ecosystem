@@ -123,6 +123,18 @@ def test_build_messages() -> None:
           str([x["role"] for x in m4]))
     check("контент истории обрезан (strip)", m4[1]["content"] == "ок")
 
+    # Фикс ревью (Bug1): гонка диалога — история кончается user (лид прислал 2-е сообщение,
+    # пока бот отвечал на 1-е) → текущий вопрос склеивается в ОДИН user-turn, роли чередуются.
+    race = [{"role": "user", "content": "первый вопрос"},
+            {"role": "assistant", "content": "ответ"},
+            {"role": "user", "content": "второй (без ответа)"}]
+    m5 = ai._build_chat_messages("S", race, "третий")
+    check("гонка user-user → нет двух user подряд",
+          [x["role"] for x in m5] == ["system", "user", "assistant", "user"],
+          str([x["role"] for x in m5]))
+    check("склейка сохранила оба user-сообщения (контент не потерян)",
+          m5[-1]["content"] == "второй (без ответа)\n\nтретий", repr(m5[-1]["content"]))
+
 
 # ── Часть 2: ask_agent_openai (мок-HTTP) ─────────────────────────────────────
 async def test_ask_agent_openai() -> None:

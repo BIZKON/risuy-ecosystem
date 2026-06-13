@@ -113,17 +113,29 @@ def _build_chat_messages(
     """Собирает messages[] для OpenAI-эндпоинта: [system?] + история + текущий вопрос.
     history — список {"role": "user"|"assistant", "content": str} (готовит get_ai_history).
     Финальный user-turn — text КАК ЕСТЬ (он мог быть дополнен RAG-контекстом в handlers,
-    поэтому берём аргумент, а не последнюю запись истории)."""
-    messages: list[dict] = []
+    поэтому берём аргумент, а не последнюю запись истории).
+
+    Подряд идущие одинаковые роли СХЛОПЫВАЮТСЯ в одну (контент через \\n\\n). Зачем:
+    OpenAI-формат это допускает, но строгие сервера/модели предпочитают чередование, а
+    гонка диалога реально даёт user-user — лид прислал 2-е сообщение, пока бот отвечал на
+    1-е (его «in» уже в истории, ещё без ответа Лии), и текущий вопрос лёг бы вторым user."""
+    raw: list[dict] = []
     sp = (system_prompt or "").strip()
     if sp:
-        messages.append({"role": "system", "content": sp})
+        raw.append({"role": "system", "content": sp})
     for h in history or []:
         content = (h.get("content") or "").strip()
         role = h.get("role")
         if content and role in ("user", "assistant"):
-            messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": text})
+            raw.append({"role": role, "content": content})
+    raw.append({"role": "user", "content": text})
+
+    messages: list[dict] = []
+    for m in raw:
+        if messages and messages[-1]["role"] == m["role"]:
+            messages[-1]["content"] += "\n\n" + m["content"]  # склейка, контент не теряем
+        else:
+            messages.append(dict(m))
     return messages
 
 
@@ -335,6 +347,21 @@ async def _capture_gateway_usage(meta: dict) -> None:
         logger.warning("Метеринг gateway-вызова не записан (model=%s)", model, exc_info=True)
 
 
+# Рейт-лимит лога фолбэка OpenAI→/call: во время аварии эндпоинта фолбэк случается на
+# КАЖДОЕ сообщение — без троттла лог затопило бы. Раз в час достаточно как сигнал.
+_FALLBACK_WARN_INTERVAL = 3600.0
+_fallback_warned_at = 0.0
+
+
+def _fallback_due() -> bool:
+    global _fallback_warned_at
+    now = time.monotonic()
+    if now - _fallback_warned_at > _FALLBACK_WARN_INTERVAL:
+        _fallback_warned_at = now
+        return True
+    return False
+
+
 async def ask_ai(
     text: str, parent_message_id: str | None, cfg: dict,
     *, history: list[dict] | None = None,
@@ -367,7 +394,18 @@ async def ask_ai(
     # Жёсткий сбой OpenAI-эндпоинта (не настроен/сеть/не-200) → фолбэк на нативный /call:
     # промпт из панели теряется (агент ответит по своему промпту Timeweb), НО Лия не молчит
     # (§8.7). Нативный путь сам отдаст мягкий текст-фолбэк, если и он недоступен.
-    logger.warning("AI(agent-openai) недоступен — фолбэк на нативный /call (промпт панели не применён)")
+    # ⚠️ Нативный /call физически НЕ принимает messages[]/историю (именно ради этого был
+    # сделан Wave 5) → фолбэк-ответ ОДНОХОДОВЫЙ, без последних N сообщений и без промпта
+    # панели. Это осознанный размен §8.7 (Лия отвечает > Лия молчит); со стороны /call
+    # контекст не вернуть. Лог рейт-лимитирован (иначе в аварию писал бы на каждое сообщение)
+    # и поднят до error — сигнал владельцу «промпт панели не доезжает» (сверь хост
+    # TIMEWEB_AI_OPENAI_BASE). Видимый ops-алерт/виджет в панели — отдельный шаг (handoff).
+    if _fallback_due():
+        logger.error(
+            "AI(agent-openai) недоступен (база %s) — фолбэк на нативный /call: промпт панели "
+            "и история НЕ применяются. Проверьте доступность хоста OpenAI-эндпоинта.",
+            config.TIMEWEB_AI_OPENAI_BASE,
+        )
     return await ask_liya(
         text, parent_message_id,
         agent_id=cfg.get("agent_id"), fallback=cfg.get("fallback"),
