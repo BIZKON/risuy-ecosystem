@@ -78,14 +78,42 @@ def _request(method: str, path: str, *, body: dict | None = None,
 async def create_payment(
     *, amount, currency: str, description: str, return_url: str,
     idempotence_key: str, metadata: dict | None = None, receipt: dict | None = None,
+    save_payment_method: bool = False,
 ) -> dict:
     """Создать платёж. Возвращает dict ЮKassa (id, status, confirmation.confirmation_url).
     capture=true — одностадийный платёж (списание сразу при оплате).
-    receipt — чек 54-ФЗ (опц.): добавляется только если задан (магазин с фискализацией)."""
+    receipt — чек 54-ФЗ (опц.): добавляется только если задан (магазин с фискализацией).
+    save_payment_method=true (Wave 2b) — сохранить способ оплаты для последующих
+    безакцептных автосписаний рекуррента; в ответе/вебхуке придёт payment_method.id."""
     body = {
         "amount": {"value": amount_str(amount), "currency": currency},
         "capture": True,
         "confirmation": {"type": "redirect", "return_url": return_url},
+        "description": description[:128],
+        "metadata": metadata or {},
+    }
+    if receipt is not None:
+        body["receipt"] = receipt
+    if save_payment_method:
+        body["save_payment_method"] = True
+    return await asyncio.to_thread(
+        _request, "POST", "/payments", body=body, idempotence_key=idempotence_key
+    )
+
+
+async def create_recurrent_payment(
+    *, amount, currency: str, description: str, payment_method_id: str,
+    idempotence_key: str, metadata: dict | None = None, receipt: dict | None = None,
+) -> dict:
+    """Безакцептное автосписание (Wave 2b, ТЗ §5.3): платёж по СОХРАНЁННОМУ способу
+    оплаты, БЕЗ confirmation (без участия покупателя). capture=true — списание сразу.
+    receipt — чек 54-ФЗ обязателен для фискального магазина подписки. Магазин ПЛАТФОРМЫ
+    (creds=None → config.YOOKASSA_*). Idempotence-Key стабилен за период → повторный
+    тик cron не плодит списаний (ЮKassa дедупит ключ 24ч)."""
+    body = {
+        "amount": {"value": amount_str(amount), "currency": currency},
+        "capture": True,
+        "payment_method_id": payment_method_id,
         "description": description[:128],
         "metadata": metadata or {},
     }

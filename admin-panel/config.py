@@ -284,6 +284,18 @@ ORDER_AMOUNT_MAX = 10_000_000_000
 SERVICE_PLAN_PERIOD_DAYS = _opt_int("SERVICE_PLAN_PERIOD_DAYS", 30)  # длина периода, дней
 SERVICE_CURRENCY = "RUB"
 
+# ── Wave 2b: автосписания рекуррента ЮKassa ──────────────────────────────────
+# ⚠️ ФИЧЕ-ФЛАГ: cron безакцептных автосписаний создаёт РЕАЛЬНЫЕ платежи. Дефолт OFF —
+# включать ТОЛЬКО после E2E-прогона на ТЕСТОВОМ магазине 1379463 (на боевом нельзя:
+# реальные списания). Без флага cron спит (лог «renewal off»).
+SERVICE_RENEWAL_ENABLED = _opt_bool("SERVICE_RENEWAL_ENABLED", False)
+# Период тика cron автосписаний, сек (раз в час достаточно — подписки на 30 дней).
+SERVICE_RENEWAL_INTERVAL = _opt_int("SERVICE_RENEWAL_INTERVAL", 3600)
+# Backoff: не повторять списание чаще, чем раз в N часов (после неудачной попытки).
+SERVICE_RENEWAL_RETRY_HOURS = _opt_int("SERVICE_RENEWAL_RETRY_HOURS", 6)
+# Потолок неудачных попыток автосписания → подписка canceled + ops-алерт.
+SERVICE_RENEWAL_MAX_ATTEMPTS = _opt_int("SERVICE_RENEWAL_MAX_ATTEMPTS", 4)
+
 # Каталог тарифов. price/overage — в рублях (int/float); quota — сообщений ИИ/период.
 # payable=False (Индивидуальный) → не оплачивается онлайн, ведёт на заявку (SERVICE_CONTACT_URL).
 # price_display/subtitle/features — маркетинговые строки карточки (как на скринах).

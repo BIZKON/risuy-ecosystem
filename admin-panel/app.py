@@ -14,6 +14,7 @@ POST /reveal (с аудитом) и POST /export-full.csv (gated, отдельн
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -65,9 +66,14 @@ class CSRFError(Exception):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await db.init()
+    # Wave 2b: cron автосписаний рекуррента (за фиче-флагом SERVICE_RENEWAL_ENABLED;
+    # при OFF — таска сразу завершается). Один процесс uvicorn → без дублей.
+    import renewal
+    renewal_task = asyncio.create_task(renewal.run())
     try:
         yield
     finally:
+        renewal_task.cancel()
         await db.close()
 
 
@@ -2638,10 +2644,15 @@ async def subscription_select(
             return_url=return_url, idempotence_key=invoice_id,
             # Wave 4: kind+tenant_id → вебхук активирует subscriptions + начислит
             # included_credits (метеринг по тарифу). invoice_id/plan — для legacy UI.
+            # Wave 2b: email в metadata → сохранится в subscriptions.receipt_email для
+            # чеков 54-ФЗ будущих безакцептных автосписаний.
             metadata={"invoice_id": invoice_id, "plan": plan_key,
                       "kind": "platform_subscription",
-                      "tenant_id": str(session.active_tenant_id) if session.active_tenant_id else ""},
+                      "tenant_id": str(session.active_tenant_id) if session.active_tenant_id else "",
+                      "email": email},
             receipt=_service_receipt(email, description, amount),
+            # Wave 2b: сохранить способ оплаты для автопродления (рекуррент включён).
+            save_payment_method=True,
         )
     except yookassa.YooKassaError:
         import logging
@@ -2780,9 +2791,25 @@ async def yookassa_webhook(request: Request):
                                                            ip=None, user_agent=None)
                     amount_micro = money.rub_to_micro(
                         (payment.get("amount") or {}).get("value") or "0")
+                    # Wave 2b: сохранённый способ оплаты + email для авточеков рекуррента.
+                    pm = payment.get("payment_method") or {}
+                    pm_id = pm.get("id") if pm.get("saved") else None
                     await db.activate_subscription_from_payment(
                         meta["tenant_id"], meta.get("plan") or "", payment_id,
-                        amount_micro, config.SERVICE_PLAN_PERIOD_DAYS)
+                        amount_micro, config.SERVICE_PLAN_PERIOD_DAYS,
+                        payment_method_id=pm_id, receipt_email=meta.get("email") or None)
+            elif meta.get("kind") == "platform_subscription_renewal" and meta.get("tenant_id"):
+                # Wave 2b: безакцептное автосписание (cron) → ПРОДЛЕВАЕТ существующую
+                # подписку (renew_subscription: UPDATE период + included_credits,
+                # идемпотентно по payment_id), НЕ создаёт новую строку.
+                if payment.get("status") == "succeeded" and payment.get("paid"):
+                    amount_micro = money.rub_to_micro(
+                        (payment.get("amount") or {}).get("value") or "0")
+                    sub_id = meta.get("subscription_id")
+                    if sub_id:
+                        await db.renew_subscription(
+                            meta["tenant_id"], sub_id, payment_id,
+                            amount_micro, config.SERVICE_PLAN_PERIOD_DAYS)
             elif payment.get("status") == "succeeded" and payment.get("paid"):
                 # Ветка СЧЁТА ПОДПИСКИ без нового kind (legacy-фолбэк: старые/ручные
                 # платежи, публичный лендинг). Поведение до Wave 4, без изменений.

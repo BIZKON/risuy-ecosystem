@@ -2899,8 +2899,113 @@ async def mark_topup_succeeded(tenant_id, yookassa_payment_id: str, raw: dict) -
             return True
 
 
+# ── Wave 2b: автосписания рекуррента (cron в lifespan панели) ────────────────
+# RLS: subscriptions tenant-scoped → cron перебирает тенантов и сканит каждого
+# ПОСЛЕ set_config('app.tenant_id') (panel_rw без bypassrls). tenants — без RLS.
+async def list_active_tenants_for_renewal() -> list[asyncpg.Record]:
+    """Активные тенанты — кандидаты для скана автосписаний (tenants без RLS)."""
+    async with pool.acquire() as c:
+        return await c.fetch("select id from tenants where status = 'active'")
+
+
+async def list_due_renewals(tenant_id, *, retry_hours: int, max_attempts: int) -> list[asyncpg.Record]:
+    """Подписки тенанта, готовые к автосписанию: живые, с сохранённой картой,
+    истёкший период, не превышен потолок попыток, прошёл backoff после прошлой.
+    Отдаёт цену/код плана и email для чека (всё для безакцептного платежа)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                """
+                select s.id, s.current_period_end, s.receipt_email,
+                       s.yookassa_payment_method_id, s.charge_attempts,
+                       p.code as plan_code, p.price_microrub
+                from subscriptions s join plans p on p.id = s.plan_id
+                where s.tenant_id = $1
+                  and s.status in ('active', 'past_due')
+                  and s.yookassa_payment_method_id is not null
+                  and s.current_period_end <= now()
+                  and s.charge_attempts < $2
+                  and (s.last_charge_attempt_at is null
+                       or s.last_charge_attempt_at < now() - make_interval(hours => $3))
+                order by s.current_period_end
+                """,
+                tenant_id, max_attempts, retry_hours,
+            )
+
+
+async def bump_renewal_attempt(tenant_id, subscription_id) -> None:
+    """Отметить попытку автосписания (backoff + потолок): attempts++, last_attempt=now."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            await c.execute(
+                "update subscriptions set charge_attempts = charge_attempts + 1, "
+                "last_charge_attempt_at = now() where id = $1", subscription_id)
+
+
+async def mark_renewal_failed(tenant_id, subscription_id, *, max_attempts: int) -> bool:
+    """Неуспех автосписания: при достижении потолка попыток → canceled, иначе past_due.
+    Возвращает True, если подписка ушла в canceled (нужен ops-алерт «подписка отменена»)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            row = await c.fetchrow(
+                "update subscriptions set status = "
+                "  case when charge_attempts >= $2 then 'canceled' else 'past_due' end "
+                "where id = $1 returning status", subscription_id, max_attempts)
+    return bool(row and row["status"] == "canceled")
+
+
+async def renew_subscription(tenant_id, subscription_id, yk_payment_id: str,
+                             amount_microrub: int, period_days: int) -> bool:
+    """Успешное автосписание: ПРОДЛЕВАЕТ существующую подписку (UPDATE, НЕ новая строка —
+    в отличие от первичной activate). Идемпотентно по yookassa_payment_id (payments-журнал).
+    Период += period_days от max(текущего конца, now); included_credits начисляются в
+    кошелёк; счётчик попыток сброшен; status=active. Возвращает True — продлено (первый
+    раз); False — платёж уже обработан (повтор вебхука/гонка cron)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            row = await c.fetchrow(
+                "insert into payments (tenant_id, type, yookassa_payment_id, idempotence_key, "
+                "                      amount_microrub, status, captured_at) "
+                "values ($1, 'subscription', $2, $3, $4, 'succeeded', now()) "
+                "on conflict (yookassa_payment_id) do nothing returning id",
+                tenant_id, yk_payment_id, f"renew:{yk_payment_id}", max(int(amount_microrub), 1))
+            if row is None:
+                return False
+            sub = await c.fetchrow(
+                "update subscriptions set status = 'active', charge_attempts = 0, "
+                "  current_period_start = now(), "
+                "  current_period_end = greatest(current_period_end, now()) "
+                "                       + make_interval(days => $2) "
+                "where id = $1 returning plan_id", subscription_id, period_days)
+            if sub is None:
+                return False
+            inc = int(await c.fetchval(
+                "select included_credits_microrub from plans where id = $1", sub["plan_id"]) or 0)
+            if inc > 0:
+                await c.execute(
+                    "select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
+                await c.execute(
+                    "insert into credit_wallets (tenant_id, balance_microrub, updated_at) "
+                    "values ($1, $2, now()) on conflict (tenant_id) do update "
+                    "set balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub, "
+                    "    updated_at = now()", tenant_id, inc)
+            await c.execute(
+                "delete from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tenant_id)
+            await _insert_audit(
+                c, actor="renewal-cron", action="subscription_renewed",
+                detail={"tenant_id": str(tenant_id), "subscription_id": str(subscription_id),
+                        "payment_id": yk_payment_id, "credited_microrub": inc})
+            return True
+
+
 async def activate_subscription_from_payment(
     tenant_id, plan_code: str, yk_payment_id: str, amount_microrub: int, period_days: int,
+    *, payment_method_id: str | None = None, receipt_email: str | None = None,
 ) -> bool:
     """Wave 4: оплата тарифа → активация подписки + начисление included_credits.
 
@@ -2934,9 +3039,10 @@ async def activate_subscription_from_payment(
                 return False                       # уже обработан
             await c.execute(
                 "insert into subscriptions (tenant_id, plan_id, status, "
-                "                           current_period_start, current_period_end) "
-                "values ($1, $2, 'active', now(), now() + make_interval(days => $3))",
-                tenant_id, plan["id"], period_days)
+                "                           current_period_start, current_period_end, "
+                "                           yookassa_payment_method_id, receipt_email) "
+                "values ($1, $2, 'active', now(), now() + make_interval(days => $3), $4, $5)",
+                tenant_id, plan["id"], period_days, payment_method_id, receipt_email)
             await c.execute("update tenants set plan_id = $2 where id = $1", tenant_id, plan["id"])
             inc = int(plan["included_credits_microrub"])
             if inc > 0:
