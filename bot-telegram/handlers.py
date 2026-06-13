@@ -297,7 +297,17 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     if ai_cfg.get("kb_enabled"):
         kb_context = await kb.retrieve_context(user_text, lead_persona)
         user_text = kb.augment(user_text, kb_context)
-    answer, msg_id = await ai.ask_ai(user_text, data.get("ai_parent_id"), ai_cfg)
+    # Wave 5: контекст диалога — историей сообщений (OpenAI-эндпоинт агента серверного
+    # parent_message_id не имеет). Текущее входящее уже залогировано middleware → исключаем
+    # его по message_id, финальным user-turn идёт user_text (возможно с RAG-контекстом).
+    history = await db.get_ai_history(
+        message.from_user.id,
+        exclude_tg_message_id=message.message_id,
+        limit=config.AI_HISTORY_MESSAGES,
+    )
+    answer, msg_id = await ai.ask_ai(
+        user_text, data.get("ai_parent_id"), ai_cfg, history=history
+    )
     if msg_id:
         await state.update_data(ai_parent_id=msg_id)
     # Гонка Лии (§4): ask_liya мог идти до 30с — оператор мог включить паузу за это

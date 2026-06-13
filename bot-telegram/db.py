@@ -902,6 +902,51 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
     }
 
 
+async def get_ai_history(
+    tg_user_id: int, *, exclude_tg_message_id: int | None = None, limit: int = 10
+) -> list[dict]:
+    """Последние ходы диалога лида для контекста OpenAI-эндпоинта агента (Wave 5).
+    Возвращает [{"role": "user"|"assistant", "content": str}] в ХРОНОЛОГИЧЕСКОМ порядке.
+
+    Раньше контекст держал серверный parent_message_id нативного /call; OpenAI-эндпоинт
+    серверной памяти не имеет — историю шлём явно. Маппинг ролей: входящие (direction='in')
+    → user; исходящие Лии/оператора (source in liya|manual) → assistant. Прочие исходящие
+    (воронка/рассылки/системные) — НЕ диалог, не берём.
+
+    Текущее входящее (его уже залогировал LoggingMiddleware ДО хендлера) исключаем по
+    exclude_tg_message_id — его текст (возможно дополненный RAG-контекстом) вызывающий
+    добавит финальным user-turn сам. tenant-scoped через tenant_id() (бот — owner, RLS
+    обходит, но фильтруем явно). Сбой/нет истории → [] (Лия отвечает без контекста, не
+    молчит из-за БД)."""
+    if limit <= 0:
+        return []
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                """
+                select direction, source, text
+                from messages
+                where tg_user_id = $1 and tenant_id = $2
+                  and kind = 'text' and text is not null and text <> ''
+                  and (direction = 'in' or source in ('liya', 'manual'))
+                  and ($3::bigint is null or not (direction = 'in' and tg_message_id = $3))
+                order by id desc
+                limit $4
+                """,
+                tg_user_id, tenant_id(), exclude_tg_message_id, limit,
+            )
+    except Exception:  # noqa: BLE001 — контекст не должен ломать авто-ответ Лии
+        logging.getLogger(__name__).warning(
+            "Не удалось прочитать историю диалога ИИ (tg=%s)", tg_user_id, exc_info=True)
+        return []
+    # rows идут от новых к старым (id desc) → разворачиваем в хронологию.
+    out: list[dict] = []
+    for r in reversed(rows):
+        role = "user" if r["direction"] == "in" else "assistant"
+        out.append({"role": role, "content": r["text"]})
+    return out
+
+
 # ── Мультиплекс (Wave 3, ТЗ §5.4): реестр тенантов + секреты + настройки ──────
 async def list_active_tenants() -> list[dict]:
     """Живые тенанты для реестра мультиплекса (бот — owner, RLS обходит)."""

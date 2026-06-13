@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-smoke/
 venv/
 
 # Node / фронтенд (появится позже)

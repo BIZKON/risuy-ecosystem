@@ -88,7 +88,14 @@ async def t_text(message: Message, bot: Bot) -> None:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:  # noqa: BLE001
         pass
-    answer, _msg_id = await ai.ask_ai(message.text, None, cfg)
+    # Wave 5: контекст диалога тенанта — историей сообщений (tenant-scoped через contextvar
+    # tenant_id, поставленный middleware). Текущее входящее исключаем по message_id.
+    history = await db.get_ai_history(
+        message.from_user.id,
+        exclude_tg_message_id=message.message_id,
+        limit=config.AI_HISTORY_MESSAGES,
+    )
+    answer, _msg_id = await ai.ask_ai(message.text, None, cfg, history=history)
     await messaging.send_text(bot, message.from_user.id, answer, source="liya")
 
 

@@ -95,6 +95,87 @@ async def ask_liya(
     return answer, msg_id
 
 
+# ── Wave 5: cloud-ai агент через OpenAI-совместимый эндпоинт (промпт из ПАНЕЛИ) ──
+# Нативный /call (выше) берёт промпт ЖЁСТКО из настроек агента Timeweb и не принимает
+# его per-request. OpenAI-эндпоинт /cloud-ai/agents/{id}/v1/chat/completions ПРИНИМАЕТ
+# messages[] с role:"system" → промпт из app_settings (резолвит get_ai_overrides:
+# персона>канал>глобал) доезжает до агента В КАЖДОМ запросе, без PATCH/редеплоя.
+# Контекст диалога раньше держал серверный parent_message_id — теперь он собирается
+# историей сообщений (см. ask_ai/history). Метеринг НЕ меняется: эндпоинт бьёт в ТОГО
+# ЖЕ агента → его used_tokens растёт тем же счётчиком, что читает снапшот-воркер;
+# per-call usage из ответа НЕ списываем (иначе двойной счёт со снапшотами — DECISIONS).
+_OPENAI_TIMEOUT = aiohttp.ClientTimeout(total=60)  # система-промпт ~20k + thinking-модель → щедрее /call
+
+
+def _build_chat_messages(
+    system_prompt: str | None, history: list[dict] | None, text: str
+) -> list[dict]:
+    """Собирает messages[] для OpenAI-эндпоинта: [system?] + история + текущий вопрос.
+    history — список {"role": "user"|"assistant", "content": str} (готовит get_ai_history).
+    Финальный user-turn — text КАК ЕСТЬ (он мог быть дополнен RAG-контекстом в handlers,
+    поэтому берём аргумент, а не последнюю запись истории)."""
+    messages: list[dict] = []
+    sp = (system_prompt or "").strip()
+    if sp:
+        messages.append({"role": "system", "content": sp})
+    for h in history or []:
+        content = (h.get("content") or "").strip()
+        role = h.get("role")
+        if content and role in ("user", "assistant"):
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": text})
+    return messages
+
+
+async def ask_agent_openai(
+    messages: list[dict], *, agent_id: str | None = None
+) -> str | None:
+    """Зовёт cloud-ai агента через OpenAI-совместимый /chat/completions с messages[]
+    (вкл. role:"system" из панели). Возвращает ТЕКСТ ответа либо None при ЖЁСТКОМ сбое
+    (не настроен / сеть / не-200 / пустой ответ) — тогда вызывающий (ask_ai) фолбэчит
+    на нативный /call, чтобы Лия не молчала (§8.7). Токен — config.TIMEWEB_AI_TOKEN (env,
+    секрет), хост — config.TIMEWEB_AI_OPENAI_BASE."""
+    eff_agent = (agent_id or "").strip() or config.AGENT_ID
+    if not eff_agent or not config.TIMEWEB_AI_TOKEN:
+        logger.warning("AI(agent-openai) не настроен: пуст agent_id или TIMEWEB_AI_TOKEN")
+        return None
+
+    base = config.TIMEWEB_AI_OPENAI_BASE.rstrip("/")
+    url = f"{base}/cloud-ai/agents/{eff_agent}/v1/chat/completions"
+    headers = {
+        "authorization": f"Bearer {config.TIMEWEB_AI_TOKEN}",
+        "content-type": "application/json",
+    }
+    # model в этом эндпоинте игнорируется (берётся модель агента), но шлём непустой —
+    # для совместимости со строгими OpenAI-парсерами. stream=False — ждём полный ответ.
+    payload = {"model": "tw-cloud-ai", "messages": messages, "stream": False}
+
+    try:
+        async with aiohttp.ClientSession(timeout=_OPENAI_TIMEOUT) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                status = resp.status
+                raw = await resp.text()
+    except Exception as e:  # таймаут, сеть, DNS и т.п.
+        logger.error("AI(agent-openai) запрос не удался: %s", e)
+        return None
+
+    if status != 200:
+        logger.error("AI(agent-openai) HTTP %s: %s", status, raw[:300])
+        return None
+
+    try:
+        data = json.loads(raw)
+        answer = (data["choices"][0]["message"]["content"] or "").strip()
+    except Exception as e:  # не-JSON / неожиданная схема ответа
+        logger.error("AI(agent-openai) ответ не разобран: %s | %s", e, raw[:200])
+        return None
+
+    if not answer:
+        logger.error("AI(agent-openai) пустой ответ: %s", raw[:200])
+        return None
+    return answer
+
+
 # ── Бэкенд «gateway»: Timeweb AI Gateway (OpenAI-совместимый, прямой вызов модели) ──
 _GATEWAY_DEFAULT_BASE = "https://api.timeweb.ai/v1"
 _DEFAULT_MODEL = "deepseek-v4-pro"
@@ -254,10 +335,18 @@ async def _capture_gateway_usage(meta: dict) -> None:
         logger.warning("Метеринг gateway-вызова не записан (model=%s)", model, exc_info=True)
 
 
-async def ask_ai(text: str, parent_message_id: str | None, cfg: dict) -> tuple[str, str | None]:
+async def ask_ai(
+    text: str, parent_message_id: str | None, cfg: dict,
+    *, history: list[dict] | None = None,
+) -> tuple[str, str | None]:
     """Диспетчер бэкенда ИИ по cfg['backend'] (из app_settings — db.get_ai_overrides).
-    Возвращает (ответ, msg_id|None). Для gateway msg_id=None (серверного контекста нет);
-    для cloud_ai — id ответа агента (хранится в FSM как parent_message_id след. запроса)."""
+    Возвращает (ответ, msg_id|None). msg_id всегда None для gateway и cloud_ai-OpenAI
+    (серверного parent-контекста нет — контекст несёт history); ненулевой msg_id может
+    вернуть лишь нативный /call-фолбэк (он сохранится в FSM, но OpenAI-путь его игнорит).
+
+    history — последние ходы диалога [{"role","content"}] (готовит db.get_ai_history);
+    нужны cloud_ai-OpenAI вместо серверного parent_message_id. gateway однооборотен —
+    history не использует."""
     if cfg.get("backend") == "gateway":
         answer, meta = await ask_gateway(
             text, base_url=cfg.get("gateway_base_url"), model=cfg.get("model"),
@@ -269,6 +358,16 @@ async def ask_ai(text: str, parent_message_id: str | None, cfg: dict) -> tuple[s
             # ссылка держится в _capture_tasks, чтобы GC не съел до завершения.
             schedule_gateway_capture(meta)
         return answer, None
+
+    # cloud_ai (Wave 5): OpenAI-эндпоинт агента с role:"system" из панели + история.
+    messages = _build_chat_messages(cfg.get("system_prompt"), history, text)
+    answer = await ask_agent_openai(messages, agent_id=cfg.get("agent_id"))
+    if answer is not None:
+        return answer, None
+    # Жёсткий сбой OpenAI-эндпоинта (не настроен/сеть/не-200) → фолбэк на нативный /call:
+    # промпт из панели теряется (агент ответит по своему промпту Timeweb), НО Лия не молчит
+    # (§8.7). Нативный путь сам отдаст мягкий текст-фолбэк, если и он недоступен.
+    logger.warning("AI(agent-openai) недоступен — фолбэк на нативный /call (промпт панели не применён)")
     return await ask_liya(
         text, parent_message_id,
         agent_id=cfg.get("agent_id"), fallback=cfg.get("fallback"),

@@ -47,6 +47,18 @@ TIMEWEB_AI_TOKEN = os.environ.get("TIMEWEB_AI_TOKEN", "")
 # base URL и модель берутся из app_settings (панель), ключ — секрет, только из env.
 AI_GATEWAY_TOKEN = os.environ.get("AI_GATEWAY_TOKEN", "")
 
+# ── Wave 5: промпт ИИ-сотрудника из ПАНЕЛИ через OpenAI-совместимый эндпоинт агента ──
+# База OpenAI-совместимого API cloud-ai агента (ОТДЕЛЬНЫЙ хост от management-API!).
+# Нативный /call (api.timeweb.cloud) НЕ принимает промпт per-request — берёт его жёстко
+# из настроек агента. OpenAI-эндпоинт /cloud-ai/agents/{id}/v1/chat/completions ПРИНИМАЕТ
+# messages[] с role:"system" и переопределяет промпт В КАЖДОМ запросе → промпт из панели
+# (app_settings) доезжает до Лии без PATCH/редеплоя. Док Timeweb: хост agent.timeweb.cloud
+# (тот же токен TIMEWEB_AI_TOKEN). На жёсткий сбой ai.ask_ai фолбэчит на нативный /call
+# (Школа не молчит, §8.7) — поэтому смена хоста env-настраиваема без правки кода.
+TIMEWEB_AI_OPENAI_BASE = os.environ.get(
+    "TIMEWEB_AI_OPENAI_BASE", "https://agent.timeweb.cloud/api/v1"
+)
+
 # ── RF-RAG: эмбеддер TEI (self-host, intfloat/multilingual-e5-base, 768-dim) ──
 # URL нашего TEI-сервиса на VM (напр. http://10.0.0.5:8080 во внутренней сети или
 # http://<vm-ip>:8080 за фаерволом). Пусто → RAG выключен полностью: retrieval не
@@ -115,6 +127,11 @@ METERING_INTERVAL = _env_int("METERING_INTERVAL", 300, minimum=30)
 AI_OUT_TOKENS_SHARE = _env_float("AI_OUT_TOKENS_SHARE", 0.5)
 # База management-API Timeweb (снапшоты used_tokens агентов; тот же токен TIMEWEB_AI_TOKEN).
 TIMEWEB_API_BASE = os.environ.get("TIMEWEB_API_BASE", "https://api.timeweb.cloud/api/v1")
+
+# Wave 5: сколько последних сообщений диалога подмешивать как историю в OpenAI-эндпоинт
+# агента (контекст диалога, который раньше держал серверный parent_message_id нативного
+# /call). 0 → без истории (только system-промпт + текущий вопрос). Зажат снизу 0.
+AI_HISTORY_MESSAGES = _env_int("AI_HISTORY_MESSAGES", 10, minimum=0)
 
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
