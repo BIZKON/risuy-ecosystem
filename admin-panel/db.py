@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -29,6 +30,32 @@ import asyncpg
 import config
 
 pool: asyncpg.Pool | None = None
+
+# ── Харденинг №2: tenant-контекст сессии для RLS на leads/messages/outbox ──────
+# panel_rw без bypassrls видит строки tenant-scoped таблиц ТОЛЬКО после
+# set_config('app.tenant_id'). Раньше его ставили поштучно (деньги/секреты). Чтобы под
+# RLS leads/messages НЕ пропустить ни одного запроса (любой непокрытый → пустой экран),
+# ставим app.tenant_id ЦЕНТРАЛИЗОВАННО на КАЖДОМ acquire пула из contextvar активного
+# тенанта сессии (его кладёт require_session per-request). Явные set_config(..., true)
+# в денежных функциях/скане платформы перекрывают это внутри своей транзакции — ок.
+# Бот ходит owner-ролью и RLS обходит (§8.7), его этот хук не касается.
+_active_tenant: contextvars.ContextVar = contextvars.ContextVar("panel_active_tenant", default=None)
+
+
+def set_active_tenant(tenant_id) -> None:
+    """Запоминает активный тенант запроса (зовёт require_session). Дальше каждый acquire
+    пула проставит его в app.tenant_id (RLS). None → не ставим (GUC после reset пуст →
+    current_setting=NULL → RLS отдаёт 0 строк без ошибки касту '' → uuid)."""
+    _active_tenant.set(str(tenant_id) if tenant_id else None)
+
+
+async def _apply_tenant_guc(conn: asyncpg.Connection) -> None:
+    """pool setup: ставит app.tenant_id из contextvar на каждый чек-аут соединения.
+    На release asyncpg делает RESET ALL → GUC очищается, утечки тенанта между запросами
+    нет. Пусто/None → НЕ ставим (после reset уже NULL; '' сломал бы каст ::uuid в политике)."""
+    tid = _active_tenant.get()
+    if tid:
+        await conn.execute("select set_config('app.tenant_id', $1, false)", tid)
 
 # --- Allow-list'ы для динамики в SQL (никогда не подставляем имя/направление сырьём) ---
 # Канон значений — в config (единый источник, совпадает со схемой/ботом). Здесь —
@@ -64,7 +91,8 @@ DEFAULT_SORT = "created_desc"
 # --------------------------------------------------------------------------- #
 async def init() -> None:
     global pool
-    pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=5)
+    pool = await asyncpg.create_pool(
+        config.DATABASE_URL, min_size=1, max_size=5, setup=_apply_tenant_guc)
 
 
 async def close() -> None:
@@ -2398,13 +2426,18 @@ async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
-                "select id, lead_id, status from orders where provider_payment_id = $1 for update",
+                "select id, lead_id, status, tenant_id from orders "
+                "where provider_payment_id = $1 for update",
                 payment_id,
             )
             if row is None:
                 return None
             if row["status"] == "paid":
                 return row  # повторный вебхук — no-op
+            # Вебхук без сессии → centralized-хук app.tenant_id не поставил. orders не под RLS,
+            # тенант берём из заказа (== тенант лида) и ставим ЯВНО — иначе RLS на leads/outbox
+            # отверг бы конвертацию (0 строк) и вставку «спасибо». tenant_id заказа NOT NULL (Wave 3d).
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(row["tenant_id"]))
             upd = await c.fetchrow(
                 """
                 update orders

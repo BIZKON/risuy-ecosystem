@@ -191,6 +191,10 @@ async def require_session(request: Request) -> auth.Session:
     session = await auth.load_session(sid)
     if session is None:
         raise AuthRedirect(_safe_next(request.url.path))
+    # Харденинг №2: фиксируем активный тенант запроса → каждый acquire пула проставит его
+    # в app.tenant_id (RLS на leads/messages/outbox). Запрос и хендлеры — одна asyncio-задача,
+    # contextvar виден сквозь Depends. Маршруты без сессии (login/health/webhook) сюда не идут.
+    db.set_active_tenant(session.active_tenant_id)
     return session
 
 
