@@ -73,8 +73,11 @@ async def main() -> None:
 
     # ── 2. format_card ──
     print("2. format_card:")
-    card = escalation.format_card({"name": "Анна", "phone": "89211234567", "product": "В Академию Репина"}, tg_user_id=TG)
+    card = escalation.format_card({"name": "Анна", "phone": "89211234567", "product": "В Академию Репина",
+                                   "reason": "qualified", "intent": "enroll"}, tg_user_id=TG)
     check("карточка содержит имя/телефон/курс/tg_id", all(s in card for s in ("Анна", "89211234567", "В Академию Репина", str(TG))))
+    check("enum-коды переведены на русский (qualified/enroll)",
+          "квалифицирован" in card and "запись на курс" in card and "qualified" not in card and "enroll" not in card, repr(card))
     check("карточка plain (без HTML-тегов)", "<" not in card)
     card_empty = escalation.format_card({}, tg_user_id=TG, raw="raw-signal")
     check("пустой payload → сырой сигнал + tg_id", "raw-signal" in card_empty and str(TG) in card_empty)

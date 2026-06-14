@@ -32,9 +32,25 @@ _MARKER_FRAG_RE = re.compile(r"\[\[/?ESCALATE(?:\]\]?)?.*", re.DOTALL | re.IGNOR
 # Поля карточки: (ключ в json, подпись). Порядок = порядок в карточке.
 _FIELDS = [
     ("reason", "Причина"), ("name", "Имя"), ("phone", "Телефон"),
-    ("intent", "Интент"), ("product", "Курс"), ("goal", "Цель"),
+    ("intent", "Тип запроса"), ("product", "Курс"), ("goal", "Цель"),
     ("summary", "Итог"), ("next_step", "Менеджеру"),
 ]
+# Русские подписи для машинных enum-кодов (Лия ставит коды; менеджер видит русский).
+# Коды стабильны для логики/фильтров — переводим ТОЛЬКО на показе. Неизвестный код → как есть.
+_VALUE_RU = {
+    "reason": {
+        "qualified": "квалифицирован (готов к записи)",
+        "client_request": "просит менеджера / живого человека",
+        "missing_data": "нужны данные/уточнение у менеджера",
+    },
+    "intent": {
+        "enroll": "запись на курс",
+        "extend": "продление / заморозка / перенос",
+        "schedule": "расписание",
+        "payment": "оплата",
+        "other": "другое",
+    },
+}
 
 
 def parse_escalation(text: str) -> tuple[str, dict | None]:
@@ -78,13 +94,17 @@ def format_card(payload: dict, *, tg_user_id: int, raw: str | None = None) -> st
             # Нормализуем пробелы/переводы строк: payload из LLM → клиент не должен через \n
             # подделать визуальные строки-«поля» в чате менеджеров (ревью A3, disputed-харднинг).
             clean_v = re.sub(r"\s+", " ", str(v)).strip()[:300]
+            # Машинные enum-коды (reason/intent) → русская подпись для менеджера.
+            ru = _VALUE_RU.get(key)
+            if ru:
+                clean_v = ru.get(clean_v.lower(), clean_v)
             lines.append(f"{label}: {clean_v}")
             shown = True
     if not shown:
         lines.append("(данные лида не разобраны — сырой сигнал ниже)")
         if raw:
             lines.append(raw[:500])
-    lines.append(f"tg_user_id: {tg_user_id}")
+    lines.append(f"Telegram ID клиента: {tg_user_id}")
     return "\n".join(lines)[:3500]
 
 
