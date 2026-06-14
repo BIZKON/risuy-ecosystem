@@ -9,33 +9,117 @@
 
 {% block content %}
 <section class="auth">
-  <div class="auth__card">
-    <h1 class="auth__title">Панель лидов</h1>
-    <p class="auth__sub">Школа Лесова · внутренний доступ</p>
+  <div class="auth-card" data-tab="{{ tab }}">
 
-    {{ flash(error, 'error') }}
+    {# ── Левая акцентная панель: приглашение + переключение вкладок ── #}
+    <aside class="auth-card__aside">
+      <div class="auth-aside__brand">ИИ‑Агент&nbsp;Про</div>
+      {% if signup_enabled %}
+      <div class="auth-aside__invite auth-aside__to-signup">
+        <h2>Впервые здесь?</h2>
+        <p>Подключим ИИ‑сотрудника для вашего бизнеса за пару минут — отвечает клиентам, греет лиды, не спит.</p>
+        <a class="btn-ghost" href="/login?tab=signup" data-auth-go="signup">Регистрация</a>
+      </div>
+      <div class="auth-aside__invite auth-aside__to-signin">
+        <h2>С возвращением!</h2>
+        <p>Войдите в кабинет, чтобы управлять ИИ‑сотрудником, диалогами и рассылками.</p>
+        <a class="btn-ghost" href="/login?tab=signin" data-auth-go="signin">Войти</a>
+      </div>
+      {% else %}
+      <div class="auth-aside__invite">
+        <h2>Кабинет клиента</h2>
+        <p>Управление ИИ‑сотрудником, диалогами, продуктами и рассылками вашего бизнеса.</p>
+      </div>
+      {% endif %}
+    </aside>
 
-    <form class="auth__form" method="post" action="/login" autocomplete="off" novalidate>
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      {# Куда вернуть после входа (заполняется сервером, deny-by-default → '/'). #}
-      <input type="hidden" name="next" value="{{ next|default('/', true) }}">
+    {# ── Правая панель: формы ── #}
+    <div class="auth-card__main">
+      {{ flash(error, 'error') }}
+      {{ flash(social_error, 'error') }}
+      {% if registered_ok %}{{ flash('Аккаунт создан — добро пожаловать!', 'info') }}{% endif %}
 
-      <label class="field">
-        <span class="field__label">Логин</span>
-        <input class="field__input" type="text" name="username" autocomplete="username"
-               autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
-      </label>
+      {# ВХОД #}
+      <div class="auth-pane auth-pane--signin">
+        <h1 class="auth__title">Вход в кабинет</h1>
+        <form class="auth__form" method="post" action="/login" autocomplete="off" novalidate>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="next" value="{{ next|default('/', true) }}">
+          <label class="field">
+            <span class="field__label">{% if signup_enabled %}Email или логин{% else %}Логин{% endif %}</span>
+            <input class="field__input" type="text" name="username" autocomplete="username"
+                   autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+          </label>
+          <label class="field">
+            <span class="field__label">Пароль</span>
+            <input class="field__input" type="password" name="password" autocomplete="current-password" required>
+          </label>
+          <button class="btn btn--primary btn--block" type="submit">Войти</button>
+        </form>
+        {% if signup_enabled %}
+        <p class="auth-switch">Нет аккаунта?
+          <a class="linklike" href="/login?tab=signup" data-auth-go="signup">Зарегистрироваться</a></p>
+        {% else %}
+        <p class="auth__note">Доступ только для оператора ПДн. Все входы фиксируются в журнале.</p>
+        {% endif %}
+      </div>
 
-      <label class="field">
-        <span class="field__label">Пароль</span>
-        <input class="field__input" type="password" name="password"
-               autocomplete="current-password" required>
-      </label>
+      {# РЕГИСТРАЦИЯ #}
+      {% if signup_enabled %}
+      <div class="auth-pane auth-pane--signup">
+        <h1 class="auth__title">Регистрация</h1>
+        {{ flash(signup_error, 'error') }}
+        <form class="auth__form" method="post" action="/signup/register" autocomplete="on" novalidate>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="field">
+            <span class="field__label">Email</span>
+            <input class="field__input" type="email" name="email" autocomplete="email"
+                   autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          </label>
+          <label class="field">
+            <span class="field__label">Пароль</span>
+            <input class="field__input" type="password" name="password" autocomplete="new-password"
+                   minlength="{{ signup_password_min }}" required>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="agree_oferta" value="on" required>
+            <span>Принимаю <a href="{{ service_site_url }}/oferta.html" target="_blank" rel="noopener">оферту</a></span>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="agree_pdn" value="on" required>
+            <span>Согласен на <a href="{{ service_site_url }}/privacy.html" target="_blank" rel="noopener">обработку персональных данных</a></span>
+          </label>
+          <button class="btn btn--primary btn--block" type="submit">Создать кабинет</button>
+        </form>
+        <p class="auth-switch">Уже есть аккаунт?
+          <a class="linklike" href="/login?tab=signin" data-auth-go="signin">Войти</a></p>
+      </div>
+      {% endif %}
 
-      <button class="btn btn--primary btn--block" type="submit">Войти</button>
-    </form>
-
-    <p class="auth__note">Доступ только для оператора ПДн. Все входы фиксируются в журнале.</p>
+      {# Соц-вход (общий для обеих вкладок) — только при включённых провайдерах #}
+      {% if tg_enabled or vk_enabled %}
+      <div class="auth-sep"><span>Или быстрее через</span></div>
+      <div class="auth-social">
+        {% if vk_enabled %}
+        <a class="social-btn social-btn--vk" href="/auth/vk/start" rel="nofollow">
+          <span class="social-btn__mark">VK</span> ВКонтакте</a>
+        {% endif %}
+        {% if tg_enabled %}
+        {# Telegram Login Widget: грузится из telegram.org (CSP script-src), кнопка = iframe
+           oauth.telegram.org (CSP frame-src). data-auth-url → редирект на наш callback (без inline-JS). #}
+        <div class="social-btn social-btn--tg">
+          <script async src="https://telegram.org/js/telegram-widget.js?22"
+                  data-telegram-login="{{ tg_bot_username }}" data-size="large" data-radius="8"
+                  data-auth-url="{{ tg_auth_url }}" data-request-access="write"></script>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
   </div>
+
+  <p class="auth-foot">Данные ПДн под защитой 152‑ФЗ · все входы фиксируются в журнале</p>
 </section>
+
+{% if signup_enabled %}<script src="/static/auth.js?v={{ asset_version }}" defer></script>{% endif %}
 {% endblock %}

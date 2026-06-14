@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import BadSignature, URLSafeSerializer, URLSafeTimedSerializer
 
 import config
 import db
@@ -199,6 +199,28 @@ async def apply_tarpit(account: str, *, bypass: bool) -> None:
         await asyncio.sleep(delay)
 
 
+async def signup_tarpit_and_count(account: str) -> None:
+    """Тарпит ПУБЛИЧНОЙ регистрации (анти-абьюз self-serve): спим по НАКОПЛЕННОМУ счётчику
+    ЭТОГО ключа (per-IP), затем инкрементим его — каждая следующая регистрация с того же IP
+    медленнее (экспонента до _TARPIT_MAX_SECONDS). БЕЗ глобального ключа: массовая регистрация
+    НЕ должна деградировать вход всем операторам (в отличие от login-тарпита). Сбросов нет —
+    счётчик копится (admin_login_throttle, отдельное пространство ключей 'signup:<ip>').
+    NB: это лишь brake; жёсткий лимит/капча на число тенантов — Фаза 2 (ревью)."""
+    async with db.pool.acquire() as c:
+        fails = await c.fetchval(
+            "select fail_count from admin_login_throttle where account = $1", account
+        )
+    delay = _delay_for(fails, _TARPIT_FREE_FAILS)
+    if delay > 0:
+        await asyncio.sleep(delay)
+    async with db.pool.acquire() as c:
+        await c.execute(
+            "insert into admin_login_throttle (account, fail_count, locked_until) values ($1, 1, null) "
+            "on conflict (account) do update set fail_count = admin_login_throttle.fail_count + 1",
+            account,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Серверные сессии (§3.2). Один активный sid на оператора (single-session):
 # при логине ревокаем прежние строки актора и пишем новую (ротация → анти-fixation).
@@ -218,6 +240,17 @@ class Session:
     # None = тенант не выбран (легаси-сессии до миграции) — маршруты резолвят дефолт.
     active_tenant_id: str | None = None
     active_tenant_name: str | None = None
+    # Статус активного тенанта (tenants.status). 'provisioning' → кабинет показывает
+    # баннер «ИИ-сотрудник готовится» (self-serve клиент до привязки бота владельцем).
+    active_tenant_status: str | None = None
+
+    @property
+    def is_platform(self) -> bool:
+        """Платформенный супер-админ = ТОЛЬКО env-админ (config.ADMIN_USERNAME), живущий ВНЕ
+        admin_users. Гейтит ПЛАТФОРМЕННЫЕ поверхности: /team (все учётки), /tenants-switch на
+        любой тенант, сводку/экономику по всем клиентам. ⚠️ НЕ отождествлять с role=='admin':
+        клиент-владелец своего кабинета (self-serve) платформенным супером НЕ является."""
+        return self.actor == config.ADMIN_USERNAME
 
 
 def _csrf_for_sid(sid: str) -> str:
@@ -244,10 +277,11 @@ async def create_session(actor: str, role: str = "operator") -> str:
                 "update admin_sessions set revoked = true where actor = $1 and revoked = false",
                 actor,
             )
-            # Активный тенант по умолчанию: env-админ — первый живой; оператор —
-            # первый по memberships; нет доступов → NULL (маршруты резолвят/покажут заглушку).
-            eff_role = "admin" if actor == config.ADMIN_USERNAME else role
-            if eff_role == "admin":
+            # Активный тенант по умолчанию: ТОЛЬКО env-админ (платформенный супер) видит
+            # «первый живой» тенант; ВСЕ БД-юзеры — операторы И клиенты-владельцы (role='admin'
+            # своего кабинета) — строго по memberships. Иначе клиент-admin получил бы «первый
+            # глобальный» = ЧУЖОЙ тенант (утечка между клиентами при self-serve регистрации).
+            if actor == config.ADMIN_USERNAME:
                 default_tenant = await c.fetchval(
                     "select id from tenants where status in ('provisioning','active') "
                     "order by created_at limit 1"
@@ -283,7 +317,8 @@ async def load_session(sid: str) -> Session | None:
             row = await c.fetchrow(
                 """
                 select s.sid, s.actor, s.last_seen, s.expires_at, s.revoked, s.role,
-                       s.search_phone_hash, s.active_tenant_id, t.name as active_tenant_name
+                       s.search_phone_hash, s.active_tenant_id,
+                       t.name as active_tenant_name, t.status as active_tenant_status
                 from admin_sessions s
                 left join tenants t on t.id = s.active_tenant_id
                 where s.sid = $1
@@ -313,6 +348,7 @@ async def load_session(sid: str) -> Session | None:
                 search_phone_hash=row["search_phone_hash"],
                 active_tenant_id=str(row["active_tenant_id"]) if row["active_tenant_id"] else None,
                 active_tenant_name=row["active_tenant_name"],
+                active_tenant_status=row["active_tenant_status"],
             )
 
 
@@ -417,3 +453,57 @@ def verify_login_csrf(cookie_value: str | None, submitted: str | None) -> bool:
 
 def clear_login_csrf(response) -> None:
     response.delete_cookie(key=LOGIN_CSRF_COOKIE, path="/")
+
+
+# --- Telegram Login Widget: проверка подписи payload (вход через Telegram) ---
+# Виджет (telegram.org/js/telegram-widget.js) после авторизации отдаёт поля
+# id/first_name/last_name/username/photo_url/auth_date/hash. Подлинность: HMAC-SHA256
+# по data_check_string (все поля КРОМЕ hash, "k=v" через \n, отсортированы по ключу) с
+# ключом = sha256(bot_token). Сверка constant-time + свежесть auth_date (анти-replay
+# перехваченного callback-URL). Алгоритм — официальный (core.telegram.org/widgets/login).
+_TG_AUTH_MAX_AGE = 300  # сек: интерактивный вход доезжает за секунды; окно сужает replay
+
+# Anti-CSRF / anti-replay state для Telegram-входа (паритет с ВК): на /login GET ставим
+# подписанную cookie со state, в data-auth-url виджета кладём ?st=<state>; callback сверяет
+# (constant-time) и УДАЛЯЕТ cookie (одноразово). Закрывает login-CSRF (форс-логин жертвы в
+# чужой аккаунт) и replay перехваченного callback-URL без соответствующей cookie (ревью).
+_TG_STATE_MAX_AGE = 600
+_tg_state_signer = URLSafeTimedSerializer(config.SESSION_SECRET, salt="tg-oauth-state")
+
+
+def seal_tg_state(state: str) -> str:
+    return _tg_state_signer.dumps(state)
+
+
+def open_tg_state(sealed: str | None) -> str | None:
+    if not sealed:
+        return None
+    try:
+        val = _tg_state_signer.loads(sealed, max_age=_TG_STATE_MAX_AGE)
+    except (BadSignature, Exception):  # noqa: BLE001 — подделка/просрочка → None
+        return None
+    return val if isinstance(val, str) else None
+
+
+def verify_telegram_login(data: dict[str, str]) -> dict[str, str] | None:
+    """Проверка payload Telegram Login Widget → провалидированные поля или None.
+    `data` ДОЛЖЕН содержать ТОЛЬКО поля от Telegram (id/…/auth_date/hash), без посторонних
+    ключей (иначе data_check_string разойдётся). Требует config.TELEGRAM_BOT_TOKEN."""
+    token = config.TELEGRAM_BOT_TOKEN
+    received = (data or {}).get("hash")
+    if not token or not received:
+        return None
+    pairs = sorted(f"{k}={v}" for k, v in data.items() if k != "hash")
+    data_check_string = "\n".join(pairs)
+    secret_key = hashlib.sha256(token.encode()).digest()
+    computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(computed, received):
+        return None
+    try:
+        auth_date = int(data.get("auth_date", "0"))
+    except (TypeError, ValueError):
+        return None
+    age = datetime.now(timezone.utc).timestamp() - auth_date
+    if abs(age) > _TG_AUTH_MAX_AGE:   # просрочен ИЛИ из будущего (скос часов) → отказ
+        return None
+    return data

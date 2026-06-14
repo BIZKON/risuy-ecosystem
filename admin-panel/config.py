@@ -331,6 +331,36 @@ SERVICE_CONTACT_URL = os.environ.get("SERVICE_CONTACT_URL", "")
 # ошибок ПУБЛИЧНОЙ формы оплаты /service/subscribe (форма живёт на сайте, обрабатывает панель).
 SERVICE_SITE_URL = os.environ.get("SERVICE_SITE_URL", "https://info.pro-agent-ai.ru").rstrip("/")
 
+# --- Парадная «ИИ-Агент Про»: публичная self-serve регистрация + соц-вход (Фаза 1) ---
+# Все флаги OFF по умолчанию → панель ведёт себя как раньше (виден только ребренд /login).
+# PUBLIC_SIGNUP_ENABLED гейтит ВСЮ публичную поверхность: /signup/*, /auth/*, блок регистрации
+# и соц-кнопки в /login. Включает владелец ПОСЛЕ owner-настройки (см. handoff-чеклист).
+PUBLIC_SIGNUP_ENABLED = _opt_bool("PUBLIC_SIGNUP_ENABLED", False)
+
+# Telegram Login Widget: HMAC-проверка payload требует БОЕВОЙ токен бота (тот же, что у бота)
+# в env ПАНЕЛИ + username бота (для атрибута data-telegram-login). Токен опционален, пока
+# вход через ТГ не включён. @BotFather /setdomain = домен панели — иначе виджет не отрисуется.
+OAUTH_TELEGRAM_ENABLED = _opt_bool("OAUTH_TELEGRAM_ENABLED", False)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+if OAUTH_TELEGRAM_ENABLED and not (TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_USERNAME):
+    raise RuntimeError("OAUTH_TELEGRAM_ENABLED=1 требует TELEGRAM_BOT_TOKEN и TELEGRAM_BOT_USERNAME")
+
+# ВК ID (id.vk.com) OAuth2 + PKCE: client_id/secret выдаёт владелец (ВК-приложение). Пусто → OFF.
+OAUTH_VK_ENABLED = _opt_bool("OAUTH_VK_ENABLED", False)
+VK_CLIENT_ID = os.environ.get("VK_CLIENT_ID", "")
+VK_CLIENT_SECRET = os.environ.get("VK_CLIENT_SECRET", "")
+if OAUTH_VK_ENABLED and not (VK_CLIENT_ID and VK_CLIENT_SECRET):
+    raise RuntimeError("OAUTH_VK_ENABLED=1 требует VK_CLIENT_ID и VK_CLIENT_SECRET")
+
+# Публичный базовый URL панели (для OAuth redirect_uri и абсолютных ссылок). Пусто → derive
+# из заголовков запроса (X-Forwarded-Proto/Host). Задаётся владельцем при включении ВК.
+PANEL_PUBLIC_BASE_URL = os.environ.get("PANEL_PUBLIC_BASE_URL", "").rstrip("/")
+
+# Параметры клиентских паролей при self-serve регистрации (зеркалит TEAM_PASSWORD_*).
+SIGNUP_PASSWORD_MIN = _opt_int("SIGNUP_PASSWORD_MIN", 10)
+SIGNUP_PASSWORD_MAX = _opt_int("SIGNUP_PASSWORD_MAX", 200)
+
 SERVICE_INVOICE_STATUSES = ("pending", "paid", "canceled")
 SERVICE_INVOICE_STATUS_LABELS = {
     "pending": "Ожидает оплаты",

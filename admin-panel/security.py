@@ -20,22 +20,38 @@ import config
 # ни onclick. CSS — отдельный /static/styles.css. img data: — для inline-точек
 # маски/иконок без внешних запросов. Применяются на КАЖДЫЙ ответ.
 # --------------------------------------------------------------------------- #
-_CSP = (
-    "default-src 'none'; "
-    "base-uri 'none'; "
-    # form-action: помимо 'self' разрешаем редирект формы на платёжные страницы
-    # ЮKassa (confirmation_url = yoomoney.ru/checkout/…; флоу может идти и через
-    # yookassa.ru). Без них кнопка «Выбрать тариф» не уводила на оплату (CSP резал
-    # cross-origin редирект после POST). Прямая навигация на эти домены не затронута.
-    "form-action 'self' https://yoomoney.ru https://*.yoomoney.ru "
-    "https://yookassa.ru https://*.yookassa.ru; "
-    "frame-ancestors 'none'; "
-    "img-src 'self' data: blob:; "    # blob: — превью выбранной картинки-вложения (object URL в reply.js)
-    "media-src 'self' blob:; "        # blob: — переслушать записанное голосовое ДО отправки (<audio>)
-    "style-src 'self'; "
-    "script-src 'self'; "
-    "connect-src 'self'"
-)
+# CSP собирается динамически: базовая строка строгая ('self' везде). ТОЛЬКО при включённом
+# входе через Telegram (OAUTH_TELEGRAM_ENABLED) расширяем под виджет:
+#   • script-src += https://telegram.org   — загрузка telegram-widget.js;
+#   • frame-src   https://oauth.telegram.org — кнопка виджета рендерится в его iframe.
+# ВК-вход НЕ требует послаблений: /auth/vk/start — серверный 302 на id.vk.com (навигация, не
+# form-action), обмен кода — server-side (не браузер). Флаг OFF → CSP прод НЕ меняется.
+def _build_csp() -> str:
+    script_src = "'self'"
+    frame_src = ""
+    if config.OAUTH_TELEGRAM_ENABLED:
+        script_src += " https://telegram.org"
+        frame_src = "frame-src https://oauth.telegram.org; "
+    return (
+        "default-src 'none'; "
+        "base-uri 'none'; "
+        # form-action: помимо 'self' разрешаем редирект формы на платёжные страницы
+        # ЮKassa (confirmation_url = yoomoney.ru/checkout/…; флоу может идти и через
+        # yookassa.ru). Без них кнопка «Выбрать тариф» не уводила на оплату (CSP резал
+        # cross-origin редирект после POST). Прямая навигация на эти домены не затронута.
+        "form-action 'self' https://yoomoney.ru https://*.yoomoney.ru "
+        "https://yookassa.ru https://*.yookassa.ru; "
+        "frame-ancestors 'none'; "
+        f"{frame_src}"
+        "img-src 'self' data: blob:; "    # blob: — превью выбранной картинки-вложения (object URL в reply.js)
+        "media-src 'self' blob:; "        # blob: — переслушать записанное голосовое ДО отправки (<audio>)
+        "style-src 'self'; "
+        f"script-src {script_src}; "
+        "connect-src 'self'"
+    )
+
+
+_CSP = _build_csp()
 
 _STATIC_HEADERS = {
     "Content-Security-Policy": _CSP,

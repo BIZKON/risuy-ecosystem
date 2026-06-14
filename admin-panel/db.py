@@ -2178,6 +2178,89 @@ async def create_admin_user_with_audit(
     return "created"
 
 
+# =========================================================================== #
+# Парадная «ИИ-Агент Про»: клиентские учётки (self-serve регистрация + соц-вход).
+# Переиспользуем admin_users(role='admin') + memberships(role='owner') + tenants
+# (status='provisioning'); внешний способ входа маппится через account_identities.
+# RLS-изоляция данных нового тенанта уже обеспечена (leads/messages/… под RLS).
+# =========================================================================== #
+async def find_identity(provider: str, external_id: str) -> asyncpg.Record | None:
+    """Найти учётку по внешнему идентификатору (вход через email/телефон/ВК/ТГ).
+    Резолв ДО сессии → таблица БЕЗ RLS. None — идентичность не зарегистрирована."""
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select id, username, verified, display_name from account_identities "
+            "where provider = $1 and external_id = $2",
+            provider, external_id,
+        )
+
+
+async def resolve_username_by_email(email: str) -> str | None:
+    """email → username учётки (для входа клиента по email в /login). Без требования
+    verified: пароль — секрет-гейт (верификация email = Фаза 2, для сброса/анти-сквоттинга)."""
+    e = (email or "").strip().lower()
+    if not e:
+        return None
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select username from account_identities where provider = 'email' and external_id = $1",
+            e,
+        )
+
+
+async def touch_identity_login(identity_id: int) -> None:
+    """Отметить факт входа через эту идентичность (last_login_at). Не критично к гонке."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update account_identities set last_login_at = now() where id = $1", identity_id
+        )
+
+
+async def create_client_account(
+    *, provider: str, external_id: str, name: str, password_hash: str,
+    display_name: str | None = None, verified: bool = False,
+    ip: str | None = None, user_agent: str | None = None,
+) -> tuple[str, str]:
+    """Создать клиентскую учётку ОДНОЙ транзакцией: tenant(provisioning) + admin_user(operator)
+    + membership(owner) + account_identity. Возврат (username, tenant_id). Зеркалит
+    create_admin_user_with_audit + аудит 'client_signup'. Уникальность (provider,external_id)
+    защищает от дубля — вызывающий ОБЯЗАН сперва проверить find_identity (иначе тут IntegrityError).
+    password_hash: реальный (email-регистрация) ИЛИ неюзабельный случайный (ТГ/ВК — без пароля)."""
+    token = secrets.token_hex(10)            # 20 hex-символов → username/slug под ^[a-z0-9_-]+$
+    username = f"client_{token}"
+    slug = f"client-{token}"
+    safe_name = (name or "").strip()[:120] or "Новый клиент"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            tenant_id = await c.fetchval(
+                "insert into tenants (slug, name, status) values ($1, $2, 'provisioning') returning id",
+                slug, safe_name,
+            )
+            # role='operator': клиент — оператор СВОЕГО кабинета, НЕ платформенный 'admin'.
+            # 'admin' в этой кодовой базе = платформенный супер (env-админ); выдать его
+            # публичной учётке = захват платформы + межтенантная утечка (ревью, critical).
+            # Владение тенантом фиксирует membership(role='owner') ниже.
+            await c.execute(
+                "insert into admin_users (username, password_hash, role, active, created_by) "
+                "values ($1, $2, 'operator', true, 'self-signup')",
+                username, password_hash,
+            )
+            await c.execute(
+                "insert into memberships (tenant_id, username, role) values ($1, $2, 'owner')",
+                tenant_id, username,
+            )
+            await c.execute(
+                "insert into account_identities (provider, external_id, username, verified, display_name) "
+                "values ($1, $2, $3, $4, $5)",
+                provider, external_id, username, verified, (display_name or None),
+            )
+            await _insert_audit(
+                c, actor=username, action="client_signup", ip=ip, user_agent=user_agent,
+                detail={"provider": provider, "tenant_id": str(tenant_id), "verified": verified},
+            )
+    return username, str(tenant_id)
+
+
 async def set_admin_user_role_with_audit(
     username: str, role: str, *, actor: str, ip: str | None, user_agent: str | None,
 ) -> bool:
@@ -2758,9 +2841,12 @@ async def set_subscription_canceled(
 # tenants/memberships — без RLS (резолв доступов ДО установки контекста).
 
 async def list_tenants_for(actor: str, role: str) -> list[asyncpg.Record]:
-    """Тенанты, доступные актору. env-админ/admin — все живые; operator — по memberships."""
+    """Тенанты, доступные актору. Платформенный супер (ТОЛЬКО env-админ) — все живые; любой
+    БД-юзер (оператор/клиент-владелец) — строго по memberships. ⚠️ Ветвление по ЛИЧНОСТИ
+    (actor==ADMIN_USERNAME), НЕ по role: self-serve клиент имеет свою учётку в admin_users и
+    при ветвлении по role='admin' получил бы ВСЕ тенанты → межтенантная утечка (ревью, critical)."""
     async with pool.acquire() as c:
-        if role == "admin":
+        if actor == config.ADMIN_USERNAME:
             return await c.fetch(
                 "select id, slug, name, status from tenants "
                 "where status in ('provisioning','active') order by created_at"

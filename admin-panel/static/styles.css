@@ -587,34 +587,124 @@ select.field__input {
   padding-right: 32px;
 }
 
-/* ── Логин ── */
+/* ── Парадная: вход / регистрация (сплит-карта) ── */
 .page-login { background: var(--bg); }
 .auth {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 48px 20px;
-  min-height: 70vh;
+  gap: 14px;
+  padding: 40px 20px;
+  min-height: 78vh;
 }
-.auth__card {
+.auth-card {
   width: 100%;
-  max-width: 360px;
+  max-width: 760px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 28px 26px;
+  border-radius: 16px;
+  box-shadow: 0 18px 50px rgba(20, 32, 60, .14);
+  overflow: hidden;
 }
-.auth__title { font-size: 20px; }
-.auth__sub { margin-top: 4px; font-size: 13px; color: var(--ink-faint); }
-.auth__form { margin-top: 22px; }
-.auth__form .btn--block { margin-top: 6px; }
-.auth__note {
-  margin-top: 18px;
-  font-size: 12px;
-  color: var(--ink-faint);
-  line-height: 1.45;
+/* Левая акцентная панель */
+.auth-card__aside {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  padding: 40px 34px;
+  color: #fff;
+  background: linear-gradient(150deg, var(--accent) 0%, #2447a8 55%, #1c2e63 100%);
+}
+.auth-aside__brand {
+  position: absolute;
+  top: 22px; left: 34px;
+  font-weight: 800;
+  letter-spacing: .01em;
+  font-size: 15px;
+  opacity: .92;
+}
+.auth-aside__invite h2 { font-size: 23px; line-height: 1.2; margin: 0 0 8px; }
+.auth-aside__invite p { font-size: 14px; line-height: 1.5; opacity: .9; margin: 0 0 18px; }
+.btn-ghost {
+  display: inline-block;
+  padding: 10px 26px;
+  border: 1.5px solid rgba(255, 255, 255, .85);
+  border-radius: 22px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  background: transparent;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.btn-ghost:hover { background: #fff; color: var(--accent); text-decoration: none; }
+
+/* Правая панель с формами */
+.auth-card__main { padding: 34px 34px 30px; display: flex; flex-direction: column; }
+.auth__title { font-size: 22px; margin: 0 0 18px; text-align: center; }
+.auth__form { display: flex; flex-direction: column; gap: 13px; }
+.auth__form .btn--block { margin-top: 4px; }
+.auth__note { margin-top: 16px; font-size: 12px; color: var(--ink-faint); line-height: 1.45; text-align: center; }
+
+/* Переключение вкладок по data-tab (server-set + auth.js). Без JS видна серверная вкладка. */
+.auth-card[data-tab="signin"] .auth-pane--signup,
+.auth-card[data-tab="signup"] .auth-pane--signin { display: none; }
+.auth-card[data-tab="signin"] .auth-aside__to-signin,
+.auth-card[data-tab="signup"] .auth-aside__to-signup { display: none; }
+
+/* Согласия (152-ФЗ) */
+.check { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; }
+.check input { margin-top: 2px; flex: none; }
+
+/* Разделитель «или» */
+.auth-sep { display: flex; align-items: center; gap: 12px; margin: 20px 0 14px; color: var(--ink-faint); font-size: 12px; }
+.auth-sep::before, .auth-sep::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+/* Соц-кнопки */
+.auth-social { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.social-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 42px; padding: 0 16px;
+  border-radius: 8px; font-weight: 600; font-size: 14px;
+}
+.social-btn--vk { background: #0077ff; color: #fff; }
+.social-btn--vk:hover { background: #0062d6; text-decoration: none; }
+.social-btn__mark { font-weight: 800; letter-spacing: .02em; }
+.social-btn--tg { justify-content: center; min-height: 42px; } /* контейнер telegram-widget iframe */
+
+.auth-switch { margin-top: 16px; text-align: center; font-size: 13px; color: var(--ink-soft); }
+.linklike { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.linklike:hover { text-decoration: underline; }
+.auth-foot { font-size: 12px; color: var(--ink-faint); text-align: center; }
+
+@media (max-width: 640px) {
+  .auth-card { grid-template-columns: 1fr; max-width: 420px; }
+  .auth-card__aside { padding: 54px 28px 28px; }
+  .auth-aside__invite h2 { font-size: 20px; }
+}
+
+/* ── Кабинет в статусе provisioning: «ИИ-сотрудник готовится» ── */
+.provision-banner {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--accent-soft); border: 1px solid #cdd9f5; border-left: 4px solid var(--accent);
+  border-radius: var(--radius); padding: 14px 18px; margin-bottom: 20px; color: var(--ink);
+}
+.provision-banner__ico { color: var(--accent); flex: none; display: flex; }
+.provision-banner__text { flex: 1; font-size: 13.5px; line-height: 1.45; }
+.provision-banner__cta {
+  flex: none; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px;
+  padding: 9px 18px; border-radius: 8px; white-space: nowrap;
+}
+.provision-banner__cta:hover { background: #2447a8; text-decoration: none; }
+@media (max-width: 560px) {
+  .provision-banner { flex-wrap: wrap; }
+  .provision-banner__cta { width: 100%; text-align: center; }
 }
 
 /* ── Карточки-счётчики ── */

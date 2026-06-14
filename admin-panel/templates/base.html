@@ -14,7 +14,7 @@
   {# Внутренняя панель с ПДн — нигде не индексируется. #}
   <meta name="robots" content="noindex, nofollow">
   <meta name="referrer" content="no-referrer">
-  <title>{% block title %}Панель{% endblock %} · Школа Лесова</title>
+  <title>{% block title %}Панель{% endblock %} · ИИ-Агент Про</title>
   {% block head_extra %}{% endblock %}
   <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
@@ -71,10 +71,10 @@
   {% block chrome %}
   <aside class="sidebar" aria-label="Разделы">
     <a class="sidebar__brand" href="/">
-      <span class="sidebar__logo" aria-hidden="true">ШЛ</span>
+      <span class="sidebar__logo" aria-hidden="true">АП</span>
       <span class="sidebar__brandtext">
-        <span class="sidebar__name">Школа Лесова</span>
-        <span class="sidebar__sub">админ-панель</span>
+        <span class="sidebar__name">ИИ-Агент&nbsp;Про</span>
+        <span class="sidebar__sub">кабинет</span>
       </span>
     </a>
 
@@ -91,8 +91,8 @@
       {{ nav_item('subscription', '/subscription', 'Подписка',  active) }}
       {{ nav_item('usage',        '/usage',        'Расход',     active) }}
       {{ nav_item('keys',         '/keys',        'Ключи',      active) }}
-      {%- if session and session.role == 'admin' %}{{ nav_item('team', '/team', 'Команда', active) }}{% endif %}
-      {%- if session and session.role == 'admin' %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}
+      {%- if session and session.is_platform %}{{ nav_item('team', '/team', 'Команда', active) }}{% endif %}
+      {%- if session and session.is_platform %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}
     </nav>
 
     {% if csrf_token %}
@@ -114,11 +114,25 @@
   {% endblock %}
 
   <main class="main {% block main_class %}{% endblock %}" id="content">
+    {% if session and session.active_tenant_status == 'provisioning' %}
+    <div class="provision-banner" role="status">
+      <span class="provision-banner__ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      </span>
+      <div class="provision-banner__text">
+        <b>Ваш ИИ-сотрудник готовится.</b> Выберите тариф и оплатите — после оплаты менеджер
+        активирует кабинет и подключит бота к вашим каналам.
+      </div>
+      <a class="provision-banner__cta" href="{{ service_site_url }}/pay.html">Выбрать тариф</a>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
 
   <footer class="footer">
-    <p>Внутренняя панель · доступ только для оператора · данные ПДн под защитой 152-ФЗ</p>
+    <p>ИИ-Агент Про · данные ПДн под защитой 152-ФЗ</p>
   </footer>
 </body>
 </html>

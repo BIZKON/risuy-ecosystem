@@ -21,6 +21,8 @@ import json
 import re
 import secrets
 import uuid
+
+import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -39,6 +41,7 @@ import auth
 import config
 import db
 import kb
+import oauth_vk
 import security
 import timeweb_ai
 import yookassa
@@ -137,6 +140,8 @@ def _static_version() -> str:
 
 # Глобал шаблонов: доступен во ВСЕХ шаблонах как {{ asset_version }} без правки контекстов.
 templates.env.globals["asset_version"] = _static_version()
+# Публичный сайт сервиса — для CTA «выбрать тариф» в provisioning-баннере кабинета (base.html).
+templates.env.globals["service_site_url"] = config.SERVICE_SITE_URL
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -285,20 +290,51 @@ async def healthz() -> JSONResponse:
 
 # ---- /login GET ----------------------------------------------------------- #
 @app.get("/login", response_class=HTMLResponse)
-async def login_form(request: Request, error: str | None = None, next: str = "/"):
+async def login_form(
+    request: Request, error: str | None = None, next: str = "/",
+    signup_error: str | None = None, social_error: str | None = None,
+    registered: int = 0, tab: str = "signin",
+):
     # Если уже есть валидная сессия — на дашборд (не показываем логин повторно).
     sid = auth.unsign_sid(request.cookies.get(config.COOKIE_NAME))
     if sid and await auth.load_session(sid):
         return RedirectResponse(url="/", status_code=303)
 
     token = secrets.token_urlsafe(32)
+    # Парадная: соц-вход/регистрация показываются ТОЛЬКО при включённых флагах
+    # (PUBLIC_SIGNUP_ENABLED / OAUTH_*). OFF → чистый ребренд + операторский вход.
+    signup_enabled = config.PUBLIC_SIGNUP_ENABLED
+    tg_enabled = signup_enabled and config.OAUTH_TELEGRAM_ENABLED
+    # Anti-CSRF state для Telegram-входа: кладём в data-auth-url ?st=<state> и в cookie (ниже).
+    tg_state = secrets.token_urlsafe(24) if tg_enabled else ""
+    tg_auth_url = (f"/auth/telegram/callback?{urlencode({'st': tg_state})}" if tg_enabled
+                   else "/auth/telegram/callback")
     resp = templates.TemplateResponse(
         request,
         "login.html",
-        {"csrf_token": token, "error": _login_error_text(error), "next": _safe_next(next)},
+        {
+            "csrf_token": token,
+            "error": _login_error_text(error),
+            "next": _safe_next(next),
+            "signup_enabled": signup_enabled,
+            "tg_enabled": tg_enabled,
+            "tg_bot_username": config.TELEGRAM_BOT_USERNAME,
+            "tg_auth_url": tg_auth_url,
+            "vk_enabled": signup_enabled and oauth_vk.enabled(),
+            "signup_password_min": config.SIGNUP_PASSWORD_MIN,
+            "signup_error": _signup_error_text(signup_error),
+            "social_error": _social_error_text(social_error),
+            "registered_ok": bool(registered),
+            # Какую вкладку показать первой (после ошибки регистрации — «Регистрация»).
+            "tab": "signup" if (signup_enabled and (signup_error or tab == "signup")) else "signin",
+        },
     )
     # Кладём pre-session CSRF в подписанную cookie, привязав к токену формы.
     auth.set_login_csrf_cookie(resp, token)
+    # Telegram anti-CSRF state в подписанной cookie (samesite=lax: callback — cross-site GET от telegram).
+    if tg_enabled:
+        resp.set_cookie(TG_OAUTH_COOKIE, auth.seal_tg_state(tg_state), max_age=600,
+                        httponly=True, secure=config.COOKIE_SECURE, samesite="lax", path="/")
     return resp
 
 
@@ -307,6 +343,29 @@ def _login_error_text(error: str | None) -> str | None:
         return None
     # Единый текст без user-enumeration (§3.4) — любой код ошибки → один текст.
     return "Неверный логин или пароль."
+
+
+def _signup_error_text(code: str | None) -> str | None:
+    if not code:
+        return None
+    return {
+        "bad_email": "Укажите корректный email.",
+        "bad_password": f"Пароль — от {config.SIGNUP_PASSWORD_MIN} до {config.SIGNUP_PASSWORD_MAX} символов.",
+        "no_consent": "Подтвердите согласие с офертой и обработкой персональных данных.",
+        "exists": "Аккаунт с таким email уже зарегистрирован — войдите.",
+        "csrf": "Сессия формы устарела. Обновите страницу и попробуйте снова.",
+        "disabled": "Регистрация временно недоступна.",
+    }.get(code, "Не удалось зарегистрироваться. Попробуйте ещё раз.")
+
+
+def _social_error_text(code: str | None) -> str | None:
+    if not code:
+        return None
+    return {
+        "tg_bad": "Не удалось подтвердить вход через Telegram. Попробуйте ещё раз.",
+        "vk_bad": "Не удалось войти через ВКонтакте. Попробуйте ещё раз.",
+        "disabled": "Этот способ входа временно недоступен.",
+    }.get(code, "Не удалось войти. Попробуйте ещё раз.")
 
 
 # ---- /login POST ---------------------------------------------------------- #
@@ -332,9 +391,18 @@ async def login_submit(
     # Тарпит ДО проверки пароля: замедляем брут, реальный оператор всё равно войдёт.
     await auth.apply_tarpit(account, bypass=bypass)
 
+    # Клиент входит по email → резолвим в его username (account_identities). Оператор
+    # входит по username — без изменений. Не нашли email → оставляем как есть (authenticate
+    # вернёт None по dummy-хешу, без user-enumeration). Только при включённой регистрации.
+    login_id = (username or "").strip()
+    if config.PUBLIC_SIGNUP_ENABLED and "@" in login_id and _valid_email(login_id):
+        mapped = await db.resolve_username_by_email(login_id)
+        if mapped:
+            login_id = mapped
+
     # Единая аутентификация: env-админ (bootstrap-суперюзер) ИЛИ БД-юзер (admin_users).
     # Возврат (actor, role) | None; constant-time/без enumeration — внутри auth.authenticate.
-    auth_result = await auth.authenticate(username, password)
+    auth_result = await auth.authenticate(login_id, password)
     if auth_result is None:
         await auth.register_login_failure(account)
         await db.audit(actor=account, action="login_fail", ip=ip, user_agent=ua,
@@ -357,6 +425,206 @@ async def login_submit(
 def _login_redirect(*, error: str, next: str) -> RedirectResponse:
     qs = urlencode({"error": error, "next": next})
     return RedirectResponse(url=f"/login?{qs}", status_code=303)
+
+
+# =========================================================================== #
+# Парадная «ИИ-Агент Про»: публичная self-serve регистрация + вход через Telegram/ВК.
+# Всё за флагом PUBLIC_SIGNUP_ENABLED (+ OAUTH_*). OFF → роуты ведут на /login, UI скрыт.
+# Клиентская учётка = admin_user(role='admin') + tenant(provisioning) + membership(owner);
+# способ входа маппится через account_identities (db.create_client_account).
+# =========================================================================== #
+VK_OAUTH_COOKIE = "__Host-vk_oauth" if config.COOKIE_SECURE else "vk_oauth"
+TG_OAUTH_COOKIE = "__Host-tg_oauth" if config.COOKIE_SECURE else "tg_oauth"
+
+
+def _signup_redirect(error: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/login?{urlencode({'signup_error': error, 'tab': 'signup'})}",
+                            status_code=303)
+
+
+def _social_redirect(error: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/login?{urlencode({'social_error': error})}", status_code=303)
+
+
+def _panel_base_url(request: Request) -> str:
+    """Публичный базовый URL панели для OAuth redirect_uri. Приоритет — явный env
+    (должен ТОЧНО совпасть с зарегистрированным во ВК); иначе derive из заголовков за LB."""
+    if config.PANEL_PUBLIC_BASE_URL:
+        return config.PANEL_PUBLIC_BASE_URL
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+async def _issue_session(actor: str, role: str, *, ip, ua, action: str) -> RedirectResponse:
+    """Выдать серверную сессию (ротация sid) + cookie + аудит → redirect в кабинет."""
+    sid = await auth.create_session(actor, role)
+    await db.audit(actor=actor, action=action, ip=ip, user_agent=ua, detail={"role": role})
+    resp = RedirectResponse(url="/", status_code=303)
+    auth.set_session_cookie(resp, sid)
+    auth.clear_login_csrf(resp)
+    return resp
+
+
+# ---- /signup/register POST (email + пароль) ------------------------------- #
+@app.post("/signup/register")
+async def signup_register(
+    request: Request,
+    email: str = Form(""),
+    password: str = Form(""),
+    agree_oferta: str = Form(""),
+    agree_pdn: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    if not config.PUBLIC_SIGNUP_ENABLED:
+        return RedirectResponse(url="/login", status_code=303)
+    ip = _ip(request)
+    ua = _ua(request)
+    # CSRF — тот же pre-session механизм, что у логина (форма на той же странице).
+    if not auth.verify_login_csrf(request.cookies.get(auth.LOGIN_CSRF_COOKIE), csrf_token):
+        return _signup_redirect("csrf")
+    email = (email or "").strip().lower()
+    # Анти-абьюз: per-IP накопительный тарпит регистрации (РЕАЛЬНО кусается — в отличие от
+    # login-тарпита, который инкрементит только register_login_failure при неуспехе входа;
+    # ревью нашёл, что на /signup он был no-op). Без глобального ключа — не деградирует вход
+    # операторам. Жёсткий лимит/капча на число тенантов — Фаза 2 (ревью).
+    await auth.signup_tarpit_and_count(f"signup:{ip or 'noip'}")
+    if not _valid_email(email):
+        return _signup_redirect("bad_email")
+    if not (config.SIGNUP_PASSWORD_MIN <= len(password) <= config.SIGNUP_PASSWORD_MAX):
+        return _signup_redirect("bad_password")
+    if agree_oferta not in _CHECKBOX_ON or agree_pdn not in _CHECKBOX_ON:
+        return _signup_redirect("no_consent")
+    # email уже занят → не плодим учётку, ведём на вход (signup по своей природе раскрывает
+    # занятость email — это норма для регистрации; брут осложнён тарпитом выше).
+    if await db.find_identity("email", email) is not None:
+        return _signup_redirect("exists")
+    try:
+        username, _tenant = await db.create_client_account(
+            provider="email", external_id=email, name=email,
+            password_hash=auth.hash_password(password), verified=False, ip=ip, user_agent=ua,
+        )
+    except asyncpg.UniqueViolationError:
+        # Гонка двойного сабмита (find_identity прошёл у обоих) → не плодим, ведём на вход.
+        return _signup_redirect("exists")
+    # Авто-логин в provisioning-кабинет (role='operator' своего тенанта).
+    return await _issue_session(username, "operator", ip=ip, ua=ua, action="signup_login")
+
+
+# ---- /auth/telegram/callback GET (Telegram Login Widget) ------------------ #
+@app.get("/auth/telegram/callback")
+async def auth_telegram_callback(request: Request):
+    if not (config.PUBLIC_SIGNUP_ENABLED and config.OAUTH_TELEGRAM_ENABLED):
+        return _social_redirect("disabled")
+    ip = _ip(request)
+    ua = _ua(request)
+
+    def _finish(resp: RedirectResponse) -> RedirectResponse:
+        # state одноразов: удаляем cookie; no-store — чтобы callback с hash не осел в кэше.
+        resp.delete_cookie(TG_OAUTH_COOKIE, path="/")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    # Anti-CSRF/anti-replay: ?st ДОЛЖЕН совпасть со state из подписанной cookie (паритет с ВК).
+    # Закрывает форс-логин жертвы в чужой аккаунт и replay перехваченного URL без cookie (ревью).
+    st = request.query_params.get("st", "")
+    expected = auth.open_tg_state(request.cookies.get(TG_OAUTH_COOKIE))
+    if not expected or not st or not secrets.compare_digest(expected, st):
+        return _finish(_social_redirect("tg_bad"))
+
+    # ТОЛЬКО поля Telegram (без посторонних query, вкл. наш st) — иначе data_check_string разойдётся.
+    tg_fields = {"id", "first_name", "last_name", "username", "photo_url", "auth_date", "hash"}
+    fields = {k: v for k, v in request.query_params.items() if k in tg_fields}
+    data = auth.verify_telegram_login(fields)
+    if data is None:
+        return _finish(_social_redirect("tg_bad"))
+    tg_id = str(data["id"])
+    ident = await db.find_identity("telegram", tg_id)
+    if ident is not None:
+        await db.touch_identity_login(ident["id"])
+        return _finish(await _issue_session(ident["username"], "operator", ip=ip, ua=ua, action="login_telegram"))
+    # Новый клиент: лёгкий per-IP тарпит на создание (логин существующих — без тормоза).
+    await auth.signup_tarpit_and_count(f"signup:{ip or 'noip'}")
+    name = (f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
+            or data.get("username") or f"tg:{tg_id}")
+    try:
+        username, _t = await db.create_client_account(
+            provider="telegram", external_id=tg_id, name=name,
+            password_hash=auth.hash_password(secrets.token_urlsafe(32)),  # пароля нет → неюзабельный хеш
+            display_name=name, verified=True, ip=ip, user_agent=ua,
+        )
+    except asyncpg.UniqueViolationError:
+        # Гонка двух первых входов одного tg_id → учётку создал параллельный запрос: входим в неё.
+        race = await db.find_identity("telegram", tg_id)
+        if race is None:
+            return _finish(_social_redirect("tg_bad"))
+        username = race["username"]
+    return _finish(await _issue_session(username, "operator", ip=ip, ua=ua, action="signup_telegram"))
+
+
+# ---- /auth/vk/start + /auth/vk/callback (VK ID OAuth2 + PKCE) ------------- #
+@app.get("/auth/vk/start")
+async def auth_vk_start(request: Request):
+    if not (config.PUBLIC_SIGNUP_ENABLED and oauth_vk.enabled()):
+        return _social_redirect("disabled")
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = oauth_vk.make_pkce()
+    redirect_uri = _panel_base_url(request) + "/auth/vk/callback"
+    resp = RedirectResponse(url=oauth_vk.authorize_url(redirect_uri, state, challenge), status_code=303)
+    # state+verifier — в ПОДПИСАННОЙ короткоживущей cookie. samesite=lax: ВК возвращает
+    # cross-site GET-навигацией, при strict cookie бы не доехала.
+    resp.set_cookie(VK_OAUTH_COOKIE, oauth_vk.seal_state(state, verifier), max_age=600,
+                    httponly=True, secure=config.COOKIE_SECURE, samesite="lax", path="/")
+    return resp
+
+
+@app.get("/auth/vk/callback")
+async def auth_vk_callback(request: Request, code: str = "", state: str = "", device_id: str = ""):
+    if not (config.PUBLIC_SIGNUP_ENABLED and oauth_vk.enabled()):
+        return _social_redirect("disabled")
+    ip = _ip(request)
+    ua = _ua(request)
+    opened = oauth_vk.open_state(request.cookies.get(VK_OAUTH_COOKIE))
+    # state из cookie ДОЛЖЕН совпасть с возвращённым (anti-CSRF), код обязателен.
+    if not opened or not code or not secrets.compare_digest(opened[0], state or ""):
+        resp = _social_redirect("vk_bad")
+        resp.delete_cookie(VK_OAUTH_COOKIE, path="/")
+        return resp
+    _state, verifier = opened
+    redirect_uri = _panel_base_url(request) + "/auth/vk/callback"
+    try:
+        tok = await oauth_vk.exchange_code(code, verifier, device_id, redirect_uri)
+        profile = await oauth_vk.fetch_user(tok["access_token"])
+    except oauth_vk.VKError:
+        resp = _social_redirect("vk_bad")
+        resp.delete_cookie(VK_OAUTH_COOKIE, path="/")
+        return resp
+    vk_id = str(tok["user_id"])
+    ident = await db.find_identity("vk", vk_id)
+    if ident is not None:
+        await db.touch_identity_login(ident["id"])
+        resp = await _issue_session(ident["username"], "operator", ip=ip, ua=ua, action="login_vk")
+    else:
+        await auth.signup_tarpit_and_count(f"signup:{ip or 'noip'}")  # тормоз на создание (не на логин)
+        name = (f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+                or f"vk:{vk_id}")
+        try:
+            username, _t = await db.create_client_account(
+                provider="vk", external_id=vk_id, name=name,
+                password_hash=auth.hash_password(secrets.token_urlsafe(32)),
+                display_name=name, verified=True, ip=ip, user_agent=ua,
+            )
+        except asyncpg.UniqueViolationError:
+            # Гонка двух первых входов одного vk_id → входим в учётку, созданную параллельно.
+            race = await db.find_identity("vk", vk_id)
+            if race is None:
+                resp = _social_redirect("vk_bad")
+                resp.delete_cookie(VK_OAUTH_COOKIE, path="/")
+                return resp
+            username = race["username"]
+        resp = await _issue_session(username, "operator", ip=ip, ua=ua, action="signup_vk")
+    resp.delete_cookie(VK_OAUTH_COOKIE, path="/")
+    return resp
 
 
 # ---- /logout POST --------------------------------------------------------- #
@@ -393,7 +661,7 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
 
     # Платформенная сводка (клиенты + экономика по всем тенантам) — ТОЛЬКО роль admin
     # (клиент-оператор её не видит, как и блок «Экономика сервиса»). None → шаблон скрыт.
-    platform = await _platform_ctx(session.role)
+    platform = await _platform_ctx(session.is_platform)
 
     return templates.TemplateResponse(
         request,
@@ -411,11 +679,12 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
     )
 
 
-async def _platform_ctx(role: str) -> dict | None:
-    """Сводка по всем подключённым клиентам для дашборда (только admin). Деньги из
-    db.platform_summary (µRUB) форматируем в рубли для UI. Сбой → None (блок скрыт,
-    дашборд не падает)."""
-    if role != "admin":
+async def _platform_ctx(is_platform: bool) -> dict | None:
+    """Сводка по всем подключённым клиентам для дашборда — ТОЛЬКО платформенный супер
+    (env-админ). Деньги из db.platform_summary (µRUB) форматируем в рубли для UI. Сбой →
+    None (блок скрыт, дашборд не падает). ⚠️ Гейт по личности, НЕ по role (иначе клиент-
+    владелец role-операции увидел бы экономику всех клиентов — ревью)."""
+    if not is_platform:
         return None
     try:
         ps = await db.platform_summary()
@@ -2521,12 +2790,13 @@ def _blended_token_price() -> Decimal:
             + Decimal(str(config.AI_PRICE_OUT_RUB_PER_M)) * share)
 
 
-async def _ai_economics(role: str) -> dict | None:
-    """Экономика сервиса — ТОЛЬКО для роли admin (разработчик): клиент (операторы школы)
-    этого видеть не должен. Таблица расходов по агентам: РЕАЛЬНЫЙ used_tokens каждого
+async def _ai_economics(is_platform: bool) -> dict | None:
+    """Экономика сервиса — ТОЛЬКО платформенный супер (env-админ): клиент-владелец/операторы
+    этого видеть не должны. Таблица расходов по агентам: РЕАЛЬНЫЙ used_tokens каждого
     агента Timeweb × смешанная цена → себестоимость; против выручки подписки → маржа;
-    + баланс аккаунта. Всё в try — сбой Timeweb-API не должен ронять страницу (None → скрыт)."""
-    if role != "admin" or not config.TIMEWEB_AI_ENABLED:
+    + баланс аккаунта. Всё в try — сбой Timeweb-API не должен ронять страницу (None → скрыт).
+    ⚠️ Гейт по личности, НЕ по role (ревью)."""
+    if not is_platform or not config.TIMEWEB_AI_ENABLED:
         return None
     try:
         agents = await timeweb_ai.list_agents()
@@ -2594,7 +2864,7 @@ async def subscription_page(
             "canceled_flash": bool(canceled),
             "detached_flash": bool(detached),
             "err": _service_err_text(err),
-            "economics": await _ai_economics(session.role),
+            "economics": await _ai_economics(session.is_platform),
             # Wave 2a: кошелёк тенанта (топап + история платежей платформы + отвязка карты)
             "wallet": await _wallet_ctx(session),
         },
@@ -3522,16 +3792,17 @@ def _agent_role_err_text(err: str | None) -> str | None:
 
 
 # =========================================================================== #
-# Раздел «Команда» (/team) — мульти-оператор + роли. ADMIN-ONLY: operator не видит
-# пункт в сайдбаре И отбивается _require_admin (defence-in-depth). env-админ —
-# bootstrap-суперюзер, всегда 'admin'. CRUD admin_users: создать / сменить роль /
-# активировать-деактивировать / сбросить пароль. Пароли — argon2 (auth.hash_password);
-# plain не хранится и не логируется. Все мутации: _require_admin → CSRF → PRG → аудит.
+# Раздел «Команда» (/team) — управление УЧЁТКАМИ ВСЕЙ ПЛАТФОРМЫ (admin_users без скоупа
+# по тенанту: листинг/создание/смена роли/сброс пароля любого юзера). Поэтому ПЛАТФОРМЕННЫЙ-
+# ONLY: гейт по личности env-админа (is_platform), НЕ по role. Self-serve клиент (operator
+# своего кабинета) сюда не должен попадать — иначе сброс пароля владельца другого клиента
+# (ревью, critical). env-админ — bootstrap-суперюзер вне admin_users.
 # =========================================================================== #
 def _require_admin(session: auth.Session) -> None:
-    """Гейт раздела: только роль 'admin'. operator → 403 (пункта меню он и так не видит)."""
-    if session.role != "admin":
-        raise StarletteHTTPException(status_code=403, detail="Только для администратора")
+    """Гейт платформенных разделов: ТОЛЬКО env-админ (is_platform). Любой БД-юзер → 403
+    (пункта меню он и так не видит). ⚠️ По личности, НЕ по role='admin' (ревью, critical)."""
+    if not session.is_platform:
+        raise StarletteHTTPException(status_code=403, detail="Только для администратора платформы")
 
 
 def _valid_team_username(u: str) -> bool:
