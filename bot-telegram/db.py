@@ -878,7 +878,7 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
       • диалог      — persona (leads.ai_persona, оператор в «Диалогах») → реестры
                       ai_persona_agent__<persona> / ai_persona_prompt__<persona>;
                       ПОБЕЖДАЕТ канал. Пусто/нет ключа на любом уровне → берётся нижний."""
-    keys = list(_AI_SETTING_KEYS)
+    keys = list(_AI_SETTING_KEYS) + ["ai_persona"]  # + глобальная активная персона компании
     src = (source or "").strip()
     per = (persona or "").strip()
     if src:
@@ -902,7 +902,26 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
         backend = "cloud_ai"
     agent_id = (kv.get("ai_agent_id") or "").strip()
     system_prompt = kv.get("ai_system_prompt") or ""
-    if src:  # канал перекрывает глобал
+    # Глобальная активная персона компании (раздел «ИИ-агенты» → выбранный агент): её
+    # роль-промпт — ДЕФОЛТ для всех диалогов, когда нет более специфичной привязки. Промпт
+    # живёт в персоне (как у всех агентов), общая база знаний — на самом агенте; здесь лишь
+    # подставляем активного агента как глобальный дефолт. Приоритет: диалог > канал >
+    # активная персона > глобальный ai_system_prompt. Второй запрос — только когда персона
+    # задана и глобального промпта нет (типичный кейс «один активный агент на компанию»).
+    active = (kv.get("ai_persona") or "").strip()
+    if active and not system_prompt:
+        try:
+            async with pool.acquire() as c:
+                arows = await c.fetch(
+                    "select key, value from app_settings where key = any($1::text[])",
+                    [f"ai_persona_prompt__{active}", f"ai_persona_agent__{active}"],
+                )
+            akv = {r["key"]: (r["value"] or "") for r in arows}
+            system_prompt = akv.get(f"ai_persona_prompt__{active}") or system_prompt
+            agent_id = (akv.get(f"ai_persona_agent__{active}") or "").strip() or agent_id
+        except Exception as e:  # noqa: BLE001 — сбой не должен ломать авто-ответ
+            logging.getLogger(__name__).warning("Не удалось прочитать активную персону: %s", e)
+    if src:  # канал перекрывает глобал/активную персону
         agent_id = (kv.get(f"ai_agent_id__{src}") or "").strip() or agent_id
         system_prompt = (kv.get(f"ai_system_prompt__{src}") or "") or system_prompt
     if per:  # персона диалога перекрывает канал и глобал
