@@ -168,7 +168,10 @@ grant select, insert, update on app_settings to panel_rw;
 -- (update status/paid_at) + provider_payment_id/payment_url ОБЕИХ точек создания —
 -- поэтому эти две колонки добавлены в column-гранты (1B). id/created_at — default.
 grant select on orders to panel_rw;
-grant insert (lead_id, product_id, amount, currency, status, source, note, created_by, paid_at,
+-- tenant_id — create_order_with_audit ИМЕНУЕТ его (Wave 3, фолбэк tenant сессии). Без гранта
+-- INSERT падает «permission denied» после переприменения роли (в проде маскируется широким
+-- arwd-грантом реконсиляции Timeweb DBaaS) — латентный гэп, чиним превентивно (чистое +право).
+grant insert (tenant_id, lead_id, product_id, amount, currency, status, source, note, created_by, paid_at,
               provider_payment_id, payment_url)
     on orders to panel_rw;
 grant update (status, note, paid_at, amount, currency, product_id,
@@ -183,7 +186,11 @@ grant update (status, note, paid_at, amount, currency, product_id,
 --   service_invoices  SELECT, INSERT, UPDATE — выставление счёта тарифа + отметка
 --   оплаты из вебхука (status/yookassa_payment_id/card_last4/paid_at).
 grant select on service_invoices to panel_rw;
-grant insert (period_start, period_end, plan_key, plan_name, quota, plan_amount,
+-- tenant_id — ОБЯЗАТЕЛЬНО в column-INSERT-гранте: create_period_invoice ИМЕНУЕТ tenant_id
+-- (tenant-изоляция биллинга, schema_service_tenant.sql). panel_rw без bypassrls → вставка в
+-- неразрешённую колонку = «permission denied for table». Применять owner-DSN ДО CONTRACT-шага
+-- RLS (db/schema_service_rls.sql) и ДО/ВМЕСТЕ с деплоем кода, пишущего tenant_id.
+grant insert (tenant_id, period_start, period_end, plan_key, plan_name, quota, plan_amount,
               overage_count, overage_amount, amount, currency, status,
               yookassa_payment_id, created_by)
     on service_invoices to panel_rw;

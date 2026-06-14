@@ -2796,11 +2796,27 @@ async def get_latest_paid_invoice() -> asyncpg.Record | None:
 
 
 async def service_revenue_total():
-    """Сумма ОПЛАЧЕННЫХ счетов подписки (выручка сервиса за всё время) — блок «Экономика»."""
+    """Сумма ОПЛАЧЕННЫХ счетов подписки по ВСЕЙ платформе (выручка сервиса ЗА ВСЁ ВРЕМЯ) —
+    блок «Экономика» (admin). service_invoices теперь под RLS (tenant-scoped) → суммируем
+    СКАНОМ по тенантам с set_config (panel_rw без bypassrls), как platform_summary. N мал.
+    Сканим ВСЕ статусы (включая suspended/canceled) — выручка all-time не должна терять
+    ушедших плательщиков (иначе маржа занижается: себестоимость токенов их ещё включает)."""
     async with pool.acquire() as c:
-        return await c.fetchval(
-            "select coalesce(sum(amount), 0) from service_invoices where status = 'paid'"
-        )
+        tenants = await c.fetch("select id from tenants")
+    total = 0
+    for t in tenants:
+        try:
+            async with pool.acquire() as c:
+                async with c.transaction():
+                    await c.execute("select set_config('app.tenant_id', $1, true)", str(t["id"]))
+                    v = await c.fetchval(
+                        "select coalesce(sum(amount), 0) from service_invoices where status = 'paid'")
+                    total += (v or 0)
+        except Exception:  # noqa: BLE001 — сбой одного тенанта не валит экономику
+            logging.getLogger(__name__).warning(
+                "service_revenue_total: сбой по тенанту %s", t["id"], exc_info=True)
+            continue
+    return total
 
 
 async def list_service_invoices(*, limit: int = 60) -> list[asyncpg.Record]:
@@ -2833,24 +2849,29 @@ async def get_service_invoice(invoice_id) -> asyncpg.Record | None:
 
 
 async def create_period_invoice(
-    *, period_start, period_end, plan_key: str, plan_name: str, quota: int | None,
+    *, tenant_id, period_start, period_end, plan_key: str, plan_name: str, quota: int | None,
     plan_amount, overage_count: int, overage_amount, amount, currency: str,
     actor: str, ip: str | None, user_agent: str | None,
 ) -> str:
-    """Создать счёт 'pending' за период тарифа (со снимком квоты/превышения) + аудит."""
+    """Создать счёт 'pending' за период тарифа (со снимком квоты/превышения) + аудит.
+    tenant_id обязателен (service_invoices под RLS): set_config в транзакции, чтобы
+    INSERT прошёл with_check политики tenant_isolation (как payments/subscriptions)."""
     if currency not in _PRODUCT_CURRENCY_SET:
         raise ValueError(f"Недопустимая валюта: {currency!r}")
+    if not tenant_id:
+        raise ValueError("create_period_invoice: tenant_id обязателен (RLS)")
     async with pool.acquire() as c:
         async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
             iid = await c.fetchval(
                 """
                 insert into service_invoices
-                    (period_start, period_end, plan_key, plan_name, quota, plan_amount,
+                    (tenant_id, period_start, period_end, plan_key, plan_name, quota, plan_amount,
                      overage_count, overage_amount, amount, currency, status, created_by)
-                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11)
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12)
                 returning id
                 """,
-                period_start, period_end, plan_key, plan_name, quota, plan_amount,
+                tenant_id, period_start, period_end, plan_key, plan_name, quota, plan_amount,
                 overage_count, overage_amount, amount, currency, actor,
             )
             await _insert_audit(
@@ -2874,12 +2895,17 @@ async def attach_yookassa_payment(invoice_id, payment_id: str) -> None:
 
 
 async def mark_service_invoice_paid_by_payment(
-    payment_id: str, *, card_last4: str | None = None, actor: str = "yookassa-webhook"
+    payment_id: str, *, tenant_id, card_last4: str | None = None, actor: str = "yookassa-webhook"
 ) -> asyncpg.Record | None:
     """Отметить счёт оплаченным по id платежа ЮKassa (идемпотентно). None — счёт не найден.
-    Вызывается ИЗ ВЕБХУКА ПОСЛЕ перепроверки платежа через API ЮKassa (status=succeeded)."""
+    Вызывается ИЗ ВЕБХУКА ПОСЛЕ перепроверки платежа через API ЮKassa (status=succeeded).
+    tenant_id (из metadata платежа) обязателен — service_invoices под RLS, вебхук без сессии:
+    set_config в транзакции, чтобы SELECT/UPDATE прошли политику (как mark_topup_succeeded)."""
+    if not tenant_id:
+        raise ValueError("mark_service_invoice_paid_by_payment: tenant_id обязателен (RLS)")
     async with pool.acquire() as c:
         async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
             row = await c.fetchrow(
                 "select id, status from service_invoices "
                 "where yookassa_payment_id = $1 for update",
@@ -2906,15 +2932,26 @@ async def mark_service_invoice_paid_by_payment(
             return upd
 
 
-async def is_subscription_canceled() -> bool:
-    raw = await get_app_setting(config.SERVICE_CANCEL_SETTING_KEY)
+def _cancel_key(tenant_id) -> str:
+    """Ключ флага отмены подписки В РАЗРЕЗЕ ТЕНАНТА. app_settings — глобальная таблица
+    (key PK, без RLS), поэтому изолируем суффиксом tenant_id, а не строкой-на-всех
+    (иначе отмена одного клиента гасила бы подписку всем — та же утечка, что у service_invoices)."""
+    return f"{config.SERVICE_CANCEL_SETTING_KEY}:{tenant_id}"
+
+
+async def is_subscription_canceled(tenant_id) -> bool:
+    if not tenant_id:
+        return False
+    raw = await get_app_setting(_cancel_key(tenant_id))
     return bool(raw and raw.strip())
 
 
 async def set_subscription_canceled(
-    canceled: bool, *, actor: str, ip: str | None, user_agent: str | None
+    tenant_id, canceled: bool, *, actor: str, ip: str | None, user_agent: str | None
 ) -> None:
-    """Флаг отмены подписки в app_settings (панель пишет; бот не использует). Аудит."""
+    """Per-tenant флаг отмены подписки в app_settings (панель пишет; бот не использует). Аудит."""
+    if not tenant_id:
+        raise ValueError("set_subscription_canceled: tenant_id обязателен")
     value = "1" if canceled else ""
     async with pool.acquire() as c:
         async with c.transaction():
@@ -2923,12 +2960,12 @@ async def set_subscription_canceled(
                 insert into app_settings (key, value) values ($1, $2)
                 on conflict (key) do update set value = excluded.value
                 """,
-                config.SERVICE_CANCEL_SETTING_KEY, value,
+                _cancel_key(tenant_id), value,
             )
             await _insert_audit(
                 c, actor=actor,
                 action="subscription_cancel" if canceled else "subscription_resume",
-                ip=ip, user_agent=user_agent, detail={"canceled": canceled},
+                ip=ip, user_agent=user_agent, detail={"canceled": canceled, "tenant_id": str(tenant_id)},
             )
 
 

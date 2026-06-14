@@ -2690,11 +2690,12 @@ def _meter(used: int, quota):
             "pct": round(in_quota * 100 / total), "over_pct": round(over * 100 / total)}
 
 
-async def _current_subscription() -> dict:
-    """Текущая подписка: тариф/период из последнего оплаченного счёта + флаг отмены +
-    живой расход сообщений ИИ за текущий период."""
+async def _current_subscription(tenant_id) -> dict:
+    """Текущая подписка АКТИВНОГО ТЕНАНТА: тариф/период из последнего оплаченного счёта +
+    флаг отмены + живой расход сообщений ИИ за период. get_latest_paid_invoice/count_ai_messages
+    скоупятся по app.tenant_id (RLS, выставлен require_session); флаг отмены — per-tenant."""
     latest = await db.get_latest_paid_invoice()
-    canceled = await db.is_subscription_canceled()
+    canceled = await db.is_subscription_canceled(tenant_id)
     today = datetime.now(timezone.utc).date()
     if latest is None:
         return {"exists": False, "active": False, "canceled": canceled,
@@ -2844,7 +2845,7 @@ async def subscription_page(
     detached: int = 0,
     err: str | None = None,
 ):
-    sub = await _current_subscription()
+    sub = await _current_subscription(session.active_tenant_id)
     invoices = [_present_invoice(r) for r in await db.list_service_invoices()]
     return templates.TemplateResponse(
         request,
@@ -2907,6 +2908,9 @@ async def subscription_select(
     csrf_token: str = Form(""),
 ):
     await _enforce_csrf(request, session, csrf_token)
+    # service_invoices под RLS → счёт привязывается к активному тенанту; без него не создаём.
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/subscription?err=no_tenant", status_code=303)
     plan = _plan(plan_key)
     if plan is None:
         return RedirectResponse(url="/subscription?err=bad_plan", status_code=303)
@@ -2939,6 +2943,7 @@ async def subscription_select(
     amount = (plan_amount + overage_amount).quantize(Decimal("0.01"))
 
     invoice_id = await db.create_period_invoice(
+        tenant_id=session.active_tenant_id,
         period_start=start, period_end=end, plan_key=plan_key, plan_name=plan["name"],
         quota=plan["quota"], plan_amount=plan_amount, overage_count=overage_count,
         overage_amount=overage_amount, amount=amount, currency=config.SERVICE_CURRENCY,
@@ -2987,8 +2992,11 @@ async def subscription_cancel(
     csrf_token: str = Form(""),
 ):
     await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/subscription?err=no_tenant", status_code=303)
     await db.set_subscription_canceled(
-        True, actor=session.actor, ip=_ip(request), user_agent=_ua(request)
+        session.active_tenant_id, True,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request)
     )
     return RedirectResponse(url="/subscription?canceled=1", status_code=303)
 
@@ -3095,10 +3103,12 @@ async def yookassa_webhook(request: Request):
                 # /subscription) + (2) активация subscriptions + included_credits в
                 # кошелёк (источник тарифа для метеринга). Обе системы наполняются.
                 if payment.get("status") == "succeeded" and payment.get("paid"):
+                    sub_tenant = meta["tenant_id"]
                     card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
-                    row = await db.mark_service_invoice_paid_by_payment(payment_id, card_last4=card)
-                    if row is not None and await db.is_subscription_canceled():
-                        await db.set_subscription_canceled(False, actor="yookassa-webhook",
+                    row = await db.mark_service_invoice_paid_by_payment(
+                        payment_id, tenant_id=sub_tenant, card_last4=card)
+                    if row is not None and await db.is_subscription_canceled(sub_tenant):
+                        await db.set_subscription_canceled(sub_tenant, False, actor="yookassa-webhook",
                                                            ip=None, user_agent=None)
                     amount_micro = money.rub_to_micro(
                         (payment.get("amount") or {}).get("value") or "0")
@@ -3121,14 +3131,19 @@ async def yookassa_webhook(request: Request):
                         await db.renew_subscription(
                             meta["tenant_id"], sub_id, payment_id,
                             amount_micro, config.SERVICE_PLAN_PERIOD_DAYS)
-            elif payment.get("status") == "succeeded" and payment.get("paid"):
-                # Ветка СЧЁТА ПОДПИСКИ без нового kind (legacy-фолбэк: старые/ручные
-                # платежи, публичный лендинг). Поведение до Wave 4, без изменений.
+            elif (payment.get("status") == "succeeded" and payment.get("paid")
+                  and meta.get("tenant_id")):
+                # Legacy-фолбэк счёта подписки БЕЗ нового kind, но С tenant_id в metadata
+                # (старые/ручные платежи). service_invoices под RLS → tenant обязателен;
+                # платежи лендинга (service_landing) счёт не создают, а platform_subscription
+                # обработан выше — поэтому без tenant_id тут отмечать нечего (no-op).
+                lt = meta["tenant_id"]
                 card = (((payment.get("payment_method") or {}).get("card") or {}).get("last4"))
-                row = await db.mark_service_invoice_paid_by_payment(payment_id, card_last4=card)
+                row = await db.mark_service_invoice_paid_by_payment(
+                    payment_id, tenant_id=lt, card_last4=card)
                 # Оплата возобновляет подписку — снимаем флаг отмены (если стоял).
-                if row is not None and await db.is_subscription_canceled():
-                    await db.set_subscription_canceled(False, actor="yookassa-webhook",
+                if row is not None and await db.is_subscription_canceled(lt):
+                    await db.set_subscription_canceled(lt, False, actor="yookassa-webhook",
                                                        ip=None, user_agent=None)
     except Exception:
         processed_ok = False
