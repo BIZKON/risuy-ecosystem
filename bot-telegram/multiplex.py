@@ -95,7 +95,9 @@ async def t_text(message: Message, bot: Bot) -> None:
         exclude_tg_message_id=message.message_id,
         limit=config.AI_HISTORY_MESSAGES,
     )
-    answer, _msg_id = await ai.ask_ai(message.text, None, cfg, history=history)
+    # A3: ask_ai сам вырезает служебный маркер эскалации (единая точка) → клиент тенант-бота
+    # его НЕ видит. _esc — на будущее (per-tenant эскалация ещё не подключена), пока игнорируем.
+    answer, _msg_id, _esc = await ai.ask_ai(message.text, None, cfg, history=history)
     # rich=True: ответ Лии тенант-бота — markdown→Telegram-HTML с фолбэком на plain (§8.7).
     await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
 

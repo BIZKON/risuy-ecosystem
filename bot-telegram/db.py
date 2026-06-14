@@ -190,6 +190,37 @@ async def get_lead_persona(tg_user_id: int) -> str | None:
         return None
 
 
+# ── A3: эскалация лида менеджерам (дедуп — одна карточка на лид) ───────────────
+async def claim_lead_escalation(tg_user_id: int) -> bool:
+    """Атомарно «застолбить» эскалацию лида: escalated_at NULL → now(). True — застолбили
+    сейчас (первая эскалация), False — уже эскалирован / нет лида / сбой. tenant-scoped.
+    Дедуп от гонки двух подряд сообщений: WHERE escalated_at is null делает claim атомарным."""
+    try:
+        async with pool.acquire() as c:
+            res = await c.execute(
+                "update leads set escalated_at = now() "
+                "where tg_user_id = $1 and tenant_id = $2 and escalated_at is null",
+                tg_user_id, tenant_id(),
+            )
+        return res.endswith(" 1")
+    except Exception as e:  # noqa: BLE001 — эскалация не должна ломать авто-ответ
+        logging.getLogger(__name__).warning("claim_lead_escalation: %s", e)
+        return False
+
+
+async def release_lead_escalation(tg_user_id: int) -> None:
+    """Откатить claim (escalated_at → NULL), если карточка менеджерам НЕ ушла (сбой отправки) —
+    чтобы следующее квалифицирующее сообщение попробовало снова, а лид не «потерялся»."""
+    try:
+        async with pool.acquire() as c:
+            await c.execute(
+                "update leads set escalated_at = null where tg_user_id = $1 and tenant_id = $2",
+                tg_user_id, tenant_id(),
+            )
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("release_lead_escalation: %s", e)
+
+
 # ── Перехват (bot_paused) ────────────────────────────────────────────────────
 async def is_bot_paused(tg_user_id: int) -> bool:
     """True, если оператор взял ручное управление этим лидом. Нет строки → False."""

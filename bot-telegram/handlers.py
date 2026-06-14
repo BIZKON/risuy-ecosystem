@@ -16,6 +16,7 @@ from aiogram.types import (
 import ai
 import config
 import db
+import escalation
 import kb
 import messaging
 import texts
@@ -305,17 +306,22 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
         exclude_tg_message_id=message.message_id,
         limit=config.AI_HISTORY_MESSAGES,
     )
-    answer, msg_id = await ai.ask_ai(
+    answer, msg_id, esc_payload = await ai.ask_ai(
         user_text, data.get("ai_parent_id"), ai_cfg, history=history
     )
     if msg_id:
         await state.update_data(ai_parent_id=msg_id)
+    # A3: служебный маркер эскалации уже вырезан в ai.ask_ai (единая точка). esc_payload != None
+    # → горячий лид; передаём менеджерам ПОСЛЕ отправки ответа клиенту.
     # Гонка Лии (§4): ask_liya мог идти до 30с — оператор мог включить паузу за это
     # время. Повторно проверяем ПЕРЕД отправкой; на паузе ответ не шлём.
     if await db.is_bot_paused(message.from_user.id):
         return
     # rich=True: ответ Лии — markdown(LLM)→Telegram-HTML с фолбэком на plain (красивый текст, §8.7).
     await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
+    # A3: горячий лид → карточка менеджерам в ТГ-группу/тему (дедуп; не роняет ответ клиенту).
+    if esc_payload is not None:
+        await escalation.escalate(bot, message.from_user.id, esc_payload)
 
 
 async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bot):

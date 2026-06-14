@@ -168,6 +168,17 @@ CB_FAIL_RATIO = float(os.environ.get("CB_FAIL_RATIO", "0.30"))   # доля fail
 OPS_CHAT_ID_raw = os.environ.get("OPS_CHAT_ID", "")
 OPS_CHAT_ID = int(OPS_CHAT_ID_raw) if OPS_CHAT_ID_raw.lstrip("-").isdigit() else (OPS_CHAT_ID_raw or None)
 
+# ── A3: эскалация горячего лида менеджерам (карточка в ТГ-группу/тему) ──────────
+# Лия в ответе ставит маркер [[ESCALATE]]{json}[[/ESCALATE]] (после квалификации/по запросу) →
+# бот вырезает маркер из ответа клиенту и постит карточку лида в группу менеджеров (опц. в тему
+# форума MANAGER_TOPIC_ID). Бот ДОЛЖЕН быть участником/админом группы. Пусто → эскалация OFF
+# (маркер всё равно вырезается, чтобы клиент его не видел). Дедуп — одна карточка на лид.
+MANAGER_GROUP_ID_raw = os.environ.get("MANAGER_GROUP_ID", "")
+MANAGER_GROUP_ID = int(MANAGER_GROUP_ID_raw) if MANAGER_GROUP_ID_raw.lstrip("-").isdigit() else None
+MANAGER_TOPIC_ID_raw = os.environ.get("MANAGER_TOPIC_ID", "")
+MANAGER_TOPIC_ID = int(MANAGER_TOPIC_ID_raw) if MANAGER_TOPIC_ID_raw.isdigit() else None
+MANAGER_ESCALATION_ENABLED = MANAGER_GROUP_ID is not None
+
 
 # ── ГРАНИЦА РАССЫЛОК: канал гейта НИКОГДА не получает контент рассылок ─────────
 # Канал (@lesov_art_school) бот использует ТОЛЬКО для проверки подписки нового

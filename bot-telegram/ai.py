@@ -15,6 +15,7 @@ import aiohttp
 
 import config
 import db
+import escalation
 from shared.metering import charge_usage, get_tenant_plan
 from shared.money import ceil_mul
 
@@ -363,6 +364,21 @@ def _fallback_due() -> bool:
 
 
 async def ask_ai(
+    text: str, parent_message_id: str | None, cfg: dict,
+    *, history: list[dict] | None = None,
+) -> tuple[str, str | None, dict | None]:
+    """ЕДИНАЯ точка ответа Лии: бэкенд-диспетчер + ОБЯЗАТЕЛЬНАЯ вырезка служебного маркера
+    эскалации (A3). Возвращает (ответ_БЕЗ_маркера, msg_id, esc_payload).
+    esc_payload != None → горячий лид (вызывающий передаёт менеджерам через escalation.escalate).
+    Вырезка здесь, а не у вызывающих, — единая точка: ни School, ни мультиплекс-тенант, ни
+    будущий вызывающий НЕ утечёт маркер клиенту (ревью A3, high: утечка в multiplex + усечённый
+    маркер). parse_escalation вырезает и парный, и осиротевший/усечённый маркер."""
+    answer, msg_id = await _ask_ai_backend(text, parent_message_id, cfg, history=history)
+    answer, esc_payload = escalation.parse_escalation(answer)
+    return answer, msg_id, esc_payload
+
+
+async def _ask_ai_backend(
     text: str, parent_message_id: str | None, cfg: dict,
     *, history: list[dict] | None = None,
 ) -> tuple[str, str | None]:

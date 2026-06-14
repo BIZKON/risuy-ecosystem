@@ -418,9 +418,13 @@ def kind_for_mime(mime: str | None) -> str:
 # точечных ответов оператора (outbox 1:1) markup не передаётся — это не маркетинг.
 async def raw_send_text(bot: Bot, chat_id: int, text: str,
                         *, reply_markup: Any | None = None,
-                        prio: int = PRIO_BACKGROUND, rich: bool = False) -> Message:
+                        prio: int = PRIO_BACKGROUND, rich: bool = False,
+                        message_thread_id: int | None = None) -> Message:
+    # message_thread_id — для постинга в ТЕМУ форум-группы (эскалация менеджерам). None →
+    # обычная лента чата. aiogram игнорит None, поэтому передаём как есть.
     return await _deliver(
-        lambda body, pm: bot.send_message(chat_id, body, parse_mode=pm, reply_markup=reply_markup),
+        lambda body, pm: bot.send_message(chat_id, body, parse_mode=pm, reply_markup=reply_markup,
+                                          message_thread_id=message_thread_id),
         original_text=text[:TEXT_LIMIT], rich=rich, prio=prio,
     )
 
