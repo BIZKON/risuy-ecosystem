@@ -2328,6 +2328,103 @@ async def set_admin_user_password_with_audit(
 
 
 # =========================================================================== #
+# Раздел «Профиль» (личный кабинет клиента: свой профиль, безопасность, способы входа).
+# Все операции — над СОБСТВЕННОЙ учёткой (actor == username); кросс-аккаунтных правок нет.
+# account_identities — БЕЗ RLS (резолв до сессии), admin_users/admin_sessions — тоже.
+# =========================================================================== #
+async def get_account(username: str) -> asyncpg.Record | None:
+    """Учётка для «Профиля»: роль/активность/даты (БЕЗ password_hash). None — нет в admin_users
+    (например, env-админ — платформенный супер вне БД: его профиль рендерится как read-only)."""
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select username, role, active, created_at, updated_at from admin_users where username = $1",
+            username,
+        )
+
+
+async def list_account_identities(username: str) -> list[asyncpg.Record]:
+    """Способы входа учётки (email/телефон/ВК/ТГ) для «Профиля». Свежие сверху по дате привязки."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            "select provider, external_id, verified, display_name, created_at, last_login_at "
+            "from account_identities where username = $1 order by created_at",
+            username,
+        )
+
+
+async def set_account_display_name_with_audit(
+    username: str, display_name: str | None, *, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Обновить отображаемое имя клиента (по ВСЕМ его личностям — это одно имя пользователя)
+    + аудит. False — у учётки нет ни одной личности (нечего обновлять, напр. env-админ).
+    display_name уже обрезан/нормализован вызывающим (app.py); пустое → NULL."""
+    name = (display_name or "").strip() or None
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute(
+                "update account_identities set display_name = $2 where username = $1",
+                username, name,
+            )
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=username, action="account_display_name", ip=ip, user_agent=user_agent,
+                detail={"username": username},
+            )
+    return True
+
+
+async def change_own_password_with_audit(
+    username: str, password_hash: str, *, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Сменить СВОЙ пароль (UPDATE хеша + аудит). actor==username (самообслуживание, не /team).
+    False — нет такого юзера. Текущий пароль вызывающий ОБЯЗАН проверить ДО вызова. Plain НЕ логируем."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute(
+                "update admin_users set password_hash = $2, updated_at = now() where username = $1",
+                username, password_hash,
+            )
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=username, action="account_password_change", ip=ip, user_agent=user_agent,
+                detail={},
+            )
+    return True
+
+
+async def revoke_all_sessions_with_audit(
+    username: str, *, keep_sid: str | None = None, ip: str | None = None, user_agent: str | None = None,
+) -> int:
+    """Завершить ВСЕ сеансы пользователя («выйти на всех устройствах»). keep_sid — сессия,
+    которую оставить живой (None → ревокать все, включая текущую). Возврат: число ревокнутых.
+    Только над своими сессиями (actor==username); чужие не трогаем."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            if keep_sid:
+                res = await c.execute(
+                    "update admin_sessions set revoked = true "
+                    "where actor = $1 and revoked = false and sid <> $2",
+                    username, keep_sid,
+                )
+            else:
+                res = await c.execute(
+                    "update admin_sessions set revoked = true where actor = $1 and revoked = false",
+                    username,
+                )
+            await _insert_audit(
+                c, actor=username, action="account_sessions_revoke_all", ip=ip, user_agent=user_agent,
+                detail={"kept_current": bool(keep_sid)},
+            )
+    # 'UPDATE N' → N
+    try:
+        return int(res.rsplit(" ", 1)[1])
+    except (ValueError, IndexError):
+        return 0
+
+
+# =========================================================================== #
 # ПЛАТЕЖИ / ЗАКАЗЫ (раздел «Платежи», schema_orders.sql). Phase 1A: панель
 # фиксирует продажи руками (source='manual'), читает для дашборда. Бот в 1A не
 # участвует. panel_rw: SELECT + INSERT/UPDATE на колонках (provider_payment_id —

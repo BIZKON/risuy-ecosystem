@@ -1418,3 +1418,50 @@ select.field__input {
 .bp-list { margin: 8px 0 0; padding-left: 0; list-style: none; display: grid; gap: 9px; }
 .bp-list li { position: relative; padding-left: 26px; font-size: 14px; color: var(--ink-soft); line-height: 1.5; }
 .bp-list li::before { content: "✓"; position: absolute; left: 0; top: 0; color: var(--ok); font-weight: 800; }
+
+/* ── Раздел «Профиль» (личный кабинет: /account) ── */
+/* Кликабельная плашка пользователя (сайдбар-подвал + верхняя панель) → /account. */
+.sidebar__user--link { cursor: pointer; border-radius: 8px; }
+.sidebar__user--link:hover { background: var(--surface-2); color: var(--ink-soft); text-decoration: none; }
+.appbar__user--link:hover { color: var(--ink-soft); text-decoration: none; }
+
+/* Карточки раздела идут стопкой — разделяем вертикальным ритмом. */
+.page-account .card + .card { margin-top: 14px; }
+
+/* Шапка профиля: аватар-инициалы + имя + роль. */
+.acct-ident { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.acct-ava {
+  flex: none; width: 48px; height: 48px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent);
+  font-weight: 700; font-size: 16px; display: grid; place-items: center; text-transform: uppercase;
+}
+.acct-name { font-size: 17px; font-weight: 650; margin-bottom: 5px; }
+
+/* Адаптивная сетка пар «label/значение» внутри карточки. */
+.acct-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 22px; }
+.acct-field-name { max-width: 440px; }
+.acct-static { padding: 8px 0; font-size: 14px; color: var(--ink); display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.acct-static--neg { color: var(--danger); }
+
+/* Список строк-настроек (сеансы, 2FA, способы входа, опасная зона). */
+.acct-rows { display: flex; flex-direction: column; }
+.acct-rows--spaced { margin-top: 8px; }
+.acct-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 14px 0; border-top: 1px solid var(--line-soft);
+}
+.acct-rows > .acct-row:first-child { border-top: 0; }
+.acct-row__main { min-width: 0; }
+.acct-rt { font-size: 14px; font-weight: 550; color: var(--ink); }
+.acct-rs { font-size: 12.5px; color: var(--ink-faint); margin-top: 3px; line-height: 1.45; word-break: break-word; }
+
+/* Способ входа: иконка + название + значение. */
+.acct-prov { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.acct-prov__ico { flex: none; color: var(--ink-soft); display: inline-flex; }
+
+/* Действия карточки. */
+.acct-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+.acct-actions .btn .acct-prov__svg { margin-right: 7px; }
+
+/* Недостающий вариант пилюли (предупреждение) — золото. */
+.pill--warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }

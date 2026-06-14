@@ -669,3 +669,24 @@ TENANT_SECRET_VALUE_MAX = 4096   # потолок длины значения с
 # владельца по ТЗ §13.4 — зафиксировано в DECISIONS).
 WALLET_TOPUP_MIN_RUB = _opt_int("WALLET_TOPUP_MIN_RUB", 100)
 WALLET_TOPUP_MAX_RUB = _opt_int("WALLET_TOPUP_MAX_RUB", 100_000)
+
+# ── Раздел «Профиль» (личный кабинет клиента: профиль, безопасность, способы входа) ──
+# Кнопка «Поддержка» в «Профиле» ведёт в ТГ-чат поддержки разработчика (владелец ведёт
+# там работу с клиентами). Отдельный ключ SUPPORT_URL; фолбэк — общий SERVICE_CONTACT_URL
+# (тот же контакт). Пусто → кнопка не показывается. Схема валидируется при рендере
+# (app._safe_support_url): допустимы только https / tg / mailto — без javascript:/data:.
+SUPPORT_URL = (os.environ.get("SUPPORT_URL", "").strip() or SERVICE_CONTACT_URL)
+SUPPORT_URL_SCHEMES = ("https://", "tg://", "mailto:")
+
+# Смена СВОЕГО пароля в «Профиле» — те же границы, что у операторских паролей (schema_team).
+ACCOUNT_PASSWORD_MIN = TEAM_PASSWORD_MIN
+ACCOUNT_PASSWORD_MAX = TEAM_PASSWORD_MAX
+# Потолок отображаемого имени — совпадает с safe_name в db.create_client_account.
+ACCOUNT_DISPLAY_NAME_MAX = 120
+# Человекочитаемые подписи способов входа (account_identities.provider).
+ACCOUNT_PROVIDER_LABELS = {
+    "email": "Электронная почта",
+    "phone": "Телефон",
+    "telegram": "Telegram",
+    "vk": "ВКонтакте",
+}

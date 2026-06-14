@@ -3960,6 +3960,179 @@ async def team_reset_password(
 
 
 # =========================================================================== #
+# Раздел «Профиль» — личный кабинет пользователя (профиль, безопасность, способы
+# входа, кабинет, поддержка). Все операции — над СВОЕЙ учёткой (actor==username),
+# поэтому БЕЗ is_platform-гейта (это собственный кабинет). env-админ (платформенный
+# супер вне admin_users) видит профиль read-only: правка имени/пароля недоступна.
+# =========================================================================== #
+def _safe_support_url(url: str) -> str:
+    """Ссылка «Поддержка» — только из allow-list схем (https/tg/mailto), иначе пусто.
+    Защита от javascript:/data: в href. Значение приходит из env владельца (SUPPORT_URL)."""
+    u = (url or "").strip()
+    return u if u.startswith(config.SUPPORT_URL_SCHEMES) else ""
+
+
+def _account_saved_text(code: str | None) -> str | None:
+    return {
+        "profile": "Профиль обновлён.",
+        "password": "Пароль изменён.",
+        "sessions": "Все другие сеансы завершены — на остальных устройствах нужно войти заново.",
+    }.get(code or "")
+
+
+def _account_err_text(code: str | None) -> str | None:
+    return {
+        "bad_name": f"Имя — до {config.ACCOUNT_DISPLAY_NAME_MAX} символов.",
+        "no_identity": "Для этой учётной записи правка профиля недоступна.",
+        "platform_pwd": "Пароль администратора платформы задаётся через переменные окружения, не здесь.",
+        "bad_current": "Текущий пароль неверный.",
+        "bad_password": f"Новый пароль — от {config.ACCOUNT_PASSWORD_MIN} до {config.ACCOUNT_PASSWORD_MAX} символов.",
+        "mismatch": "Новый пароль и повтор не совпадают.",
+        "not_found": "Учётная запись не найдена.",
+    }.get(code or "")
+
+
+@app.get("/account", response_class=HTMLResponse)
+async def account_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: str | None = None,
+    err: str | None = None,
+):
+    is_platform = session.is_platform
+    acct = await db.get_account(session.actor)          # None для env-админа (вне admin_users)
+    idents = await db.list_account_identities(session.actor)
+    by_provider = {r["provider"]: r for r in idents}
+    email_ident = by_provider.get("email")
+    # Имя в шапке: первое непустое display_name среди личностей.
+    display_name = next((r["display_name"] for r in idents if r["display_name"]), None)
+    # Имя живёт в account_identities → правка возможна ТОЛЬКО при наличии личности
+    # (team-оператор из /team имеет строку admin_users БЕЗ личности — имени негде храниться).
+    can_edit_name = (not is_platform) and bool(idents)
+    # Пароль живёт в admin_users → доступен любому БД-юзеру (вкл. team-оператора), кроме env-админа.
+    can_edit_password = (acct is not None) and (not is_platform)
+
+    # Способы входа: все 3 канала со статусом. Реальная привязка ВК/ТГ к существующему
+    # аккаунту появится с включением OAuth (handoff A) — сейчас карта read-only (флаги OFF).
+    tg_on = config.PUBLIC_SIGNUP_ENABLED and config.OAUTH_TELEGRAM_ENABLED
+    vk_on = config.PUBLIC_SIGNUP_ENABLED and oauth_vk.enabled()
+    login_methods = [
+        {"provider": "email", "label": config.ACCOUNT_PROVIDER_LABELS["email"],
+         "connected": email_ident is not None,
+         "value": email_ident["external_id"] if email_ident else None,
+         "verified": bool(email_ident["verified"]) if email_ident else False,
+         "available": True},
+        {"provider": "telegram", "label": config.ACCOUNT_PROVIDER_LABELS["telegram"],
+         "connected": "telegram" in by_provider,
+         "value": by_provider["telegram"]["display_name"] if "telegram" in by_provider else None,
+         "verified": "telegram" in by_provider,
+         "available": tg_on},
+        {"provider": "vk", "label": config.ACCOUNT_PROVIDER_LABELS["vk"],
+         "connected": "vk" in by_provider,
+         "value": by_provider["vk"]["display_name"] if "vk" in by_provider else None,
+         "verified": "vk" in by_provider,
+         "available": vk_on},
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "account.html",
+        {
+            "active": "account",
+            "session": session,
+            "csrf_token": session.csrf_token,
+            "is_platform": is_platform,
+            "can_edit_name": can_edit_name,
+            "can_edit_password": can_edit_password,
+            "login": session.actor,
+            "role_label": ("Администратор платформы" if is_platform else "Владелец кабинета"),
+            "display_name": display_name or "",
+            "email": email_ident["external_id"] if email_ident else None,
+            "email_verified": bool(email_ident["verified"]) if email_ident else False,
+            "created_at": acct["created_at"] if acct else None,
+            "login_methods": login_methods,
+            "linking_hint": not (tg_on and vk_on),
+            "tenant_name": session.active_tenant_name,
+            "tenant_status": session.active_tenant_status,
+            # «Кабинет»/кошелёк показываем ТОЛЬКО клиенту (его собственный тенант). У env-админа
+            # active_tenant — произвольный чужой клиент → на ЛИЧНОМ /account его не выводим
+            # (он управляет клиентами в /tenants /subscription). Тариф из глобального service_invoices
+            # (без tenant_id/RLS) на /account НЕ показываем — иначе клиент B видел бы тариф клиента A.
+            "wallet": (await _wallet_ctx(session)) if not is_platform else None,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+            "password_min": config.ACCOUNT_PASSWORD_MIN,
+            "name_max": config.ACCOUNT_DISPLAY_NAME_MAX,
+            "saved": _account_saved_text(saved),
+            "err": _account_err_text(err),
+        },
+    )
+
+
+@app.post("/account/profile")
+async def account_update_profile(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    display_name: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if session.is_platform:                              # env-админ: личности нет, править нечего
+        return RedirectResponse(url="/account?err=no_identity", status_code=303)
+    name = (display_name or "").strip()
+    if len(name) > config.ACCOUNT_DISPLAY_NAME_MAX:
+        return RedirectResponse(url="/account?err=bad_name", status_code=303)
+    ok = await db.set_account_display_name_with_audit(
+        session.actor, name, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/account?saved=profile" if ok else "/account?err=no_identity", status_code=303)
+
+
+@app.post("/account/password")
+async def account_change_password(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    current_password: str = Form(""),
+    new_password: str = Form(""),
+    confirm_password: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    # env-админ: пароль платформенного супера живёт в переменных окружения, не в БД.
+    if session.is_platform:
+        return RedirectResponse(url="/account?err=platform_pwd", status_code=303)
+    # Подтверждение личности: текущий пароль ДОЛЖЕН сойтись (constant-time внутри authenticate).
+    verified = await auth.authenticate(session.actor, current_password)
+    if verified is None or verified[0] != session.actor:
+        await db.audit(actor=session.actor, action="account_password_fail",
+                       ip=_ip(request), user_agent=_ua(request), detail={"reason": "bad_current"})
+        return RedirectResponse(url="/account?err=bad_current", status_code=303)
+    if not (config.ACCOUNT_PASSWORD_MIN <= len(new_password) <= config.ACCOUNT_PASSWORD_MAX):
+        return RedirectResponse(url="/account?err=bad_password", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse(url="/account?err=mismatch", status_code=303)
+    ok = await db.change_own_password_with_audit(
+        session.actor, auth.hash_password(new_password),
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/account?saved=password" if ok else "/account?err=not_found", status_code=303)
+
+
+@app.post("/account/sessions/revoke-all")
+async def account_revoke_sessions(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    # «Выйти на всех устройствах»: ревокаем ВСЕ сессии актора КРОМЕ текущей — пользователь
+    # остаётся залогинен здесь, прочие устройства выкидываются. Только свои сессии (actor).
+    await db.revoke_all_sessions_with_audit(
+        session.actor, keep_sid=session.sid, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/account?saved=sessions", status_code=303)
+
+
+# =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #
 @app.exception_handler(AuthRedirect)

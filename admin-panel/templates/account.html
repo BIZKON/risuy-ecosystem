@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Профиль{% endblock %}
+{% block body_class %}page-account{% endblock %}
+
+{# Иконка способа входа — инлайновый SVG (stroke 1.7, как в сайдбаре). #}
+{% macro prov_icon(provider) %}
+<svg class="acct-prov__svg" viewBox="0 0 24 24" width="20" height="20" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if provider == 'email' -%}<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>
+{%- elif provider == 'telegram' -%}<path d="M3 11l18-8-8 18-2-7-8-3z"/>
+{%- elif provider == 'vk' -%}<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 9 9 0 0 1-4-1L3 20l1-5.5a8.5 8.5 0 0 1-1-4A8.38 8.38 0 0 1 11.5 2 8.5 8.5 0 0 1 21 11.5z"/>
+{%- else -%}<circle cx="12" cy="8" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Профиль</h1>
+  <p class="page-head__hint">Ваша учётная запись, способы входа и безопасность. Управление тарифом и оплатой — в разделе «Подписка».</p>
+</div>
+
+{% if saved %}{{ flash(saved, 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Профиль ── #}
+<section class="card" aria-label="Профиль">
+  <div class="card__title">Профиль</div>
+  <div class="acct-ident">
+    <span class="acct-ava" aria-hidden="true">{{ (display_name or email or login)[:2] }}</span>
+    <div>
+      <div class="acct-name">{{ display_name or email or login }}</div>
+      <span class="pill pill--ok">{{ role_label }}</span>
+    </div>
+  </div>
+
+  {% if can_edit_name %}
+  <form method="post" action="/account/profile" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field acct-field-name">
+      <span class="field__label">Отображаемое имя</span>
+      <input class="field__input" type="text" name="display_name" maxlength="{{ name_max }}"
+             value="{{ display_name }}" placeholder="Как к вам обращаться">
+    </label>
+    <div class="form-actions"><button class="btn btn--primary" type="submit">Сохранить</button></div>
+  </form>
+  {% elif is_platform %}
+  <p class="card__note">Это встроенная учётная запись администратора платформы — она живёт вне базы пользователей, поэтому имя и пароль здесь не редактируются.</p>
+  {% else %}
+  <p class="card__note">Отображаемое имя станет редактируемым после привязки способа входа (email, Telegram или ВКонтакте).</p>
+  {% endif %}
+
+  <div class="acct-grid">
+    <div class="field">
+      <span class="field__label">Логин <span class="field__hint">изменить нельзя</span></span>
+      <div class="acct-static mono">{{ login }}</div>
+    </div>
+    {% if not is_platform %}
+    <div class="field">
+      <span class="field__label">Email</span>
+      <div class="acct-static">
+        {% if email %}<span class="mono">{{ email }}</span>
+          {% if email_verified %}<span class="pill pill--ok">подтверждён</span>
+          {% else %}<span class="pill pill--warn">не подтверждён</span>{% endif %}
+        {% else %}<span class="muted">—</span>{% endif %}
+      </div>
+    </div>
+    <div class="field">
+      <span class="field__label">В системе с</span>
+      <div class="acct-static">{{ created_at.strftime('%d.%m.%Y') if created_at else '—' }}</div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{# ── Поддержка (ТГ-чат разработчика) ── #}
+<section class="card" aria-label="Поддержка">
+  <div class="card__title">Поддержка</div>
+  {% if support_url %}
+  <p class="card__note">Вопрос по работе ИИ-сотрудника, оплате или настройке — напишите нам в чат поддержки, поможем.</p>
+  <div class="acct-actions">
+    <a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">
+      {{ prov_icon('telegram') }} Написать в поддержку
+    </a>
+  </div>
+  {% else %}
+  <p class="card__note">Контакт поддержки скоро появится здесь.</p>
+  {% endif %}
+</section>
+
+{# ── Безопасность ── #}
+<section class="card" aria-label="Безопасность">
+  <div class="card__title">Безопасность</div>
+  {% if can_edit_password %}
+  <p class="card__note">Пароль хранится только криптографическим хешем (argon2id) — восстановить его нельзя, можно лишь сменить на новый.</p>
+  <form method="post" action="/account/password" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="acct-grid">
+      <label class="field">
+        <span class="field__label">Текущий пароль</span>
+        <input class="field__input" type="password" name="current_password" required autocomplete="current-password">
+      </label>
+      <label class="field">
+        <span class="field__label">Новый пароль <span class="field__hint">мин. {{ password_min }}</span></span>
+        <input class="field__input" type="password" name="new_password" minlength="{{ password_min }}" required autocomplete="new-password">
+      </label>
+      <label class="field">
+        <span class="field__label">Повторите новый</span>
+        <input class="field__input" type="password" name="confirm_password" minlength="{{ password_min }}" required autocomplete="new-password">
+      </label>
+    </div>
+    <div class="form-actions"><button class="btn btn--primary" type="submit">Сменить пароль</button></div>
+  </form>
+  {% else %}
+  <p class="card__note">Пароль администратора платформы задаётся через переменные окружения сервера, а не в этом разделе.</p>
+  {% endif %}
+
+  <div class="acct-rows acct-rows--spaced">
+    <div class="acct-row">
+      <div class="acct-row__main">
+        <div class="acct-rt">Активные сеансы</div>
+        <div class="acct-rs">Вы вошли с одного устройства. Если входили на чужом — завершите остальные сеансы.</div>
+      </div>
+      <form method="post" action="/account/sessions/revoke-all">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn btn--danger-ghost" type="submit">Завершить другие сеансы</button>
+      </form>
+    </div>
+    <div class="acct-row">
+      <div class="acct-row__main">
+        <div class="acct-rt">Двухфакторная защита (2FA)</div>
+        <div class="acct-rs">Дополнительный код-подтверждение при входе.</div>
+      </div>
+      <span class="pill pill--muted">скоро</span>
+    </div>
+  </div>
+</section>
+
+{# ── Способы входа ── #}
+<section class="card" aria-label="Способы входа">
+  <div class="card__title">Способы входа</div>
+  {% if linking_hint %}<p class="card__note">Привязка ВКонтакте и Telegram появится после включения входа через них.</p>{% endif %}
+  <div class="acct-rows">
+    {% for m in login_methods %}
+    <div class="acct-row">
+      <div class="acct-prov">
+        <span class="acct-prov__ico">{{ prov_icon(m.provider) }}</span>
+        <div class="acct-row__main">
+          <div class="acct-rt">{{ m.label }}</div>
+          <div class="acct-rs">{% if m.connected %}{{ m.value or 'привязан' }}{% else %}не привязан{% endif %}</div>
+        </div>
+      </div>
+      {% if m.connected %}
+        {% if m.provider == 'email' %}<span class="pill pill--ok">основной</span>
+        {% else %}<span class="pill pill--ok">привязан</span>{% endif %}
+      {% elif m.available %}
+        <span class="pill pill--muted">доступно при входе</span>
+      {% else %}
+        <span class="pill pill--muted">скоро</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+{# ── Кабинет (только для клиента — это его собственный тенант; у платформенного
+   супера active_tenant произвольный, поэтому секцию ему не показываем) ── #}
+{% if not is_platform %}
+<section class="card" aria-label="Кабинет">
+  <div class="card__title">Кабинет</div>
+  <div class="acct-grid">
+    <div class="field">
+      <span class="field__label">Название кабинета</span>
+      <div class="acct-static">{{ tenant_name or '—' }}</div>
+    </div>
+    <div class="field">
+      <span class="field__label">Статус</span>
+      <div class="acct-static">
+        {% if tenant_status == 'active' %}<span class="pill pill--ok">Активен</span>
+        {% elif tenant_status == 'provisioning' %}<span class="pill pill--warn">Готовится</span>
+        {% else %}<span class="pill pill--muted">{{ tenant_status or '—' }}</span>{% endif %}
+      </div>
+    </div>
+    {% if wallet %}
+    <div class="field">
+      <span class="field__label">Кошелёк</span>
+      <div class="acct-static mono{% if wallet.balance_negative %} acct-static--neg{% endif %}">{{ wallet.balance }} ₽</div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="acct-actions">
+    <a class="btn btn--secondary" href="/subscription">Управление подпиской</a>
+  </div>
+</section>
+{% endif %}
+
+{# ── Опасная зона ── #}
+<section class="card card--danger" aria-label="Опасная зона">
+  <div class="card__title">Опасная зона</div>
+  <div class="acct-rows">
+    <div class="acct-row">
+      <div class="acct-row__main">
+        <div class="acct-rt">Закрыть кабинет и удалить данные</div>
+        <div class="acct-rs">Действие безвозвратно. Сейчас выполняется по обращению в поддержку.</div>
+      </div>
+      {% if support_url %}<a class="btn btn--danger-ghost" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">По обращению</a>
+      {% else %}<span class="pill pill--muted">по обращению</span>{% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}
