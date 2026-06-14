@@ -74,13 +74,19 @@ async def main() -> None:
     # ── 2. format_card ──
     print("2. format_card:")
     card = escalation.format_card({"name": "Анна", "phone": "89211234567", "product": "В Академию Репина",
-                                   "reason": "qualified", "intent": "enroll"}, tg_user_id=TG)
-    check("карточка содержит имя/телефон/курс/tg_id", all(s in card for s in ("Анна", "89211234567", "В Академию Репина", str(TG))))
+                                   "reason": "qualified", "intent": "enroll", "summary": "Хочет курс, готова платить."},
+                                  tg_user_id=TG, lead_id="abc-123", panel_base="https://panel.example")
+    check("карточка содержит имя/телефон/курс", all(s in card for s in ("Анна", "89211234567", "В Академию Репина")))
     check("enum-коды переведены на русский (qualified/enroll)",
           "квалифицирован" in card and "запись на курс" in card and "qualified" not in card and "enroll" not in card, repr(card))
+    check("ссылка на диалог в панели", "https://panel.example/dialogs/abc-123" in card)
+    check("прямой ЧС tg://user?id", f"tg://user?id={TG}" in card)
+    check("«Сводка диалога» как подпись", "Сводка диалога:" in card)
     check("карточка plain (без HTML-тегов)", "<" not in card)
+    card_nopanel = escalation.format_card({"name": "Б"}, tg_user_id=TG)
+    check("без panel_base — только tg-ссылка, без /dialogs/", f"tg://user?id={TG}" in card_nopanel and "/dialogs/" not in card_nopanel)
     card_empty = escalation.format_card({}, tg_user_id=TG, raw="raw-signal")
-    check("пустой payload → сырой сигнал + tg_id", "raw-signal" in card_empty and str(TG) in card_empty)
+    check("пустой payload → сырой сигнал + tg-ссылка", "raw-signal" in card_empty and f"tg://user?id={TG}" in card_empty)
 
     # ── 3. claim/release дедуп (risuy_dev) ──
     print("3. claim/release дедуп:")
@@ -94,6 +100,7 @@ async def main() -> None:
                 "insert into leads(tg_user_id,messenger,source,status,name,tenant_id) "
                 "values($1,'tg','x','new','Тест',$2)", TG, tid)
         db.current_tenant_id.set(tid)  # активный тенант = тестовый
+        check("get_lead_id вернул id лида (для ссылки на диалог)", (await db.get_lead_id(TG)) is not None)
         c1 = await db.claim_lead_escalation(TG)
         c2 = await db.claim_lead_escalation(TG)
         check("первый claim = True (застолбил)", c1 is True)

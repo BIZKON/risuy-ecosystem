@@ -221,6 +221,20 @@ async def release_lead_escalation(tg_user_id: int) -> None:
         logging.getLogger(__name__).warning("release_lead_escalation: %s", e)
 
 
+async def get_lead_id(tg_user_id: int) -> str | None:
+    """id лида (uuid) по tg_user_id — для ссылки «диалог в панели» в карточке эскалации.
+    None — нет лида/сбой (тогда панель-ссылку не кладём, эскалация не падает)."""
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval(
+                "select id from leads where tg_user_id = $1 and tenant_id = $2",
+                tg_user_id, tenant_id())
+        return str(v) if v else None
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("get_lead_id: %s", e)
+        return None
+
+
 # ── Перехват (bot_paused) ────────────────────────────────────────────────────
 async def is_bot_paused(tg_user_id: int) -> bool:
     """True, если оператор взял ручное управление этим лидом. Нет строки → False."""

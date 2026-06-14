@@ -33,7 +33,7 @@ _MARKER_FRAG_RE = re.compile(r"\[\[/?ESCALATE(?:\]\]?)?.*", re.DOTALL | re.IGNOR
 _FIELDS = [
     ("reason", "Причина"), ("name", "Имя"), ("phone", "Телефон"),
     ("intent", "Тип запроса"), ("product", "Курс"), ("goal", "Цель"),
-    ("summary", "Итог"), ("next_step", "Менеджеру"),
+    ("summary", "Сводка диалога"), ("next_step", "Менеджеру"),
 ]
 # Русские подписи для машинных enum-кодов (Лия ставит коды; менеджер видит русский).
 # Коды стабильны для логики/фильтров — переводим ТОЛЬКО на показе. Неизвестный код → как есть.
@@ -83,9 +83,11 @@ def parse_escalation(text: str) -> tuple[str, dict | None]:
     return cleaned.strip(), payload
 
 
-def format_card(payload: dict, *, tg_user_id: int, raw: str | None = None) -> str:
+def format_card(payload: dict, *, tg_user_id: int, lead_id: str | None = None,
+                panel_base: str | None = None, raw: str | None = None) -> str:
     """Карточка лида менеджерам (plain, без разметки). Поля обрезаются; пустые/нестроковые
-    пропускаются; нет данных → сырой сигнал для ручного разбора."""
+    пропускаются; нет данных → сырой сигнал. Внизу — ссылки: диалог в панели (читать+ответить
+    через бота) и прямой ЧС клиента в Telegram (best-effort: без username может не открыться)."""
     lines = ["🔥 Горячий лид — передача менеджеру"]
     shown = False
     for key, label in _FIELDS:
@@ -93,7 +95,9 @@ def format_card(payload: dict, *, tg_user_id: int, raw: str | None = None) -> st
         if isinstance(v, (str, int, float)) and str(v).strip():
             # Нормализуем пробелы/переводы строк: payload из LLM → клиент не должен через \n
             # подделать визуальные строки-«поля» в чате менеджеров (ревью A3, disputed-харднинг).
-            clean_v = re.sub(r"\s+", " ", str(v)).strip()[:300]
+            # «Сводка диалога» — щедрее по длине (контекст для менеджера).
+            cap = 900 if key == "summary" else 300
+            clean_v = re.sub(r"\s+", " ", str(v)).strip()[:cap]
             # Машинные enum-коды (reason/intent) → русская подпись для менеджера.
             ru = _VALUE_RU.get(key)
             if ru:
@@ -104,7 +108,11 @@ def format_card(payload: dict, *, tg_user_id: int, raw: str | None = None) -> st
         lines.append("(данные лида не разобраны — сырой сигнал ниже)")
         if raw:
             lines.append(raw[:500])
-    lines.append(f"Telegram ID клиента: {tg_user_id}")
+    # Ссылки для менеджера. Telegram авто-линкует https:// и tg:// в plain-тексте.
+    lines.append("—")
+    if panel_base and lead_id:
+        lines.append(f"💬 Открыть диалог и ответить клиенту: {panel_base}/dialogs/{lead_id}")
+    lines.append(f"👤 Написать клиенту в Telegram: tg://user?id={tg_user_id}")
     return "\n".join(lines)[:3500]
 
 
@@ -119,7 +127,11 @@ async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = Non
         if not await db.claim_lead_escalation(tg_user_id):
             return  # уже эскалирован / нет лида / гонка проиграна
         try:
-            text = format_card(payload, tg_user_id=tg_user_id, raw=raw)
+            lead_id = await db.get_lead_id(tg_user_id)  # для ссылки на диалог в панели
+            text = format_card(
+                payload, tg_user_id=tg_user_id, lead_id=lead_id,
+                panel_base=config.PANEL_BASE_URL or None, raw=raw,
+            )
             await messaging.raw_send_text(
                 bot, config.MANAGER_GROUP_ID, text,
                 message_thread_id=config.MANAGER_TOPIC_ID, rich=False,

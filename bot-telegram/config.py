@@ -178,6 +178,10 @@ MANAGER_GROUP_ID = int(MANAGER_GROUP_ID_raw) if MANAGER_GROUP_ID_raw.lstrip("-")
 MANAGER_TOPIC_ID_raw = os.environ.get("MANAGER_TOPIC_ID", "")
 MANAGER_TOPIC_ID = int(MANAGER_TOPIC_ID_raw) if MANAGER_TOPIC_ID_raw.isdigit() else None
 MANAGER_ESCALATION_ENABLED = MANAGER_GROUP_ID is not None
+# Базовый URL админ-панели — для ссылки «открыть диалог и ответить» в карточке эскалации
+# ({PANEL_BASE_URL}/dialogs/<lead_id>). Пусто → панель-ссылку в карточку не кладём (остаётся
+# только прямой tg://user). Без завершающего слэша.
+PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").rstrip("/")
 
 
 # ── ГРАНИЦА РАССЫЛОК: канал гейта НИКОГДА не получает контент рассылок ─────────
