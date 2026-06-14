@@ -18,13 +18,14 @@ import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import Bot, BaseMiddleware
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject,
 )
 
 import config
 import db
+import richfmt
 import texts
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,27 @@ def _prio_for_source(source: str | None) -> int:
     return PRIO_INTERACTIVE if source in _INTERACTIVE_SOURCES else PRIO_BACKGROUND
 
 
+async def _deliver(
+    send: Callable[[str, str | None], Awaitable[Any]],
+    *, original_text: str, rich: bool, prio: int,
+) -> Any:
+    """Отправка текста с богатым форматированием и страховкой §8.7.
+
+    rich=True → конвертируем markdown(LLM) → Telegram-HTML (richfmt) и шлём parse_mode='HTML';
+    если Telegram отвергнет разметку (TelegramBadRequest — битый HTML) ИЛИ HTML длиннее лимита —
+    АВТО-ФОЛБЭК на plain-текст (исходный). Так Лия/бот пишут красиво, но НИКОГДА не молчат.
+    rich=False → как раньше, чистый plain. send(body, parse_mode) выполняет конкретный Bot API-вызов.
+    """
+    if rich and original_text:
+        html = richfmt.to_html(original_text)
+        if len(html) <= TEXT_LIMIT:
+            try:
+                return await _rate_limited_call(lambda: send(html, "HTML"), prio=prio)
+            except TelegramBadRequest:
+                logger.warning("rich-отправка отвергнута Telegram → фолбэк на plain", exc_info=True)
+    return await _rate_limited_call(lambda: send(original_text, None), prio=prio)
+
+
 # ── Классификаторы типов входящих/исходящих ──────────────────────────────────
 def classify_incoming(message: Message) -> tuple[str, str | None, str | None]:
     """Возвращает (kind, text, file_id) для входящего сообщения.
@@ -270,17 +292,19 @@ async def send_text(
     source: str,
     reply_markup: Any | None = None,
     log: bool = True,
+    rich: bool = False,
 ) -> Message | None:
     """Шлёт текст через общий bucket и зеркалит в messages(direction='out', source=...).
 
     source ∈ funnel|liya|nurture|manual|broadcast|system. log=False — для служебных
-    подсказок, которые не считаем диалогом (см. план §3). Возвращает отправленное
-    сообщение (или пробрасывает не-429 исключение caller'у).
+    подсказок, которые не считаем диалогом (см. план §3). rich=True — markdown→Telegram-HTML
+    с фолбэком на plain (§8.7), для ответов Лии (см. richfmt). В messages логируем ИСХОДНЫЙ
+    текст (читаемый markdown, не HTML). Возвращает отправленное сообщение (или 429-ретрай).
     """
     text = text[:TEXT_LIMIT]
-    sent: Message = await _rate_limited_call(
-        lambda: bot.send_message(tg_user_id, text, reply_markup=reply_markup),
-        prio=_prio_for_source(source),
+    sent: Message = await _deliver(
+        lambda body, pm: bot.send_message(tg_user_id, body, parse_mode=pm, reply_markup=reply_markup),
+        original_text=text, rich=rich, prio=_prio_for_source(source),
     )
     if log:
         await db.log_message(
@@ -301,16 +325,17 @@ async def reply_text(
     source: str,
     reply_markup: Any | None = None,
     log: bool = True,
+    rich: bool = False,
 ) -> Message | None:
     """Версия для хендлеров воронки/Лии: отвечает в чат события через общий bucket+лог.
 
     Семантически = message.answer(...), но проходит rate-limit и логируется. Использует
-    message.bot. Точечная замена message.answer в логируемых точках воронки.
+    message.bot. rich=True — markdown→Telegram-HTML с фолбэком на plain (§8.7).
     """
     text = text[:TEXT_LIMIT]
-    sent: Message = await _rate_limited_call(
-        lambda: message.answer(text, reply_markup=reply_markup),
-        prio=_prio_for_source(source),
+    sent: Message = await _deliver(
+        lambda body, pm: message.answer(body, parse_mode=pm, reply_markup=reply_markup),
+        original_text=text, rich=rich, prio=_prio_for_source(source),
     )
     if log and message.from_user is not None:
         await db.log_message(
@@ -393,10 +418,10 @@ def kind_for_mime(mime: str | None) -> str:
 # точечных ответов оператора (outbox 1:1) markup не передаётся — это не маркетинг.
 async def raw_send_text(bot: Bot, chat_id: int, text: str,
                         *, reply_markup: Any | None = None,
-                        prio: int = PRIO_BACKGROUND) -> Message:
-    return await _rate_limited_call(
-        lambda: bot.send_message(chat_id, text[:TEXT_LIMIT], reply_markup=reply_markup),
-        prio=prio,
+                        prio: int = PRIO_BACKGROUND, rich: bool = False) -> Message:
+    return await _deliver(
+        lambda body, pm: bot.send_message(chat_id, body, parse_mode=pm, reply_markup=reply_markup),
+        original_text=text[:TEXT_LIMIT], rich=rich, prio=prio,
     )
 
 

@@ -314,7 +314,8 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # время. Повторно проверяем ПЕРЕД отправкой; на паузе ответ не шлём.
     if await db.is_bot_paused(message.from_user.id):
         return
-    await messaging.send_text(bot, message.from_user.id, answer, source="liya")
+    # rich=True: ответ Лии — markdown(LLM)→Telegram-HTML с фолбэком на plain (красивый текст, §8.7).
+    await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
 
 
 async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bot):

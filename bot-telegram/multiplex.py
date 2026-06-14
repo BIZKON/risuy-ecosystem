@@ -96,7 +96,8 @@ async def t_text(message: Message, bot: Bot) -> None:
         limit=config.AI_HISTORY_MESSAGES,
     )
     answer, _msg_id = await ai.ask_ai(message.text, None, cfg, history=history)
-    await messaging.send_text(bot, message.from_user.id, answer, source="liya")
+    # rich=True: ответ Лии тенант-бота — markdown→Telegram-HTML с фолбэком на plain (§8.7).
+    await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
 
 
 # ── contextvar tenant_id per-update ──────────────────────────────────────────
