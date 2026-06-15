@@ -133,8 +133,9 @@ async def resolve_escalation_target(tid) -> tuple[int, int | None] | None:
     return None
 
 
-def _client_link(messenger: str, external_id: int) -> tuple[str, str] | None:
-    """Канал-специфичная ссылка на клиента для карточки менеджеру. None → дефолт Telegram (tg://)."""
+def client_link(messenger: str, external_id: int) -> tuple[str, str] | None:
+    """Канал-специфичная ссылка на клиента для карточки менеджеру. None → дефолт Telegram (tg://).
+    Публичный резолвер канала → (url, подпись); переиспользуется триггерами (triggers._notify)."""
     if messenger == "vk":
         import vk_driver  # чистые функции (stdlib-импорт), без aiohttp на уровне модуля
         return vk_driver.vk_client_link(external_id)
@@ -168,7 +169,7 @@ async def escalate(bot, tg_user_id: int, payload: dict, *,
             text = format_card(
                 payload, tg_user_id=tg_user_id, lead_id=lead_id,
                 panel_base=config.PANEL_BASE_URL or None, raw=raw,
-                client_link=_client_link(messenger, tg_user_id),
+                client_link=client_link(messenger, tg_user_id),
             )
             await messaging.raw_send_text(
                 send_bot, chat_id, text, message_thread_id=topic_id, rich=False,

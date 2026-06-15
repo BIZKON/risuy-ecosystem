@@ -56,14 +56,23 @@ async def main() -> None:
     # ── 2. format_trigger_card (чистая логика) ──
     print("2. format_trigger_card:")
     card = triggers.format_trigger_card(
-        {"type": "stopwords"}, tg_user_id=TG, reason="стоп-слово «оферта»",
+        {"type": "stopwords"}, external_id=TG, reason="стоп-слово «оферта»",
         snippet="дайте\nоферту пожалуйста", lead_id="lead-9", panel_base="https://panel.example")
     check("карточка: тип по-русски", "стоп-слово в сообщении" in card)
     check("карточка: причина", "стоп-слово «оферта»" in card)
     check("карточка: сниппет нормализован (без \\n)", "дайте оферту пожалуйста" in card and "\nдайте" not in card)
     check("карточка: ссылка на диалог", "https://panel.example/dialogs/lead-9" in card)
-    check("карточка: tg-ссылка", f"tg://user?id={TG}" in card)
+    check("карточка: tg-ссылка по умолчанию (client_link=None)", f"tg://user?id={TG}" in card)
     check("карточка plain (без тегов)", "<" not in card)
+    # Слой C: канальная ссылка на клиента (client_link) вместо tg:// по умолчанию.
+    card_vk = triggers.format_trigger_card(
+        {"type": "stopwords"}, external_id=778899, reason="r", snippet="s", lead_id=None,
+        panel_base=None, client_link=("https://vk.com/id778899", "Написать клиенту в ВКонтакте"))
+    check("VK-карточка: ссылка vk.com/id (НЕ tg://)", "https://vk.com/id778899" in card_vk and "tg://" not in card_vk, repr(card_vk))
+    card_max = triggers.format_trigger_card(
+        {"type": "stopwords"}, external_id=910921, reason="r", snippet="s", lead_id=None,
+        panel_base=None, client_link=("", "Клиент в MAX (id 910921) — ответьте через панель"))
+    check("MAX-карточка: подпись про MAX, без url и без tg://", "Клиент в MAX" in card_max and "tg://" not in card_max, repr(card_max))
 
     # ── 2b. intent: parse_trigger_markers / build_intent_addendum (чистая логика) ──
     print("2b. intent (маркеры + аддендум):")
@@ -90,7 +99,7 @@ async def main() -> None:
     # ── 3. БД: get_active_triggers / count / pause (risuy_dev) ──
     print("3. БД движка (risuy_dev):")
     db.pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
-    ta = tb = None
+    ta = tb = tc = None
     try:
         async with db.pool.acquire() as c:
             await c.execute("delete from leads where tg_user_id = $1", TG)
@@ -144,12 +153,96 @@ async def main() -> None:
         # pause_lead
         await db.pause_lead(TG)
         check("pause_lead → is_bot_paused True", (await db.is_bot_paused(TG)) is True)
+
+        # ── 3b. Слой C: канал-агностичность (vk/max идентичность + handle_text через ctx) ──
+        print("3b. Слой C — каналы (risuy_dev):")
+        VK_ID, MAX_ID = 555000111, 777000222
+        async with db.pool.acquire() as c:
+            tc = await c.fetchval("insert into tenants(slug,name,status) values('smoke-trig-c','C','active') returning id")
+            # vk/max лиды тенанта C — идентичность в своих колонках (db._user_col)
+            await c.execute("insert into leads(vk_user_id,messenger,source,status,tenant_id) values($1,'vk','vk','new',$2)", VK_ID, tc)
+            await c.execute("insert into leads(max_user_id,messenger,source,status,tenant_id) values($1,'max','max','new',$2)", MAX_ID, tc)
+            # триггеры C с notify_chat_id=NULL → _notify выходит ДО import messaging (тест без aiogram)
+            await c.execute(
+                "insert into tenant_triggers(tenant_id,type,action,stopwords,reply_text,enabled,position) "
+                "values($1,'stopwords','notify_reply_continue',$2,'Передаю менеджеру',true,1)", tc, ["отмена"])
+            await c.execute(
+                "insert into tenant_triggers(tenant_id,type,action,msg_count,enabled,position) "
+                "values($1,'message_count','notify_reply_pause',1,true,2)", tc)
+        db.current_tenant_id.set(tc)
+
+        # handle_text end-to-end через ctx (VK): стоп-слово → canned-ответ клиенту + return True, БЕЗ aiogram
+        captured: list[str] = []
+
+        async def _reply(body: str) -> None:
+            captured.append(body)
+
+        ctx_vk = triggers.TriggerCtx(messenger="vk", external_id=VK_ID, text="прошу отмена брони",
+                                     reply=_reply, notifier_fallback_bot=None)
+        check("VK handle_text: стоп-слово → True", (await triggers.handle_text(ctx_vk)) is True)
+        check("VK handle_text: canned-ответ ушёл клиенту через ctx.reply", captured == ["Передаю менеджеру"], repr(captured))
+
+        # count_inbound_messages по каналу vk (messages.tg_user_id=NULL, матч по lead_id)
+        cvk0 = await db.count_inbound_messages(VK_ID, messenger="vk")
+        async with db.pool.acquire() as c:
+            await c.execute(
+                "insert into messages(lead_id,direction,kind,text,tenant_id,messenger) "
+                "select id,'in','text','m',$2,'vk' from leads where vk_user_id=$1 and tenant_id=$2", VK_ID, tc)
+        cvk1 = await db.count_inbound_messages(VK_ID, messenger="vk")
+        check("count_inbound_messages(vk) растёт (по lead_id, tg_user_id NULL)", cvk1 == cvk0 + 1, f"{cvk0}→{cvk1}")
+
+        # message_count на vk: текст без стоп-слова, count==1 → fire (action pause) → канал-пауза
+        captured.clear()
+        ctx_vk2 = triggers.TriggerCtx(messenger="vk", external_id=VK_ID, text="когда занятие?",
+                                      reply=_reply, notifier_fallback_bot=None)
+        check("VK handle_text: message_count==1 → True", (await triggers.handle_text(ctx_vk2)) is True)
+        check("VK action=pause → is_bot_paused(vk) True", (await db.is_bot_paused(VK_ID, messenger="vk")) is True)
+        check("VK message_count(pause) без reply_text: ответ клиенту НЕ слался", captured == [], repr(captured))
+
+        # max идентичность: count + pause по каналу max
+        async with db.pool.acquire() as c:
+            await c.execute(
+                "insert into messages(lead_id,direction,kind,text,tenant_id,messenger) "
+                "select id,'in','text','m',$2,'max' from leads where max_user_id=$1 and tenant_id=$2", MAX_ID, tc)
+        check("count_inbound_messages(max) == 1", (await db.count_inbound_messages(MAX_ID, messenger="max")) == 1)
+        await db.pause_lead(MAX_ID, messenger="max")
+        check("pause_lead(max) → is_bot_paused(max) True", (await db.is_bot_paused(MAX_ID, messenger="max")) is True)
+        # изоляция колонок: пауза vk-лида не «прокрашивает» несуществующего tg-лида того же тенанта
+        check("is_bot_paused(tg) у отсутствующего лида → False", (await db.is_bot_paused(999999999, messenger="tg")) is False)
+
+        # handle_document(ctx) + fire_intent(ctx) end-to-end через ctx (notify_chat_id=NULL → без aiogram)
+        VK_DOC, VK_INTENT = 555000333, 555000444
+        async with db.pool.acquire() as c:
+            await c.execute("insert into leads(vk_user_id,messenger,source,status,tenant_id) values($1,'vk','vk','new',$2)", VK_DOC, tc)
+            await c.execute("insert into leads(vk_user_id,messenger,source,status,tenant_id) values($1,'vk','vk','new',$2)", VK_INTENT, tc)
+            await c.execute(
+                "insert into tenant_triggers(tenant_id,type,action,reply_text,enabled,position) "
+                "values($1,'documents','notify_reply_continue','Документ принят',true,3)", tc)
+            await c.execute(
+                "insert into tenant_triggers(tenant_id,type,action,intent_desc,enabled,position) "
+                "values($1,'intent','notify_reply_pause','клиент просит счёт',true,4)", tc)
+        captured.clear()
+        ctx_doc = triggers.TriggerCtx(messenger="vk", external_id=VK_DOC, text="вот документ",
+                                      reply=_reply, notifier_fallback_bot=None)
+        check("VK handle_document → True (documents-триггер)", (await triggers.handle_document(ctx_doc)) is True)
+        check("VK handle_document: canned-ответ ушёл через ctx.reply", captured == ["Документ принят"], repr(captured))
+
+        intent_trigs = await db.get_active_triggers(tc, types=("intent",))
+        check("intent-триггеров у C = 1", len(intent_trigs) == 1, f"факт {len(intent_trigs)}")
+        ctx_int = triggers.TriggerCtx(messenger="vk", external_id=VK_INTENT, text="а счёт пришлёте?",
+                                      reply=_reply, notifier_fallback_bot=None)
+        await triggers.fire_intent(ctx_int, intent_trigs, [1])   # индекс 1 → notify_reply_pause
+        check("VK fire_intent(pause) → is_bot_paused(vk) True", (await db.is_bot_paused(VK_INTENT, messenger="vk")) is True)
+        await triggers.fire_intent(ctx_int, intent_trigs, [99])  # невалидный индекс игнорируется (без падения)
+        check("fire_intent: невалидный индекс не падает", True)
     finally:
         async with db.pool.acquire() as c:
-            await c.execute("delete from messages where tg_user_id = $1", TG)
-            await c.execute("delete from leads where tg_user_id = $1", TG)
-            for t in (ta, tb):
+            await c.execute("delete from leads where tg_user_id = $1", TG)  # на случай прежнего пол-рана
+            for t in (ta, tb, tc):
                 if t:
+                    # удаляем по tenant_id: vk/max-сообщения имеют tg_user_id=NULL (по нему не вычистить)
+                    await c.execute("delete from messages where tenant_id = $1", t)
+                    await c.execute("delete from leads where tenant_id = $1", t)
                     await c.execute("delete from tenants where id = $1", t)  # cascade чистит tenant_triggers
         await db.pool.close()
 

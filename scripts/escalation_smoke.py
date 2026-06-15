@@ -92,10 +92,10 @@ async def main() -> None:
     card_vk = escalation.format_card({"name": "Вика"}, tg_user_id=778899, client_link=vk_driver.vk_client_link(778899))
     check("VK-карточка: ссылка vk.com/id (НЕ tg://)", "https://vk.com/id778899" in card_vk and "tg://" not in card_vk, repr(card_vk))
     check("VK-карточка: подпись про ВКонтакте", "ВКонтакте" in card_vk)
-    check("_client_link('vk') → vk-url", escalation._client_link("vk", 778899) == ("https://vk.com/id778899", "Написать клиенту в ВКонтакте"))
-    check("_client_link('tg') → None (дефолт tg://)", escalation._client_link("tg", 778899) is None)
+    check("client_link('vk') → vk-url", escalation.client_link("vk", 778899) == ("https://vk.com/id778899", "Написать клиенту в ВКонтакте"))
+    check("client_link('tg') → None (дефолт tg://)", escalation.client_link("tg", 778899) is None)
     # MAX: карточка без url (нет публичного профиля) → строка с подписью, без 'tg://'
-    card_max = escalation.format_card({"name": "Макс"}, tg_user_id=910921, client_link=escalation._client_link("max", 910921))
+    card_max = escalation.format_card({"name": "Макс"}, tg_user_id=910921, client_link=escalation.client_link("max", 910921))
     check("MAX-карточка: подпись про MAX, без tg:// и без двоеточия-url", "Клиент в MAX" in card_max and "tg://" not in card_max, repr(card_max))
 
     # ── 3. claim/release дедуп (risuy_dev) ──

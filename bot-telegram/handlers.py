@@ -290,7 +290,13 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # Слой B: детерминированные триггеры клиента (стоп-слова / кол-во сообщений). Первый
     # сработавший → ответ клиенту + уведомление менеджерам, ИИ на этот ход пропускаем. Нет
     # настроенных триггеров (Школа) → False → обычный ИИ-поток (поведение не меняется).
-    if await triggers.handle_text(bot, message):
+    # Слой C: движок канал-агностичен → TriggerCtx (TG); ctx переиспользуем для fire_intent ниже.
+    trig_ctx = triggers.TriggerCtx(
+        messenger="tg", external_id=message.from_user.id, text=message.text or "",
+        reply=lambda body: messaging.send_text(
+            bot, message.from_user.id, body, source="trigger", rich=True),
+        notifier_fallback_bot=bot)
+    if await triggers.handle_text(trig_ctx):
         return
     try:
         await bot.send_chat_action(message.chat.id, "typing")
@@ -336,7 +342,7 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
         await escalation.escalate(bot, message.from_user.id, esc_payload)
     # Слой B: сработавшие intent-триггеры → уведомление менеджерам (+ опц. пауза).
     if trig_idxs:
-        await triggers.fire_intent(bot, message, intent_trigs, trig_idxs)
+        await triggers.fire_intent(trig_ctx, intent_trigs, trig_idxs)
 
 
 @router.message(StateFilter(None), F.document)
@@ -346,7 +352,12 @@ async def on_document(message: Message, bot: Bot):
     обрабатывались)."""
     if await db.is_bot_paused(message.from_user.id):
         return
-    await triggers.handle_document(bot, message)
+    ctx = triggers.TriggerCtx(
+        messenger="tg", external_id=message.from_user.id, text=message.caption or "",
+        reply=lambda body: messaging.send_text(
+            bot, message.from_user.id, body, source="trigger", rich=True),
+        notifier_fallback_bot=bot)
+    await triggers.handle_document(ctx)
 
 
 async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bot):

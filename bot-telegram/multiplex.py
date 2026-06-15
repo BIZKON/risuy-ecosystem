@@ -73,12 +73,22 @@ async def t_text(message: Message, bot: Bot) -> None:
     """
     if (message.text or "").startswith("/"):
         return
+    # Перехват: оператор взял лид руками (триггер notify_reply_pause / панель) → Лия и триггеры
+    # молчат (как Школа handlers.on_free_text и каналы VK/MAX). Входящее уже залогировал middleware.
+    if await db.is_bot_paused(message.from_user.id):
+        return
     cfg = await db.get_tenant_ai_overrides(db.tenant_id())
     if not cfg["enabled"]:
         return
     # Слой B: детерминированные триггеры тенанта (стоп-слова / кол-во сообщений) — ДО проверки
     # agent_id/кошелька: работают без ИИ-агента (клиент может настроить триггеры до провижининга).
-    if await triggers.handle_text(bot, message):
+    # Слой C: движок канал-агностичен → строим TriggerCtx (TG); reply шлёт ответ клиенту в TG.
+    ctx = triggers.TriggerCtx(
+        messenger="tg", external_id=message.from_user.id, text=message.text or "",
+        reply=lambda body: messaging.send_text(
+            bot, message.from_user.id, body, source="trigger", rich=True),
+        notifier_fallback_bot=bot)
+    if await triggers.handle_text(ctx):
         return
     # cloud-ai без agent_id тенанта НЕ зовём: иначе ask_liya сфолбэчится на агента
     # Школы (config.AGENT_ID) и расход ушёл бы Школе. gateway работает без agent_id.
@@ -114,16 +124,23 @@ async def t_text(message: Message, bot: Bot) -> None:
     if esc is not None:
         await escalation.escalate(bot, message.from_user.id, esc)
     if trig_idxs:
-        await triggers.fire_intent(bot, message, intent_trigs, trig_idxs)
+        await triggers.fire_intent(ctx, intent_trigs, trig_idxs)
 
 
 @tenant_router.message(F.document)
 async def t_document(message: Message, bot: Bot) -> None:
     """Слой B: документ от лида тенанта → триггер типа documents (если настроен у тенанта)."""
+    if await db.is_bot_paused(message.from_user.id):     # перехват оператора (как t_text/Школа)
+        return
     cfg = await db.get_tenant_ai_overrides(db.tenant_id())
     if not cfg["enabled"]:
         return
-    await triggers.handle_document(bot, message)
+    ctx = triggers.TriggerCtx(
+        messenger="tg", external_id=message.from_user.id, text=message.caption or "",
+        reply=lambda body: messaging.send_text(
+            bot, message.from_user.id, body, source="trigger", rich=True),
+        notifier_fallback_bot=bot)
+    await triggers.handle_document(ctx)
 
 
 # ── contextvar tenant_id per-update ──────────────────────────────────────────
@@ -247,29 +264,55 @@ async def _stop_tenant(running: dict, tenant_id) -> None:
 
 # ── Слой C: канал ВКонтакте (аддитивно к Telegram-проходу) ────────────────────────────
 async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str) -> None:
-    """VK-лид → ответ Лии тенанта (ядро: разговор + эскалация). tenant-контекст ставим ЯВНО
-    (VK-поллер не идёт через aiogram-middleware). Зеркалит t_text, канал messenger='vk'.
-    Триггеры на VK — отдельный шаг; здесь ядро (диалог + горячий лид)."""
+    """VK-лид → ответ Лии тенанта (разговор + триггеры + эскалация). tenant-контекст ставим ЯВНО
+    (VK-поллер не идёт через aiogram-middleware). Зеркалит t_text, канал messenger='vk'."""
     token = db.current_tenant_id.set(tenant_id)
     try:
         cfg = await db.get_tenant_ai_overrides(tenant_id)
         if not cfg["enabled"]:
             return
         await db.upsert_start(from_id, source="vk", messenger="vk")
+        # Историю диалога читаем ДО лога текущего входящего — иначе текущий вопрос попал бы в history
+        # ПОСЛЕДНЕЙ user-записью И был бы добавлен ask_ai финальным turn'ом (дубль в модель). TG этого
+        # избегает exclude по message_id; у канала нативного id под рукой нет → читаем history раньше.
+        history = await db.get_ai_history(from_id, messenger="vk", limit=config.AI_HISTORY_MESSAGES)
         await db.log_message(tg_user_id=from_id, messenger="vk", direction="in", text=text)
+        # Перехват: оператор взял лид руками (триггер notify_reply_pause / панель) → Лия и триггеры
+        # молчат (зеркалит TG: is_bot_paused-гейт ДО движка). Входящее уже залогировано выше
+        # (история/счётчик не теряются), Лия просто не отвечает.
+        if await db.is_bot_paused(from_id, messenger="vk"):
+            return
+        # Слой C: ответ КЛИЕНТУ в VK + лог source='trigger' (canned-ответ без LLM не тарифицируется
+        # как 'liya'). Замыкание над peer_id/from_id — инкапсулирует канал для движка триггеров.
+        async def _reply(body: str) -> None:
+            await vkbot.send(peer_id, body)
+            await db.log_message(tg_user_id=from_id, messenger="vk", direction="out",
+                                 source="trigger", text=body)
+        ctx = triggers.TriggerCtx(messenger="vk", external_id=from_id, text=text,
+                                  reply=_reply, notifier_fallback_bot=None)
+        # Слой C: текстовые триггеры тенанта на VK (стоп-слова / кол-во) — ДО agent_id/кошелька
+        # (работают без ИИ-агента). Сработал → return (ИИ-ответ на этот ход пропускаем).
+        if await triggers.handle_text(ctx):
+            return
         # cloud-ai без agent_id тенанта не зовём (иначе расход ушёл бы Школе); gateway — без agent_id.
         if cfg["backend"] != "gateway" and not cfg["agent_id"]:
             return
         if await db.is_ai_wallet_blocked():
             await vkbot.send(peer_id, texts.WALLET_PAUSED)
             return
-        history = await db.get_ai_history(from_id, messenger="vk", limit=config.AI_HISTORY_MESSAGES)
-        answer, _msg_id, esc, _trig = await ai.ask_ai(text, None, cfg, history=history)
+        # Слой C: intent-триггеры тенанта → их описания в системный промпт (Лия эмитит [[TRIGGER:N]]).
+        intent_trigs = await db.get_active_triggers(tenant_id, types=("intent",))
+        if intent_trigs:
+            cfg = {**cfg, "system_prompt": (cfg.get("system_prompt") or "")
+                   + "\n\n" + triggers.build_intent_addendum(intent_trigs)}
+        answer, _msg_id, esc, trig_idxs = await ai.ask_ai(text, None, cfg, history=history)
         await vkbot.send(peer_id, answer)
         await db.log_message(tg_user_id=from_id, messenger="vk", direction="out", source="liya", text=answer)
         if esc is not None:
             # bot=None → карточку шлёт ЕДИНЫЙ нотификатор в TG-группу менеджеров; ссылка на клиента — vk.com.
             await escalation.escalate(None, from_id, esc, messenger="vk")
+        if trig_idxs:
+            await triggers.fire_intent(ctx, intent_trigs, trig_idxs)
     finally:
         db.current_tenant_id.reset(token)
 
@@ -339,26 +382,47 @@ async def _stop_channel(running: dict, tenant_id, label: str) -> None:
 
 # ── Слой C: канал MAX (зеркало VK; идентичность user_id, ответ на chat_id) ─────────────
 async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str) -> None:
-    """MAX-лид → ответ Лии тенанта (ядро: разговор + эскалация). messenger='max'; идентичность
-    лида = user_id (→ leads.max_user_id), отвечаем на chat_id (≠ user_id в личке)."""
+    """MAX-лид → ответ Лии тенанта (разговор + триггеры + эскалация). messenger='max'; идентичность
+    лида = user_id (→ leads.max_user_id), отвечаем на chat_id (≠ user_id в личке). Зеркало VK."""
     token = db.current_tenant_id.set(tenant_id)
     try:
         cfg = await db.get_tenant_ai_overrides(tenant_id)
         if not cfg["enabled"]:
             return
         await db.upsert_start(user_id, source="max", messenger="max")
+        # Историю читаем ДО лога входящего (как VK): иначе текущий вопрос задвоится в модель.
+        history = await db.get_ai_history(user_id, messenger="max", limit=config.AI_HISTORY_MESSAGES)
         await db.log_message(tg_user_id=user_id, messenger="max", direction="in", text=text)
+        # Перехват (зеркалит VK/TG): оператор на паузе → Лия и триггеры молчат, входящее залогировано.
+        if await db.is_bot_paused(user_id, messenger="max"):
+            return
+        # Ответ КЛИЕНТУ на chat_id (≠ user_id в личке) + лог source='trigger'. Замыкание над chat_id/
+        # user_id инкапсулирует канал для движка триггеров.
+        async def _reply(body: str) -> None:
+            await maxbot.send(chat_id, body)
+            await db.log_message(tg_user_id=user_id, messenger="max", direction="out",
+                                 source="trigger", text=body)
+        ctx = triggers.TriggerCtx(messenger="max", external_id=user_id, text=text,
+                                  reply=_reply, notifier_fallback_bot=None)
+        # Текстовые триггеры на MAX (стоп-слова / кол-во) — ДО agent_id/кошелька.
+        if await triggers.handle_text(ctx):
+            return
         if cfg["backend"] != "gateway" and not cfg["agent_id"]:
             return
         if await db.is_ai_wallet_blocked():
             await maxbot.send(chat_id, texts.WALLET_PAUSED)
             return
-        history = await db.get_ai_history(user_id, messenger="max", limit=config.AI_HISTORY_MESSAGES)
-        answer, _msg_id, esc, _trig = await ai.ask_ai(text, None, cfg, history=history)
+        intent_trigs = await db.get_active_triggers(tenant_id, types=("intent",))
+        if intent_trigs:
+            cfg = {**cfg, "system_prompt": (cfg.get("system_prompt") or "")
+                   + "\n\n" + triggers.build_intent_addendum(intent_trigs)}
+        answer, _msg_id, esc, trig_idxs = await ai.ask_ai(text, None, cfg, history=history)
         await maxbot.send(chat_id, answer)
         await db.log_message(tg_user_id=user_id, messenger="max", direction="out", source="liya", text=answer)
         if esc is not None:
             await escalation.escalate(None, user_id, esc, messenger="max")
+        if trig_idxs:
+            await triggers.fire_intent(ctx, intent_trigs, trig_idxs)
     finally:
         db.current_tenant_id.reset(token)
 
