@@ -150,8 +150,9 @@ async def run(interval: int | None = None) -> None:
     гасит тенант-ботов. Запускается доп. таской в bot.py рядом с воронкой Школы."""
     interval = interval or _RELOAD_INTERVAL
     logger.info("Мультиплекс тенант-ботов запущен (сверка каждые %s c)", interval)
-    running: dict = {}     # tenant_id -> {"task": Task, "bot": Bot}  (Telegram)
-    running_vk: dict = {}  # tenant_id -> {"task": Task, "bot": VKBot} (Слой C: ВКонтакте)
+    running: dict = {}      # tenant_id -> {"task": Task, "bot": Bot}    (Telegram)
+    running_vk: dict = {}   # tenant_id -> {"task": Task, "bot": VKBot}  (Слой C: ВКонтакте)
+    running_max: dict = {}  # tenant_id -> {"task": Task, "bot": MAXBot} (Слой C: MAX)
     try:
         while True:
             try:
@@ -159,15 +160,21 @@ async def run(interval: int | None = None) -> None:
             except Exception as e:  # noqa: BLE001 — сбой сверки не валит Школу/других
                 logger.exception("Мультиплекс: ошибка сверки реестра (tg): %s", e)
             try:
-                await _reconcile_vk(running_vk)   # аддитивный VK-проход (TG не трогает)
+                await _reconcile_vk(running_vk)    # аддитивные канальные проходы (TG не трогают)
             except Exception as e:  # noqa: BLE001
                 logger.exception("Мультиплекс: ошибка сверки реестра (vk): %s", e)
+            try:
+                await _reconcile_max(running_max)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Мультиплекс: ошибка сверки реестра (max): %s", e)
             await asyncio.sleep(interval)
     finally:
         for tid in list(running.keys()):
             await _stop_tenant(running, tid)
         for tid in list(running_vk.keys()):
             await _stop_channel(running_vk, tid, "VK")
+        for tid in list(running_max.keys()):
+            await _stop_channel(running_max, tid, "MAX")
 
 
 async def _reconcile(running: dict) -> None:
@@ -318,7 +325,7 @@ async def _run_vk(tenant_id, vkbot) -> None:
 
 
 async def _stop_channel(running: dict, tenant_id, label: str) -> None:
-    """Гасит канальную таску (VK/будущие). Сессию канал закрывает в своём finally."""
+    """Гасит канальную таску (VK/MAX/будущие). Сессию канал закрывает в своём finally."""
     h = running.pop(tenant_id, None)
     if h is None:
         return
@@ -328,3 +335,75 @@ async def _stop_channel(running: dict, tenant_id, label: str) -> None:
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
     logger.info("Мультиплекс: %s-бот тенанта %s остановлен", label, tenant_id)
+
+
+# ── Слой C: канал MAX (зеркало VK; идентичность user_id, ответ на chat_id) ─────────────
+async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str) -> None:
+    """MAX-лид → ответ Лии тенанта (ядро: разговор + эскалация). messenger='max'; идентичность
+    лида = user_id (→ leads.max_user_id), отвечаем на chat_id (≠ user_id в личке)."""
+    token = db.current_tenant_id.set(tenant_id)
+    try:
+        cfg = await db.get_tenant_ai_overrides(tenant_id)
+        if not cfg["enabled"]:
+            return
+        await db.upsert_start(user_id, source="max", messenger="max")
+        await db.log_message(tg_user_id=user_id, messenger="max", direction="in", text=text)
+        if cfg["backend"] != "gateway" and not cfg["agent_id"]:
+            return
+        if await db.is_ai_wallet_blocked():
+            await maxbot.send(chat_id, texts.WALLET_PAUSED)
+            return
+        history = await db.get_ai_history(user_id, messenger="max", limit=config.AI_HISTORY_MESSAGES)
+        answer, _msg_id, esc, _trig = await ai.ask_ai(text, None, cfg, history=history)
+        await maxbot.send(chat_id, answer)
+        await db.log_message(tg_user_id=user_id, messenger="max", direction="out", source="liya", text=answer)
+        if esc is not None:
+            await escalation.escalate(None, user_id, esc, messenger="max")
+    finally:
+        db.current_tenant_id.reset(token)
+
+
+async def _reconcile_max(running_max: dict) -> None:
+    """VK-аналог для MAX: тенанты с max_bot_token (vault). Школа (дефолт) — не здесь."""
+    default_tid = db.default_tenant_id()
+    desired: dict = {}
+    for t in await db.list_active_tenants():
+        if t["id"] == default_tid:
+            continue
+        try:
+            token = await db.get_tenant_secret(t["id"], "max_bot_token")
+        except Exception:  # noqa: BLE001
+            logger.warning("Мультиплекс: не прочитал MAX-токен тенанта %s", t["id"], exc_info=True)
+            continue
+        if token:
+            desired[t["id"]] = token
+
+    for tid in list(running_max.keys()):
+        if tid not in desired or running_max[tid]["task"].done():
+            await _stop_channel(running_max, tid, "MAX")
+    for tid, token in desired.items():
+        if tid not in running_max:
+            await _start_max(running_max, tid, token)
+
+
+async def _start_max(running_max: dict, tenant_id, token: str) -> None:
+    """Поднимает MAX-long-poll-таску тенанта. platform-api.max.ru из РФ-ЦОД — напрямую."""
+    import max_driver
+    maxbot = max_driver.MAXBot(token, on_message=None)
+
+    async def _on_message(user_id, chat_id, text):
+        await _max_respond(maxbot, tenant_id, user_id, chat_id, text)
+
+    maxbot.on_message = _on_message
+    task = asyncio.create_task(_run_max(tenant_id, maxbot))
+    running_max[tenant_id] = {"task": task, "bot": maxbot}
+    logger.info("Мультиплекс: MAX-бот тенанта %s поднят", tenant_id)
+
+
+async def _run_max(tenant_id, maxbot) -> None:
+    try:
+        await maxbot.run()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Мультиплекс: MAX-поллер тенанта %s упал: %s", tenant_id, e)

@@ -115,7 +115,7 @@ def format_card(payload: dict, *, tg_user_id: int, lead_id: str | None = None,
     if panel_base and lead_id:
         lines.append(f"💬 Открыть диалог и ответить клиенту: {panel_base}/dialogs/{lead_id}")
     url, label = client_link or (f"tg://user?id={tg_user_id}", "Написать клиенту в Telegram")
-    lines.append(f"👤 {label}: {url}")
+    lines.append(f"👤 {label}: {url}" if url else f"👤 {label}")
     return "\n".join(lines)[:3500]
 
 
@@ -138,8 +138,10 @@ def _client_link(messenger: str, external_id: int) -> tuple[str, str] | None:
     if messenger == "vk":
         import vk_driver  # чистые функции (stdlib-импорт), без aiohttp на уровне модуля
         return vk_driver.vk_client_link(external_id)
-    # tg → None (format_card дефолтит tg://); max → ссылка появится в C1
-    return None
+    if messenger == "max":
+        import max_driver
+        return max_driver.max_client_link(external_id)
+    return None  # tg → None (format_card дефолтит tg://)
 
 
 async def escalate(bot, tg_user_id: int, payload: dict, *,
