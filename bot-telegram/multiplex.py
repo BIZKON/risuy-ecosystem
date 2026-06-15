@@ -39,6 +39,7 @@ import config
 import db
 import escalation
 import messaging
+import selling
 import texts
 import triggers
 import yookassa
@@ -146,20 +147,56 @@ async def t_document(message: Message, bot: Bot) -> None:
     await triggers.handle_document(ctx)
 
 
-# ── Слой C: продажи тенанта на ЕГО кассу ЮKassa (creds из vault) ──────────────
+# ── Слой C: продажи тенанта на ЕГО кассу ЮKassa (creds из vault) — общее ядро ──────────
+# Канал-агностично (TG/VK/MAX). Чистые хелперы определения команды/кнопок — в selling.py
+# (тестируемы без aiogram). Идентичность/креды/продукт — tenant-scoped через contextvar tenant_id.
+async def _make_pay_url(messenger: str, external_id: int, product_id: int, return_url: str):
+    """Канал-агностично: создать (или переиспользовать) платёж за продукт на кассу ТЕКУЩЕГО
+    тенанта (creds из vault). Возвращает (pay_url, product) или (None, product|None). tenant-scoped
+    (contextvar). get_sellable_product скоупит tenant_id → защита от крафтнутого buy:<чужой_id>;
+    get_lead_for_purchase — по каналу (messenger). Idempotence-Key=order.id (нет двойного списания)."""
+    creds = await db.get_tenant_shop_creds()
+    if creds is None:
+        return None, None
+    lead = await db.get_lead_for_purchase(external_id, messenger=messenger)
+    product = await db.get_sellable_product(product_id)
+    if lead is None or product is None:
+        return None, product
+    order = await db.create_or_reuse_pending_order(
+        lead["id"], product_id, product["price"], "RUB", reuse_minutes=config.ORDER_REUSE_MINUTES)
+    if order["reused"]:
+        return order["payment_url"], product
+    try:
+        payment = await yookassa.create_payment(
+            amount=product["price"], currency="RUB",
+            description=(product.get("name") or "Заказ")[:128], return_url=return_url,
+            idempotence_key=str(order["id"]),
+            metadata={"kind": "order", "order_id": str(order["id"])},
+            lead_phone=lead.get("phone"), creds=creds,
+        )
+        pay_url = (payment.get("confirmation") or {}).get("confirmation_url")
+        payment_id = payment.get("id")
+        if not pay_url or not payment_id:
+            raise yookassa.YooKassaError("нет confirmation_url/id в ответе")
+        await db.set_order_payment(order["id"], payment_id, pay_url)
+        return pay_url, product
+    except yookassa.YooKassaError as e:
+        logger.warning("multiplex: платёж (%s) по заказу %s не создался: %s", messenger, order["id"], e)
+        await db.mark_order_failed(order["id"], "платёж не создан (сбой ЮKassa)")
+        return None, product
+
+
 def _shop_markup(products: list[dict]) -> InlineKeyboardMarkup:
-    """Кнопки «Купить» по продаваемым оферам тенанта (по одной на строку)."""
+    """TG-рендер кнопок витрины (по одной на строку) из общих selling.shop_button_rows."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"💳 {p['name']} — {texts.format_price(p.get('price'), p.get('currency'))}",
-            callback_data=f"buy:{p['id']}")]
-        for p in products
+        [InlineKeyboardButton(text=b["label"], callback_data=f"buy:{b['payload']['id']}")]
+        for b in selling.shop_button_rows(products)
     ])
 
 
 @tenant_router.message(Command("shop", ignore_case=True))
 async def t_shop(message: Message, bot: Bot) -> None:
-    """Витрина тенанта: активные оферы с кнопками «Купить». Доступно, когда тенант подключил
+    """Витрина тенанта (TG): активные оферы с кнопками «Купить». Доступно, когда тенант подключил
     кассу (shop_yookassa_* в vault, раздел «Продукты»). Лид создаётся, как при /start."""
     try:
         await db.upsert_start(tg_user_id=message.from_user.id, source="other")
@@ -183,55 +220,23 @@ async def t_shop(message: Message, bot: Bot) -> None:
 
 @tenant_router.callback_query(F.data.startswith("buy:"))
 async def t_buy(cb: CallbackQuery, bot: Bot) -> None:
-    """Клик «Купить» у тенант-бота → pending-заказ + платёж ЮKassa на КАССУ ТЕНАНТА (creds из
-    vault) → ссылка «Перейти к оплате». Зеркалит handlers.on_buy, но креды и продукт — тенанта
-    (get_sellable_product скоупит tenant_id → защита от крафтнутого buy:<чужой_id>). Подтверждение
-    ловит вебхук панели (маршрутизация по тенанту заказа). tenant-контекст ставит callback-middleware."""
-    creds = await db.get_tenant_shop_creds()
-    if creds is None:
-        await cb.answer("Оплата временно недоступна 🥲", show_alert=True)
-        return
+    """Клик «Купить» у тенант-бота (TG) → платёж ЮKassa на КАССУ ТЕНАНТА → ссылка «Перейти к
+    оплате». Логика — общая _make_pay_url (messenger='tg'). Подтверждение ловит вебхук панели."""
     try:
         product_id = int((cb.data or "").split(":", 1)[1])
     except (ValueError, IndexError):
         await cb.answer()
         return
-    lead = await db.get_lead_for_purchase(cb.from_user.id)
-    product = await db.get_sellable_product(product_id)
-    if lead is None or product is None:
-        await cb.answer("Этот товар сейчас недоступен 🥲", show_alert=True)
-        return
-    order = await db.create_or_reuse_pending_order(
-        lead["id"], product_id, product["price"], "RUB",
-        reuse_minutes=config.ORDER_REUSE_MINUTES)
-    if order["reused"]:
-        pay_url = order["payment_url"]
-    else:
-        try:
-            me = await bot.get_me()
-            return_url = f"https://t.me/{me.username}" if me.username else "https://t.me"
-        except Exception:  # noqa: BLE001
-            return_url = "https://t.me"
-        try:
-            payment = await yookassa.create_payment(
-                amount=product["price"], currency="RUB",
-                description=(product.get("name") or "Заказ")[:128],
-                return_url=return_url, idempotence_key=str(order["id"]),
-                metadata={"kind": "order", "order_id": str(order["id"])},
-                lead_phone=lead.get("phone"), creds=creds,
-            )
-            pay_url = (payment.get("confirmation") or {}).get("confirmation_url")
-            payment_id = payment.get("id")
-            if not pay_url or not payment_id:
-                raise yookassa.YooKassaError("нет confirmation_url/id в ответе")
-            await db.set_order_payment(order["id"], payment_id, pay_url)
-        except yookassa.YooKassaError as e:
-            logger.warning("multiplex: платёж тенанта по заказу %s не создался: %s", order["id"], e)
-            await db.mark_order_failed(order["id"], "платёж не создан (сбой ЮKassa)")
-            await cb.answer()
-            await messaging.send_text(bot, cb.from_user.id, texts.PAY_UNAVAILABLE, source="system")
-            return
+    try:
+        me = await bot.get_me()
+        return_url = f"https://t.me/{me.username}" if me.username else "https://t.me"
+    except Exception:  # noqa: BLE001
+        return_url = "https://t.me"
+    pay_url, product = await _make_pay_url("tg", cb.from_user.id, product_id, return_url)
     await cb.answer()
+    if not pay_url:
+        await messaging.send_text(bot, cb.from_user.id, texts.PAY_UNAVAILABLE, source="system")
+        return
     pay_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=texts.PAY_BTN, url=pay_url)],
     ])
@@ -362,15 +367,42 @@ async def _stop_tenant(running: dict, tenant_id) -> None:
 
 
 # ── Слой C: канал ВКонтакте (аддитивно к Telegram-проходу) ────────────────────────────
-async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str) -> None:
-    """VK-лид → ответ Лии тенанта (разговор + триггеры + эскалация). tenant-контекст ставим ЯВНО
-    (VK-поллер не идёт через aiogram-middleware). Зеркалит t_text, канал messenger='vk'."""
+async def _vk_shop(vkbot, peer_id: int) -> None:
+    """Витрина VK: активные товары тенанта кнопками (inline keyboard с payload). tenant-контекст
+    уже установлен вызывающим. Касса не подключена / нет товаров → текстовый ответ."""
+    if await db.get_tenant_shop_creds() is None:
+        await vkbot.send(peer_id, "Онлайн-оплата у этого бота пока не подключена 🥲")
+        return
+    products = await db.list_sellable_products()
+    if not products:
+        await vkbot.send(peer_id, "Сейчас нет товаров к покупке. Загляните позже 🌷")
+        return
+    await vkbot.send_keyboard(peer_id, "Выберите, что хотите оплатить:", selling.shop_button_rows(products))
+
+
+async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, payload=None) -> None:
+    """VK-лид → продажи (витрина/оплата по кнопке-payload или слову) ИЛИ разговор Лии (+триггеры,
+    эскалация). tenant-контекст ставим ЯВНО (VK-поллер не идёт через aiogram-middleware)."""
     token = db.current_tenant_id.set(tenant_id)
     try:
+        await db.upsert_start(from_id, source="vk", messenger="vk")
+        # Слой C: продажи — по кнопке (payload) или слову-триггеру; независимо от тумблера Лии.
+        sell = selling.selling_command(text, payload)
+        if sell is not None:
+            # Логируем входящее (история диалога / счётчик), как разговорная ветка логирует свои.
+            await db.log_message(tg_user_id=from_id, messenger="vk", direction="in", text=text)
+            if sell[0] == "buy":
+                pay_url, product = await _make_pay_url("vk", from_id, sell[1], "https://vk.com")
+                if pay_url:
+                    await vkbot.send_link(peer_id, texts.pay_message(product), pay_url, texts.PAY_BTN)
+                else:
+                    await vkbot.send(peer_id, texts.PAY_UNAVAILABLE)
+            else:
+                await _vk_shop(vkbot, peer_id)
+            return
         cfg = await db.get_tenant_ai_overrides(tenant_id)
         if not cfg["enabled"]:
             return
-        await db.upsert_start(from_id, source="vk", messenger="vk")
         # Историю диалога читаем ДО лога текущего входящего — иначе текущий вопрос попал бы в history
         # ПОСЛЕДНЕЙ user-записью И был бы добавлен ask_ai финальным turn'ом (дубль в модель). TG этого
         # избегает exclude по message_id; у канала нативного id под рукой нет → читаем history раньше.
@@ -447,8 +479,8 @@ async def _start_vk(running_vk: dict, tenant_id, token: str, group_id: int) -> N
     import vk_driver
     vkbot = vk_driver.VKBot(token, group_id, on_message=None)
 
-    async def _on_message(from_id, peer_id, text):
-        await _vk_respond(vkbot, tenant_id, from_id, peer_id, text)
+    async def _on_message(from_id, peer_id, text, payload=None):
+        await _vk_respond(vkbot, tenant_id, from_id, peer_id, text, payload)
 
     vkbot.on_message = _on_message
     task = asyncio.create_task(_run_vk(tenant_id, vkbot))
@@ -480,15 +512,51 @@ async def _stop_channel(running: dict, tenant_id, label: str) -> None:
 
 
 # ── Слой C: канал MAX (зеркало VK; идентичность user_id, ответ на chat_id) ─────────────
-async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str) -> None:
-    """MAX-лид → ответ Лии тенанта (разговор + триггеры + эскалация). messenger='max'; идентичность
-    лида = user_id (→ leads.max_user_id), отвечаем на chat_id (≠ user_id в личке). Зеркало VK."""
+async def _max_shop(maxbot, chat_id: int) -> None:
+    """Витрина MAX: товары тенанта inline-кнопками (callback). tenant-контекст уже установлен."""
+    if await db.get_tenant_shop_creds() is None:
+        await maxbot.send(chat_id, "Онлайн-оплата у этого бота пока не подключена 🥲")
+        return
+    products = await db.list_sellable_products()
+    if not products:
+        await maxbot.send(chat_id, "Сейчас нет товаров к покупке. Загляните позже 🌷")
+        return
+    await maxbot.send_keyboard(chat_id, "Выберите, что хотите оплатить:", selling.shop_button_rows(products))
+
+
+async def _max_callback(maxbot, tenant_id, user_id: int, chat_id: int, payload, callback_id: str) -> None:
+    """Нажата inline-кнопка MAX (покупка). messenger='max'; идентичность=user_id, ответ на chat_id.
+    tenant-контекст ставим ЯВНО. Платёж — на кассу тенанта (общая _make_pay_url)."""
     token = db.current_tenant_id.set(tenant_id)
     try:
+        await db.upsert_start(user_id, source="max", messenger="max")
+        sell = selling.selling_command(None, payload)
+        if sell is not None and sell[0] == "buy":
+            pay_url, product = await _make_pay_url("max", user_id, sell[1], "https://max.ru")
+            if pay_url:
+                await maxbot.send_link(chat_id, texts.pay_message(product), pay_url, texts.PAY_BTN)
+            else:
+                await maxbot.send(chat_id, texts.PAY_UNAVAILABLE)
+        await maxbot.answer_callback(callback_id)
+    finally:
+        db.current_tenant_id.reset(token)
+
+
+async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str) -> None:
+    """MAX-лид → витрина (слово-триггер) ИЛИ разговор Лии (+триггеры, эскалация). messenger='max';
+    идентичность лида = user_id (→ leads.max_user_id), отвечаем на chat_id (≠ user_id в личке)."""
+    token = db.current_tenant_id.set(tenant_id)
+    try:
+        await db.upsert_start(user_id, source="max", messenger="max")
+        # Слой C: витрина по слову-триггеру (покупка — кнопкой → message_callback → _max_callback).
+        sell = selling.selling_command(text, None)
+        if sell is not None and sell[0] == "shop":
+            await db.log_message(tg_user_id=user_id, messenger="max", direction="in", text=text)
+            await _max_shop(maxbot, chat_id)
+            return
         cfg = await db.get_tenant_ai_overrides(tenant_id)
         if not cfg["enabled"]:
             return
-        await db.upsert_start(user_id, source="max", messenger="max")
         # Историю читаем ДО лога входящего (как VK): иначе текущий вопрос задвоится в модель.
         history = await db.get_ai_history(user_id, messenger="max", limit=config.AI_HISTORY_MESSAGES)
         await db.log_message(tg_user_id=user_id, messenger="max", direction="in", text=text)
@@ -557,7 +625,11 @@ async def _start_max(running_max: dict, tenant_id, token: str) -> None:
     async def _on_message(user_id, chat_id, text):
         await _max_respond(maxbot, tenant_id, user_id, chat_id, text)
 
+    async def _on_callback(user_id, chat_id, payload, callback_id):
+        await _max_callback(maxbot, tenant_id, user_id, chat_id, payload, callback_id)
+
     maxbot.on_message = _on_message
+    maxbot.on_callback = _on_callback
     task = asyncio.create_task(_run_max(tenant_id, maxbot))
     running_max[tenant_id] = {"task": task, "bot": maxbot}
     logger.info("Мультиплекс: MAX-бот тенанта %s поднят", tenant_id)

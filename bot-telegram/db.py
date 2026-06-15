@@ -1505,12 +1505,14 @@ def _affected(status: str) -> int:
 # вебхук ПАНЕЛИ матчит заказ по provider_payment_id и отмечает paid + converted.
 # Бот заказы только создаёт/связывает с платежом; «оплачено» он НЕ проставляет.
 
-async def get_lead_for_purchase(tg_user_id: int) -> dict | None:
+async def get_lead_for_purchase(tg_user_id: int, *, messenger: str = "tg") -> dict | None:
     """Лид для оформления заказа: id (FK заказа), name (описание платежа), phone (чек
-    54-ФЗ, если включён). None — лида нет (заказ без лида не оформляем)."""
+    54-ФЗ, если включён). None — лида нет (заказ без лида не оформляем). Слой C: идентичность
+    по каналу (tg/vk/max) через _user_col — заказ оформляется на правильного лида тенанта."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select id, name, phone from leads where tg_user_id = $1 and tenant_id = $2",
+            f"select id, name, phone from leads where {col} = $1 and tenant_id = $2",
             tg_user_id, tenant_id(),
         )
     return dict(row) if row else None

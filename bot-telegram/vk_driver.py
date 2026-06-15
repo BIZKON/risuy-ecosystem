@@ -11,6 +11,7 @@
 leads.vk_user_id, db._user_col('vk')). Отвечать на `peer_id` (в личке = from_id).
 """
 import asyncio
+import json
 import logging
 import os
 
@@ -31,10 +32,12 @@ def next_random_id(counter: int) -> int:
     return (counter % _RANDOM_ID_MOD) + 1
 
 
-def parse_message_new(update: dict) -> tuple[int, int, str] | None:
-    """(from_id, peer_id, text) из события Long Poll, либо None если это не входящее текстовое
-    сообщение пользователя. Формат Long Poll 5.x: object.message.{from_id,peer_id,text}. Игнорим
-    сообщения от сообщества (from_id < 0) и пустой текст. Защищён от кривого payload."""
+def parse_message_new(update: dict) -> tuple[int, int, str, dict | None] | None:
+    """(from_id, peer_id, text, payload) из события Long Poll, либо None если это не входящее
+    сообщение пользователя. Формат Long Poll 5.x: object.message.{from_id,peer_id,text,payload}.
+    Игнорим сообщения от сообщества (from_id < 0) и нет адреса. payload — dict из JSON-строки
+    нажатой кнопки клавиатуры (Слой C: команды /купить), либо None. Пропускаем, если нет ни
+    текста, ни payload. Защищён от кривого payload."""
     try:
         if (update or {}).get("type") != "message_new":
             return None
@@ -42,9 +45,17 @@ def parse_message_new(update: dict) -> tuple[int, int, str] | None:
         from_id = int(msg.get("from_id") or 0)
         peer_id = int(msg.get("peer_id") or 0)
         text = (msg.get("text") or "").strip()
-        if from_id <= 0 or not peer_id or not text:    # не юзер / нет адреса / пустой текст
+        payload = None
+        raw = msg.get("payload")
+        if raw:
+            try:
+                p = json.loads(raw)
+                payload = p if isinstance(p, dict) else None
+            except (ValueError, TypeError):
+                payload = None
+        if from_id <= 0 or not peer_id or (not text and payload is None):
             return None
-        return from_id, peer_id, text
+        return from_id, peer_id, text, payload
     except (TypeError, ValueError):
         return None
 
@@ -61,7 +72,8 @@ class VKError(Exception):
 
 class VKBot:
     """Один бот сообщества ВК: long-poll приём + messages.send. token/group_id — из vault тенанта.
-    on_message(from_id, peer_id, text) — async-колбэк (пайплайн ответа). НЕ держит состояние БД."""
+    on_message(from_id, peer_id, text, payload) — async-колбэк (пайплайн ответа; payload — dict
+    нажатой кнопки или None). НЕ держит состояние БД."""
 
     def __init__(self, token: str, group_id: int, on_message):
         self.token = token
@@ -84,20 +96,38 @@ class VKBot:
         lp = await self._api("groups.getLongPollServer", group_id=self.group_id)
         return lp["server"], lp["key"], str(lp["ts"])
 
-    async def send(self, peer_id: int, text: str) -> None:
-        """messages.send (random_id ОБЯЗАТЕЛЕН и уникален). НЕ бросает — ответ не должен ронять loop."""
+    async def send(self, peer_id: int, text: str, *, keyboard: dict | None = None) -> None:
+        """messages.send (random_id ОБЯЗАТЕЛЕН и уникален). keyboard — VK-клавиатура (dict → JSON).
+        НЕ бросает — ответ не должен ронять loop."""
         import aiohttp
         self._send_counter += 1
         rid = next_random_id(self._send_counter)
         try:
             params = {"peer_id": int(peer_id), "message": text[:4000], "random_id": rid,
                       "access_token": self.token, "v": VK_API_VERSION}
+            if keyboard is not None:
+                params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
             async with self._session.post(f"{VK_API}/messages.send", data=params) as r:
                 data = await r.json()
             if "error" in data:
                 logger.error("VK messages.send error: %s", data["error"])
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("VK messages.send не удался (peer=%s): %s", peer_id, e)
+
+    async def send_keyboard(self, peer_id: int, text: str, buttons: list[dict]) -> None:
+        """Inline-клавиатура: buttons=[{label, payload(dict)}], по кнопке на строку. text-кнопка с
+        payload: клик → новое message_new с этим payload (Слой C: витрина покупки). Cap 6 кнопок
+        (лимит inline-клавиатуры VK)."""
+        rows = [[{"action": {"type": "text", "label": (b["label"] or "")[:40],
+                             "payload": json.dumps(b["payload"], ensure_ascii=False)}}]
+                for b in buttons[:6]]
+        await self.send(peer_id, text, keyboard={"inline": True, "buttons": rows})
+
+    async def send_link(self, peer_id: int, text: str, url: str, label: str) -> None:
+        """Сообщение с inline-кнопкой open_link (ссылка на оплату ЮKassa)."""
+        kb = {"inline": True, "buttons": [[{"action": {"type": "open_link", "link": url,
+                                                       "label": (label or "Оплатить")[:40]}}]]}
+        await self.send(peer_id, text, keyboard=kb)
 
     async def run(self) -> None:
         """Bots Long Poll: getLongPollServer → цикл a_check c обработкой failed 1/2/3.
@@ -144,8 +174,8 @@ class VKBot:
         # failed == 3 (или иное) — полностью пере-получаем
         return await self._get_lp()
 
-    async def _safe_handle(self, from_id, peer_id, text):
+    async def _safe_handle(self, from_id, peer_id, text, payload=None):
         try:
-            await self.on_message(from_id, peer_id, text)
+            await self.on_message(from_id, peer_id, text, payload)
         except Exception:  # noqa: BLE001 — обработка одного сообщения не должна валить poll
             logger.warning("VK on_message упал (from=%s)", from_id, exc_info=True)
