@@ -56,16 +56,28 @@ async def close() -> None:
         await pool.close()
 
 
-async def upsert_start(tg_user_id: int, source: str) -> None:
-    """Создаёт лид при /start. При повторном /start источник не перетираем (first-touch)."""
+# ── Слой C: идентичность лида по каналу (гибрид — колонка на канал + helper) ──────────
+# Колонка идентичности лида в зависимости от мессенджера. messenger — из НАШЕГО белого списка
+# (драйверы каналов), не из пользовательского ввода → безопасная f-string-интерполяция в SQL.
+# Telegram-путь не меняется (messenger='tg' → tg_user_id, как было).
+_CHANNEL_USER_COL = {"tg": "tg_user_id", "max": "max_user_id", "vk": "vk_user_id"}
+
+
+def _user_col(messenger: str) -> str:
+    return _CHANNEL_USER_COL.get(messenger, "tg_user_id")
+
+
+async def upsert_start(tg_user_id: int, source: str, *, messenger: str = "tg") -> None:
+    """Создаёт лид при /start (любого канала). При повторном /start источник не перетираем
+    (first-touch). tg_user_id — внешний id пользователя В ЭТОМ канале (для tg — Telegram id,
+    для vk — from_id, для max — user_id); кладётся в колонку канала."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         await c.execute(
-            """
-            insert into leads (tg_user_id, messenger, source, status, tenant_id)
-            values ($1, 'tg', $2, 'new', $3)
-            on conflict (tenant_id, tg_user_id) do update set updated_at = now()
-            """,
-            tg_user_id, source, tenant_id(),
+            f"insert into leads ({col}, messenger, source, status, tenant_id) "
+            f"values ($1, $2, $3, 'new', $4) "
+            f"on conflict (tenant_id, {col}) do update set updated_at = now()",
+            tg_user_id, messenger, source, tenant_id(),
         )
 
 
@@ -191,15 +203,17 @@ async def get_lead_persona(tg_user_id: int) -> str | None:
 
 
 # ── A3: эскалация лида менеджерам (дедуп — одна карточка на лид) ───────────────
-async def claim_lead_escalation(tg_user_id: int) -> bool:
+async def claim_lead_escalation(tg_user_id: int, *, messenger: str = "tg") -> bool:
     """Атомарно «застолбить» эскалацию лида: escalated_at NULL → now(). True — застолбили
     сейчас (первая эскалация), False — уже эскалирован / нет лида / сбой. tenant-scoped.
-    Дедуп от гонки двух подряд сообщений: WHERE escalated_at is null делает claim атомарным."""
+    Дедуп от гонки двух подряд сообщений: WHERE escalated_at is null делает claim атомарным.
+    tg_user_id — внешний id лида в канале messenger."""
+    col = _user_col(messenger)
     try:
         async with pool.acquire() as c:
             res = await c.execute(
-                "update leads set escalated_at = now() "
-                "where tg_user_id = $1 and tenant_id = $2 and escalated_at is null",
+                f"update leads set escalated_at = now() "
+                f"where {col} = $1 and tenant_id = $2 and escalated_at is null",
                 tg_user_id, tenant_id(),
             )
         return res.endswith(" 1")
@@ -208,26 +222,28 @@ async def claim_lead_escalation(tg_user_id: int) -> bool:
         return False
 
 
-async def release_lead_escalation(tg_user_id: int) -> None:
+async def release_lead_escalation(tg_user_id: int, *, messenger: str = "tg") -> None:
     """Откатить claim (escalated_at → NULL), если карточка менеджерам НЕ ушла (сбой отправки) —
     чтобы следующее квалифицирующее сообщение попробовало снова, а лид не «потерялся»."""
+    col = _user_col(messenger)
     try:
         async with pool.acquire() as c:
             await c.execute(
-                "update leads set escalated_at = null where tg_user_id = $1 and tenant_id = $2",
+                f"update leads set escalated_at = null where {col} = $1 and tenant_id = $2",
                 tg_user_id, tenant_id(),
             )
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning("release_lead_escalation: %s", e)
 
 
-async def get_lead_id(tg_user_id: int) -> str | None:
-    """id лида (uuid) по tg_user_id — для ссылки «диалог в панели» в карточке эскалации.
+async def get_lead_id(tg_user_id: int, *, messenger: str = "tg") -> str | None:
+    """id лида (uuid) по внешнему id канала — для ссылки «диалог в панели» в карточке эскалации.
     None — нет лида/сбой (тогда панель-ссылку не кладём, эскалация не падает)."""
+    col = _user_col(messenger)
     try:
         async with pool.acquire() as c:
             v = await c.fetchval(
-                "select id from leads where tg_user_id = $1 and tenant_id = $2",
+                f"select id from leads where {col} = $1 and tenant_id = $2",
                 tg_user_id, tenant_id())
         return str(v) if v else None
     except Exception as e:  # noqa: BLE001
@@ -236,12 +252,13 @@ async def get_lead_id(tg_user_id: int) -> str | None:
 
 
 # ── Перехват (bot_paused) ────────────────────────────────────────────────────
-async def is_bot_paused(tg_user_id: int) -> bool:
+async def is_bot_paused(tg_user_id: int, *, messenger: str = "tg") -> bool:
     """True, если оператор взял ручное управление этим лидом. Нет строки → False."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         val = await c.fetchval(
-            "select coalesce(bot_paused, false) from leads "
-            "where tg_user_id = $1 and tenant_id = $2",
+            f"select coalesce(bot_paused, false) from leads "
+            f"where {col} = $1 and tenant_id = $2",
             tg_user_id, tenant_id(),
         )
     return bool(val)
@@ -270,6 +287,7 @@ async def resolve_lead_id(tg_user_id: int) -> str | None:
 async def log_message(
     *,
     tg_user_id: int,
+    messenger: str = "tg",
     direction: str,
     kind: str = "text",
     text: str | None = None,
@@ -278,28 +296,29 @@ async def log_message(
     tg_message_id: int | None = None,
     lead_id: str | None = None,
 ) -> None:
-    """Пишет одну строку в messages. lead_id мягко резолвится по tg_user_id, если не передан.
-
-    НИКОГДА не бросает наружу — лог переписки не должен ронять воронку/Лию/рассылку.
-    Вызывается из middleware (входящие) и messaging-слоя (исходящие).
-    """
+    """Пишет одну строку в messages. lead_id мягко резолвится по внешнему id канала, если не
+    передан. tg_user_id — внешний id лида В КАНАЛЕ messenger; в messages.tg_user_id кладём его
+    ТОЛЬКО для tg (для vk/max колонка NULL — адрес лида = lead_id; messenger хранит канал;
+    tg_message_id хранит нативный id сообщения канала). НИКОГДА не бросает наружу — лог переписки
+    не должен ронять воронку/Лию/рассылку. Вызывается из middleware (входящие) и messaging."""
     if kind not in _MSG_KINDS:
         kind = "other"
+    col = _user_col(messenger)
     try:
         async with pool.acquire() as c:
             if lead_id is None:
                 lead_id = await c.fetchval(
-                    "select id from leads where tg_user_id = $1 and tenant_id = $2", tg_user_id, tenant_id()
+                    f"select id from leads where {col} = $1 and tenant_id = $2", tg_user_id, tenant_id()
                 )
             await c.execute(
                 """
                 insert into messages
                     (lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id,
-                     source, tenant_id)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     source, tenant_id, messenger)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
-                lead_id, tg_user_id, tg_message_id, direction, kind, text, file_id, source,
-                tenant_id(),
+                lead_id, (tg_user_id if messenger == "tg" else None), tg_message_id,
+                direction, kind, text, file_id, source, tenant_id(), messenger,
             )
     except Exception:  # noqa: BLE001 — изоляция: переписка-лог не критична к доставке
         logging.getLogger(__name__).warning(
@@ -985,7 +1004,8 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
 
 
 async def get_ai_history(
-    tg_user_id: int, *, exclude_tg_message_id: int | None = None, limit: int = 10
+    tg_user_id: int, *, messenger: str = "tg",
+    exclude_tg_message_id: int | None = None, limit: int = 10,
 ) -> list[dict]:
     """Последние ходы диалога лида для контекста OpenAI-эндпоинта агента (Wave 5).
     Возвращает [{"role": "user"|"assistant", "content": str}] в ХРОНОЛОГИЧЕСКОМ порядке.
@@ -1002,13 +1022,21 @@ async def get_ai_history(
     молчит из-за БД)."""
     if limit <= 0:
         return []
+    # tg: по tg_user_id (как было, поведение байт-в-байт). vk/max: messages.tg_user_id=NULL →
+    # матчим по lead_id (резолв из leads по колонке канала); tg_message_id хранит нативный id
+    # сообщения канала, поэтому exclude работает одинаково.
+    if messenger == "tg":
+        lead_match = "tg_user_id = $1 and tenant_id = $2"
+    else:
+        col = _user_col(messenger)
+        lead_match = f"lead_id = (select id from leads where {col} = $1 and tenant_id = $2)"
     try:
         async with pool.acquire() as c:
             rows = await c.fetch(
-                """
+                f"""
                 select direction, source, text
                 from messages
-                where tg_user_id = $1 and tenant_id = $2
+                where {lead_match}
                   and kind = 'text' and text is not null and text <> ''
                   and (direction = 'in' or source in ('liya', 'manual'))
                   and ($3::bigint is null or not (direction = 'in' and tg_message_id = $3))
@@ -1160,13 +1188,18 @@ async def get_active_triggers(tid, types: tuple[str, ...] | None = None) -> list
         return []
 
 
-async def count_inbound_messages(tg_user_id: int) -> int:
-    """Кол-во входящих сообщений лида (триггер message_count). tenant-scoped (owner фильтрует)."""
+async def count_inbound_messages(tg_user_id: int, *, messenger: str = "tg") -> int:
+    """Кол-во входящих сообщений лида (триггер message_count). tenant-scoped (owner фильтрует).
+    tg: по tg_user_id (как было); vk/max: по lead_id (messages.tg_user_id=NULL)."""
+    if messenger == "tg":
+        match = "tg_user_id = $1 and tenant_id = $2"
+    else:
+        col = _user_col(messenger)
+        match = f"lead_id = (select id from leads where {col} = $1 and tenant_id = $2)"
     try:
         async with pool.acquire() as c:
             v = await c.fetchval(
-                "select count(*) from messages "
-                "where tg_user_id = $1 and tenant_id = $2 and direction = 'in'",
+                f"select count(*) from messages where {match} and direction = 'in'",
                 tg_user_id, tenant_id())
         return int(v or 0)
     except Exception:  # noqa: BLE001
@@ -1174,13 +1207,14 @@ async def count_inbound_messages(tg_user_id: int) -> int:
         return 0
 
 
-async def pause_lead(tg_user_id: int) -> None:
+async def pause_lead(tg_user_id: int, *, messenger: str = "tg") -> None:
     """Поставить диалог на паузу (bot_paused=true) — действие триггера notify_reply_pause.
     Дальше Лия молчит, отвечает оператор (is_bot_paused это проверяет). tenant-scoped."""
+    col = _user_col(messenger)
     try:
         async with pool.acquire() as c:
             await c.execute(
-                "update leads set bot_paused = true where tg_user_id = $1 and tenant_id = $2",
+                f"update leads set bot_paused = true where {col} = $1 and tenant_id = $2",
                 tg_user_id, tenant_id())
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).warning("pause_lead: сбой", exc_info=True)
