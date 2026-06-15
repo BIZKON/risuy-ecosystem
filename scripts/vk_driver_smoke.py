@@ -30,16 +30,16 @@ def msg_new(from_id, peer_id, text):
 
 
 async def main() -> None:
-    print("1. parse_message_new:")
-    check("валидное сообщение юзера → (from_id, peer_id, text)",
-          vk_driver.parse_message_new(msg_new(123, 123, "привет")) == (123, 123, "привет"))
-    check("текст триммится", vk_driver.parse_message_new(msg_new(5, 5, "  хай  ")) == (5, 5, "хай"))
+    print("1. parse_message_new (4-tuple: from_id, peer_id, text, payload):")
+    check("валидное сообщение юзера → (from_id, peer_id, text, None)",
+          vk_driver.parse_message_new(msg_new(123, 123, "привет")) == (123, 123, "привет", None))
+    check("текст триммится", vk_driver.parse_message_new(msg_new(5, 5, "  хай  ")) == (5, 5, "хай", None))
     check("сообщение от сообщества (from_id<0) → None", vk_driver.parse_message_new(msg_new(-10, 5, "x")) is None)
     check("пустой текст → None", vk_driver.parse_message_new(msg_new(5, 5, "   ")) is None)
     check("не message_new → None", vk_driver.parse_message_new({"type": "message_edit", "object": {}}) is None)
     check("кривой payload → None (не падает)", vk_driver.parse_message_new({"type": "message_new"}) is None)
     check("None → None", vk_driver.parse_message_new(None) is None)
-    check("беседа (peer_id 2e9+) тоже парсится", vk_driver.parse_message_new(msg_new(77, 2000000001, "чат")) == (77, 2000000001, "чат"))
+    check("беседа (peer_id 2e9+) тоже парсится", vk_driver.parse_message_new(msg_new(77, 2000000001, "чат")) == (77, 2000000001, "чат", None))
 
     print("2. vk_client_link:")
     url, label = vk_driver.vk_client_link(456)

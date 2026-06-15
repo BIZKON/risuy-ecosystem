@@ -146,7 +146,14 @@ class MAXBot:
                     subs = (await r.json()).get("subscriptions") or []
                 for s in subs:
                     if s.get("url"):
-                        await self._session.delete(f"{MAX_API}/subscriptions", json={"url": s["url"]})
+                        # ⚠️ url — QUERY-параметр (?url=), НЕ JSON-тело: офиц. MAX API
+                        # (DELETE /subscriptions?url=...), а тело DELETE многие стеки игнорируют →
+                        # webhook молча не снимется и конфликтнёт с long-poll (часть updates уйдёт
+                        # на webhook). Лог статуса — чтобы тихий no-op не маскировал провал отписки.
+                        async with self._session.delete(
+                            f"{MAX_API}/subscriptions", params={"url": s["url"]}) as dr:
+                            if dr.status != 200:
+                                logger.info("MAX delete subscription HTTP %s (url=%s)", dr.status, s["url"])
             except Exception:  # noqa: BLE001 — best-effort, не критично
                 pass
             logger.info("MAX long-poll стартовал")
@@ -173,8 +180,19 @@ class MAXBot:
                         asyncio.create_task(self._safe_handle(*msg))
                         continue
                     cb = parse_message_callback(upd)   # Слой C: нажата inline-кнопка (покупка)
-                    if cb and self.on_callback is not None:
-                        asyncio.create_task(self._safe_callback(*cb))
+                    if cb:
+                        if self.on_callback is not None:
+                            asyncio.create_task(self._safe_callback(*cb))
+                        continue
+                    # Диагностика непротестированной зоны: сообщение/коллбэк пришёл, но не распарсился
+                    # (вероятно recipient.chat_id отсутствует в личке — по OpenAPI оба поля nullable).
+                    # Сейчас такое молча терялось бы; логируем СЫРОЙ апдейт, чтобы живой тест в ЛС сразу
+                    # показал реальную форму recipient (chat_id/user_id) — и точечную правку адресации
+                    # можно было сделать по факту, а не гадая (см. handoff: chat_id-null в личке MAX).
+                    if (upd or {}).get("update_type") in ("message_created", "message_callback"):
+                        logger.warning(
+                            "MAX: %s не распарсился (recipient без chat_id? личка?): %s",
+                            upd.get("update_type"), json.dumps(upd, ensure_ascii=False)[:600])
                 marker = data.get("marker", marker)   # продвигаем курсор
         finally:
             if self._session is not None:

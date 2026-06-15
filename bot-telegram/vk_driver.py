@@ -116,8 +116,8 @@ class VKBot:
 
     async def send_keyboard(self, peer_id: int, text: str, buttons: list[dict]) -> None:
         """Inline-клавиатура: buttons=[{label, payload(dict)}], по кнопке на строку. text-кнопка с
-        payload: клик → новое message_new с этим payload (Слой C: витрина покупки). Cap 6 кнопок
-        (лимит inline-клавиатуры VK)."""
+        payload: клик → новое message_new с этим payload (Слой C: витрина покупки). Cap 6 строк
+        (по 1 кнопке/строку); inline-лимит VK = 6 строк (× до 5 кнопок/строку), наша раскладка внутри."""
         rows = [[{"action": {"type": "text", "label": (b["label"] or "")[:40],
                              "payload": json.dumps(b["payload"], ensure_ascii=False)}}]
                 for b in buttons[:6]]
