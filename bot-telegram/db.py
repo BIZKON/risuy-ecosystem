@@ -1131,6 +1131,61 @@ async def get_tenant_escalation(tid) -> dict:
     return out
 
 
+# ── Слой B: движок триггеров (tenant_triggers). Бот owner, фильтрует tenant_id явно. ──
+_TRIGGER_COLS = ("id, type, action, stopwords, intent_desc, msg_count, "
+                 "notify_chat_id, notify_topic_id, reply_text")
+
+
+async def get_active_triggers(tid, types: tuple[str, ...] | None = None) -> list[dict]:
+    """Активные триггеры тенанта для движка (опц. фильтр по типам). Порядок — position,
+    created_at. Сбой/нет → [] (триггеры не должны ронять обработку сообщения)."""
+    if tid is None:
+        return []
+    try:
+        async with pool.acquire() as c:
+            if types:
+                rows = await c.fetch(
+                    f"select {_TRIGGER_COLS} from tenant_triggers "
+                    "where tenant_id = $1 and enabled = true and type = any($2::text[]) "
+                    "order by position, created_at",
+                    tid, list(types))
+            else:
+                rows = await c.fetch(
+                    f"select {_TRIGGER_COLS} from tenant_triggers "
+                    "where tenant_id = $1 and enabled = true order by position, created_at",
+                    tid)
+        return [dict(r) for r in rows]
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("get_active_triggers: сбой чтения", exc_info=True)
+        return []
+
+
+async def count_inbound_messages(tg_user_id: int) -> int:
+    """Кол-во входящих сообщений лида (триггер message_count). tenant-scoped (owner фильтрует)."""
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval(
+                "select count(*) from messages "
+                "where tg_user_id = $1 and tenant_id = $2 and direction = 'in'",
+                tg_user_id, tenant_id())
+        return int(v or 0)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("count_inbound_messages: сбой", exc_info=True)
+        return 0
+
+
+async def pause_lead(tg_user_id: int) -> None:
+    """Поставить диалог на паузу (bot_paused=true) — действие триггера notify_reply_pause.
+    Дальше Лия молчит, отвечает оператор (is_bot_paused это проверяет). tenant-scoped."""
+    try:
+        async with pool.acquire() as c:
+            await c.execute(
+                "update leads set bot_paused = true where tg_user_id = $1 and tenant_id = $2",
+                tg_user_id, tenant_id())
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("pause_lead: сбой", exc_info=True)
+
+
 # ── Метеринг (Wave 3): мягкая пауза ИИ при пустом кошельке prepaid-тенанта ────
 async def is_ai_wallet_blocked() -> bool:
     """True — кошелёк активного тенанта пуст и ИИ на мягкой паузе (флаг ставит

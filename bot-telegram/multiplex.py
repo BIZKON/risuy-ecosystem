@@ -38,6 +38,7 @@ import db
 import escalation
 import messaging
 import texts
+import triggers
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,10 @@ async def t_text(message: Message, bot: Bot) -> None:
     cfg = await db.get_tenant_ai_overrides(db.tenant_id())
     if not cfg["enabled"]:
         return
+    # Слой B: детерминированные триггеры тенанта (стоп-слова / кол-во сообщений) — ДО проверки
+    # agent_id/кошелька: работают без ИИ-агента (клиент может настроить триггеры до провижининга).
+    if await triggers.handle_text(bot, message):
+        return
     # cloud-ai без agent_id тенанта НЕ зовём: иначе ask_liya сфолбэчится на агента
     # Школы (config.AGENT_ID) и расход ушёл бы Школе. gateway работает без agent_id.
     if cfg["backend"] != "gateway" and not cfg["agent_id"]:
@@ -104,6 +109,15 @@ async def t_text(message: Message, bot: Bot) -> None:
     await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
     if esc is not None:
         await escalation.escalate(bot, message.from_user.id, esc)
+
+
+@tenant_router.message(F.document)
+async def t_document(message: Message, bot: Bot) -> None:
+    """Слой B: документ от лида тенанта → триггер типа documents (если настроен у тенанта)."""
+    cfg = await db.get_tenant_ai_overrides(db.tenant_id())
+    if not cfg["enabled"]:
+        return
+    await triggers.handle_document(bot, message)
 
 
 # ── contextvar tenant_id per-update ──────────────────────────────────────────

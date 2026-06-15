@@ -20,6 +20,7 @@ import escalation
 import kb
 import messaging
 import texts
+import triggers
 import yookassa
 
 logger = logging.getLogger(__name__)
@@ -286,6 +287,11 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
             bot, message.from_user.id, texts.WALLET_PAUSED, source="system"
         )
         return
+    # Слой B: детерминированные триггеры клиента (стоп-слова / кол-во сообщений). Первый
+    # сработавший → ответ клиенту + уведомление менеджерам, ИИ на этот ход пропускаем. Нет
+    # настроенных триггеров (Школа) → False → обычный ИИ-поток (поведение не меняется).
+    if await triggers.handle_text(bot, message):
+        return
     try:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:
@@ -322,6 +328,16 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # A3: горячий лид → карточка менеджерам в ТГ-группу/тему (дедуп; не роняет ответ клиенту).
     if esc_payload is not None:
         await escalation.escalate(bot, message.from_user.id, esc_payload)
+
+
+@router.message(StateFilter(None), F.document)
+async def on_document(message: Message, bot: Bot):
+    """Слой B: лид прислал документ в свободном диалоге → триггер типа documents (если настроен).
+    На паузе / без триггера — ничего (как было раньше: документы в свободном состоянии не
+    обрабатывались)."""
+    if await db.is_bot_paused(message.from_user.id):
+        return
+    await triggers.handle_document(bot, message)
 
 
 async def _go_to_gate(user_id: int, message: Message, state: FSMContext, bot: Bot):
