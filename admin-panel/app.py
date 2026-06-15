@@ -4219,6 +4219,7 @@ async def my_agent_page(
             "esc_enabled": esc["enabled"],
             "esc_chat_id": esc["chat_id"],
             "esc_topic_id": esc["topic_id"],
+            "notifier_username": config.NOTIFIER_BOT_USERNAME,
             "support_url": _safe_support_url(config.SUPPORT_URL),
             "saved": _my_agent_saved_text(saved),
             "err": _my_agent_err_text(err),
@@ -4347,6 +4348,7 @@ async def triggers_page(
             "actions": [{"key": k, "label": config.TRIGGER_ACTION_LABELS[k]}
                         for k in config.TRIGGER_ACTION_ORDER],
             "default_chat_id": esc.get("chat_id") or "",
+            "notifier_username": config.NOTIFIER_BOT_USERNAME,
             "stopword_len_max": config.TRIGGER_STOPWORD_LEN_MAX,
             "intent_max": config.TRIGGER_INTENT_MAX,
             "reply_max": config.TRIGGER_REPLY_MAX,

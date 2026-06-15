@@ -598,6 +598,10 @@ ESCALATION_ENABLED_SETTING_KEY = "escalation_enabled"     # ""/"1"
 ESCALATION_CHAT_ID_SETTING_KEY = "escalation_chat_id"     # -100… (текст)
 ESCALATION_TOPIC_ID_SETTING_KEY = "escalation_topic_id"   # опц. message_thread_id (digits)
 ESCALATION_CHAT_ID_RE = r"^-?\d{5,}$"   # TG chat id (супергруппа -100…); валидируем форму ввода
+# Единый бот-нотификатор (Слой B): клиент добавляет ИМЕННО его в свою группу менеджеров, чтобы
+# приходили карточки эскалаций/триггеров. Показываем username в подсказках. Активация (токен)
+# — в env БОТА (NOTIFIER_BOT_TOKEN, app 201859); без неё уведомления идут через разговорный бот.
+NOTIFIER_BOT_USERNAME = os.environ.get("NOTIFIER_BOT_USERNAME", "ConversionConsultant_bot").lstrip("@")
 
 # ── Раздел КЛИЕНТА «Триггеры» (/triggers) — движок триггеров в tenant_triggers (Слой B) ──
 # Клиент создаёт триггеры: условие (стоп-слова/намерение/кол-во сообщений/документы) → действие
