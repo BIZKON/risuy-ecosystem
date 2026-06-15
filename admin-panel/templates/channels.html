@@ -5,6 +5,7 @@
 {% block body_class %}page-channels{% endblock %}
 
 {% block content %}
+{% if is_platform %}
 <div class="page-head">
   <h1 class="page-head__title">Каналы</h1>
   <p class="page-head__hint">Откуда приходят лиды и как конвертируются — по площадкам. Здесь же каждому каналу можно назначить своего <b>ИИ-сотрудника</b>. Ниже — готовые <b>deep-link'и</b> для воронки: разместите свою ссылку на каждом канале, и атрибуция заполнится сама.</p>
@@ -141,4 +142,56 @@
   </div>
   {% endif %}
 </section>
+
+{% else %}
+{# ═══ КЛИЕНТСКИЙ ВИД (operator): self-serve подключение каналов разговора ═══ #}
+<div class="page-head">
+  <h1 class="page-head__title">Каналы</h1>
+  <p class="page-head__hint">Подключите мессенджеры, в которых ваш ИИ-сотрудник будет общаться с клиентами. Токены хранятся в зашифрованном виде; после сохранения значение не показывается. Бот подхватит настройки автоматически в течение ~минуты. Если ИИ-сотрудник не отвечает спустя пару минут — проверьте, что токен действующий (а для ВК — что включён Long Poll API).</p>
+</div>
+
+{% if saved_flash %}{{ flash('Сохранено. Канал подключится автоматически в течение минуты.', 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{% if not has_tenant %}
+<p class="hint hint--block">⚠️ Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.</p>
+{% elif not vault_enabled %}
+<p class="hint hint--block">⚠️ Хранилище ключей не настроено. Обратитесь в поддержку.</p>
+{% else %}
+
+{% for card in channel_cards %}
+<section class="section" aria-label="Канал {{ card.title|e }}">
+  <h2 class="section__title section__title--lg">
+    {{ card.title }}
+    {% if card.connected %}<span class="badge">настроен</span>{% else %}<span class="muted">не настроен</span>{% endif %}
+  </h2>
+  <p class="hint hint--block">{{ card.guide }}</p>
+
+  {% for f in card.fields %}
+  <form method="post" action="/channels/connect" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="key_name" value="{{ f.key }}">
+    <label class="field">
+      <span class="field__label">{{ f.label }} {% if f.is_set %}<span class="badge">задан</span>{% else %}<span class="muted">не задан</span>{% endif %}</span>
+      <input class="field__input mono" type="password" name="value" required
+             maxlength="{{ value_max }}" autocomplete="off"
+             placeholder="{% if f.is_set %}Введите заново, чтобы заменить{% else %}Вставьте значение{% endif %}">
+    </label>
+    <button class="btn btn--dark btn--sm" type="submit">{% if f.is_set %}Заменить{% else %}Сохранить{% endif %}</button>
+  </form>
+  {% if f.is_set %}
+  <form method="post" action="/channels/disconnect" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="key_name" value="{{ f.key }}">
+    <button class="btn btn--soft btn--sm" type="submit">Отключить «{{ f.label }}»</button>
+  </form>
+  {% endif %}
+  {% endfor %}
+</section>
+{% endfor %}
+
+<p class="hint hint--block">Значения передаются один раз и сразу шифруются (AES-GCM); в журналах и аудите не появляются. Подключение канала — только для вашего кабинета. {% if support_url %}Нужна помощь? <a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Поддержка</a>.{% endif %}</p>
+
+{% endif %}
+{% endif %}
 {% endblock %}

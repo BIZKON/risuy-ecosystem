@@ -3679,11 +3679,39 @@ def _present_attribution(rows) -> dict:
 
 def _channels_err_text(err: str | None) -> str | None:
     return {
+        # платформенный вид (персоны по каналам)
         "bad_source": "Неизвестный канал.",
         "bad_persona": "Неизвестный ИИ-сотрудник.",
         "tw": "Не удалось создать агента персоны у ИИ-сервиса. Проверьте токен ИИ в окружении "
               "панели и повторите — назначение не сохранено.",
+        # client-вид (self-serve подключение каналов)
+        "no_tenant": "Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.",
+        "no_vault": "Хранилище ключей не настроено. Обратитесь в поддержку.",
+        "bad_key": "Неизвестное поле канала.",
+        "bad_gid": "ID сообщества ВК — только цифры, без минуса, букв и ссылок.",
+        "empty": "Значение пустое — не сохранено.",
+        "too_long": f"Значение длиннее {config.TENANT_SECRET_VALUE_MAX} символов.",
+        "not_found": "Нечего отключать — поле не задано.",
     }.get(err or "")
+
+
+def _channel_cards_view(secrets_meta: list) -> list[dict]:
+    """Презентер карточек подключения каналов (client-вид «Каналы»). Канал «подключён», когда
+    заданы ВСЕ его секреты в vault. Чистая функция (тестируема смоуком без БД): на вход —
+    метаданные секретов тенанта (db.list_tenant_secrets), на выход — данные для шаблона."""
+    known = {r["key_name"] for r in secrets_meta}
+    label = dict(config.TENANT_SECRET_KEYS)
+    cards = []
+    for c in config.CHANNEL_CONNECT_CARDS:
+        fields = [{"key": k, "label": label.get(k, k), "is_set": k in known} for k in c["secret_keys"]]
+        cards.append({
+            "key": c["key"],
+            "title": c["title"],
+            "guide": c["guide"],
+            "fields": fields,
+            "connected": all(f["is_set"] for f in fields),
+        })
+    return cards
 
 
 @app.get("/channels", response_class=HTMLResponse)
@@ -3691,9 +3719,34 @@ async def channels_page(
     request: Request,
     session: auth.Session = Depends(require_session),
     saved_persona: int = 0,
+    saved: int = 0,
     err: str | None = None,
 ):
-    _require_admin(session)  # назначения персон по каналам = глобальный app_settings Школы — только платформе
+    # Ролевой раздел (Слой C, решение владельца): КЛИЕНТ (operator) подключает свои каналы
+    # (self-serve, tenant-scoped); ПЛАТФОРМА видит атрибуцию по площадкам + персоны на канал
+    # (глобальный app_settings Школы). Глобально-пишущий POST /channels/persona — под is_platform.
+    if not session.is_platform:
+        secrets_meta: list = []
+        if session.active_tenant_id and vault.enabled():
+            secrets_meta = await db.list_tenant_secrets(session.active_tenant_id)
+        return templates.TemplateResponse(
+            request,
+            "channels.html",
+            {
+                "active": "channels",
+                "session": session,
+                "csrf_token": session.csrf_token,
+                "is_platform": False,
+                "has_tenant": bool(session.active_tenant_id),
+                "vault_enabled": vault.enabled(),
+                "channel_cards": _channel_cards_view(secrets_meta),
+                "value_max": config.TENANT_SECRET_VALUE_MAX,
+                "support_url": _safe_support_url(config.SUPPORT_URL),
+                "saved_flash": bool(saved),
+                "err": _channels_err_text(err),
+            },
+        )
+    # ── Платформенный вид (без изменений) ──
     attribution = _present_attribution(await db.attribution_by_source())
     clicks = await db.total_link_clicks()
     runtime = await db.get_runtime_status()
@@ -3718,6 +3771,7 @@ async def channels_page(
         request,
         "channels.html",
         {
+            "is_platform": True,
             "attribution": attribution,
             "clicks": clicks,
             "runtime": runtime,
@@ -3769,6 +3823,65 @@ async def channels_set_persona(
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/channels?saved_persona=1", status_code=303)
+
+
+# ── Слой C: self-serve подключение каналов (client-вид «Каналы») ──────────────
+# Tenant-scoped, БЕЗ _require_admin: клиент сам подключает свои каналы. Пишем ТОЛЬКО в его
+# tenant-vault (upsert_tenant_secret) — никаких глобальных app_settings (анти-кросс-тенант).
+# Принимаем лишь канальные ключи (CHANNEL_SECRET_KEY_SET). AAD шифрования — {tenant_id}:{key_name},
+# как в /keys: бот расшифровывает с тем же AAD (db.get_tenant_secret).
+@app.post("/channels/connect")
+async def channels_connect(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    key_name: str = Form(""),
+    value: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/channels?err=no_tenant", status_code=303)
+    if not vault.enabled():
+        return RedirectResponse(url="/channels?err=no_vault", status_code=303)
+    key_name = key_name.strip()
+    if key_name not in config.CHANNEL_SECRET_KEY_SET:
+        return RedirectResponse(url="/channels?err=bad_key", status_code=303)
+    value = value.strip()
+    if not value:
+        return RedirectResponse(url="/channels?err=empty", status_code=303)
+    if len(value) > config.TENANT_SECRET_VALUE_MAX:
+        return RedirectResponse(url="/channels?err=too_long", status_code=303)
+    # Зеркалим жёсткий гейт бота (_reconcile_vk: gid.isdigit()): иначе нечисловой ID («club123»,
+    # «-123», ссылка) сохранится, карточка покажет «настроен», но VK-поллер молча не стартует.
+    if key_name == "vk_group_id" and not value.isdigit():
+        return RedirectResponse(url="/channels?err=bad_gid", status_code=303)
+    ct, nonce, ver = vault.encrypt(value, aad=f"{session.active_tenant_id}:{key_name}")
+    del value  # plaintext дальше не живёт (ни в БД, ни в аудите, ни в логах)
+    await db.upsert_tenant_secret(
+        session.active_tenant_id, key_name, ct, nonce, ver,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/channels?saved=1", status_code=303)
+
+
+@app.post("/channels/disconnect")
+async def channels_disconnect(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    key_name: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/channels?err=no_tenant", status_code=303)
+    key_name = key_name.strip()
+    if key_name not in config.CHANNEL_SECRET_KEY_SET:
+        return RedirectResponse(url="/channels?err=bad_key", status_code=303)
+    ok = await db.delete_tenant_secret(
+        session.active_tenant_id, key_name,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/channels?saved=1" if ok else "/channels?err=not_found", status_code=303)
 
 
 def _persona_effective_prompt(role: str, tasks: str, behavior: str, knowledge: str) -> str:

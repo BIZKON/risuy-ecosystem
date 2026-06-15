@@ -85,8 +85,9 @@
     <nav class="snav" aria-label="Основная навигация">
       {{ nav_item('dashboard',    '/',           'Статистика', active) }}
       {{ nav_item('dialogs',      '/dialogs',    'Диалоги',    active, nav_dialogs_badge|default(0, true)) }}
-      {%- if session and session.is_platform %}
+      {# «Каналы» — ролевой раздел (Слой C): платформе — атрибуция/персоны, клиенту — self-serve подключение #}
       {{ nav_item('channels',     '/channels',   'Каналы',     active) }}
+      {%- if session and session.is_platform %}
       {{ nav_item('agents',       '/agents',     'ИИ-агенты',   active) }}
       {{ nav_item('knowledge',    '/knowledge',  'Базы знаний',  active) }}
       {{ nav_item('integrations', '/integrations', 'Интеграции',   active) }}
