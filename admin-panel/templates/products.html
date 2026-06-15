@@ -18,7 +18,42 @@
 {% if saved %}{{ flash('Продукт сохранён.', 'ok') }}{% endif %}
 {% if archived %}{{ flash('Продукт перемещён в архив.', 'ok') }}{% endif %}
 {% if lm_flash %}{{ flash('Выдача воронки обновлена.', 'ok') }}{% endif %}
+{% if kassa_saved %}{{ flash('Касса сохранена. Бот начнёт принимать оплату на ваш магазин в течение ~минуты.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{# ── Приём оплаты (ЮKassa) — self-serve касса клиента. Бот тенанта берёт эти креды и создаёт
+   платёж за товары клиента на ЕГО магазин ЮKassa (Слой C). ── #}
+<section class="card" aria-label="Приём оплаты">
+  <h2 class="card__title">Приём оплаты (ЮKassa)
+    {% if kassa.connected %}<span class="badge">настроена</span>{% else %}<span class="muted">не настроена</span>{% endif %}
+  </h2>
+  {% if not has_tenant %}
+  <p class="card__note muted">⚠️ Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.</p>
+  {% elif not vault_enabled %}
+  <p class="card__note muted">⚠️ Хранилище ключей не настроено. Обратитесь в поддержку.</p>
+  {% else %}
+  <p class="card__note">Подключите свой магазин ЮKassa, чтобы принимать оплату за товары из каталога <b>на свой счёт</b>. Данные ЮKassa: ЛК → Настройки → «Магазин» (shopId) и «Секретный ключ» (выпустите боевой ключ). Значения шифруются; после сохранения не показываются.</p>
+  {% for f in kassa.fields %}
+  <form method="post" action="/products/payments/connect" class="inline-form" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="key_name" value="{{ f.key }}">
+    <label class="field">
+      <span class="field__label">{{ f.label }} {% if f.is_set %}<span class="badge">задан</span>{% else %}<span class="muted">не задан</span>{% endif %}</span>
+      <input class="field__input mono" type="password" name="value" required
+             maxlength="{{ value_max }}" autocomplete="off"
+             placeholder="{% if f.is_set %}Введите заново, чтобы заменить{% else %}Вставьте значение{% endif %}">
+    </label>
+    <button class="btn btn--dark btn--sm" type="submit">{% if f.is_set %}Заменить{% else %}Сохранить{% endif %}</button>
+    {% if f.is_set %}
+    <button class="btn btn--soft btn--sm" type="submit" formaction="/products/payments/disconnect" formnovalidate>Отключить</button>
+    {% endif %}
+  </form>
+  {% endfor %}
+  <p class="hint hint--block">⚙️ <b>Важно:</b> в ЛК ЮKassa → Настройки → Уведомления (HTTP) укажите URL для события <code class="mono">payment.succeeded</code>:<br>
+    <input class="field__input mono" type="text" readonly value="{{ kassa_webhook_url }}" aria-label="URL вебхука ЮKassa" onclick="this.select()">
+    <br>Без этого оплата пройдёт, но заказ не отметится оплаченным автоматически.</p>
+  {% endif %}
+</section>
 
 {# ── Выдача воронки лид-магнитом (вместо GUIDE_URL-заглушки). Панель пишет настройку,
    бот её читает и выдаёт офер после прохождения воронки. Кандидаты — активные лид-

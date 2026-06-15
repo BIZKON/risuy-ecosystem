@@ -1718,10 +1718,16 @@ async def products_list(
     saved: int = 0,
     archived: int = 0,
     lm: int = 0,
+    kassa_saved: int = 0,
     err: str | None = None,
 ):
     rows = await db.list_products(include_archived=True)
     products = [_present_product_row(r) for r in rows]
+    # Касса (self-serve ЮKassa): статус по vault активного тенанта + URL вебхука для ЛК ЮKassa.
+    kassa_secrets: list = []
+    if session.active_tenant_id and vault.enabled():
+        kassa_secrets = await db.list_tenant_secrets(session.active_tenant_id)
+    webhook_base = config.PANEL_PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
     # Выдача воронки лид-магнитом (вместо GUIDE_URL): текущий активный офер + кандидаты
     # для селектора. Бот читает app_settings; панель — единственный писатель этого ключа.
     active_lm_rec = await db.get_active_lead_magnet()
@@ -1746,6 +1752,13 @@ async def products_list(
             "kind_labels": config.PRODUCT_KIND_LABELS,
             "active_lead_magnet": active_lm,
             "lead_magnet_candidates": lm_candidates,
+            # Касса (ЮKassa) — self-serve подключение, tenant-scoped.
+            "has_tenant": bool(session.active_tenant_id),
+            "vault_enabled": vault.enabled(),
+            "kassa": _kassa_view(kassa_secrets),
+            "kassa_webhook_url": f"{webhook_base}/webhooks/yookassa",
+            "value_max": config.TENANT_SECRET_VALUE_MAX,
+            "kassa_saved": bool(kassa_saved),
         },
     )
 
@@ -1763,7 +1776,27 @@ def _product_list_err_text(err: str | None) -> str | None:
     return {
         "bad_lead_magnet": "Этот офер нельзя сделать выдачей воронки: нужен вид "
                            "«Лид-магнит», статус «Активен» и хотя бы файл или ссылка.",
+        # Касса (self-serve подключение ЮKassa)
+        "no_tenant": "Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.",
+        "no_vault": "Хранилище ключей не настроено. Обратитесь в поддержку.",
+        "bad_key": "Неизвестное поле кассы.",
+        "bad_shop_id": "shopId ЮKassa — только цифры (число из ЛК ЮKassa).",
+        "empty": "Значение пустое — не сохранено.",
+        "too_long": f"Значение длиннее {config.TENANT_SECRET_VALUE_MAX} символов.",
+        "not_found": "Нечего отключать — поле не задано.",
+        "kassa_saved": "",  # успех — обрабатывается отдельным флагом
     }.get(err or "")
+
+
+def _kassa_view(secrets_meta: list) -> dict:
+    """Презентер блока кассы (ЮKassa) в «Продуктах». Касса «настроена» = заданы ОБА ключа
+    (shopId + секретный). Чистая функция: на вход метаданные секретов тенанта, на выход — данные
+    для шаблона. Значения секретов НЕ раскрываются (list_tenant_secrets отдаёт только имена)."""
+    known = {r["key_name"] for r in secrets_meta}
+    label = dict(config.TENANT_SECRET_KEYS)
+    fields = [{"key": k, "label": label.get(k, k), "is_set": k in known}
+              for k in config.KASSA_SECRET_KEYS]
+    return {"fields": fields, "connected": all(f["is_set"] for f in fields)}
 
 
 def _present_product_row(r) -> dict:
@@ -1981,6 +2014,65 @@ async def product_set_lead_magnet(
     if result == "bad_product":
         return RedirectResponse(url="/products?err=bad_lead_magnet", status_code=303)
     return RedirectResponse(url="/products?lm=1", status_code=303)
+
+
+# ── Слой C: self-serve подключение кассы клиента (ЮKassa) в «Продуктах» ────────
+# Tenant-scoped, БЕЗ _require_admin: клиент сам вводит shopId + секретный ключ СВОЕГО магазина
+# ЮKassa → tenant-vault. Принимаются ТОЛЬКО ключи кассы (KASSA_SECRET_KEY_SET). AAD шифрования —
+# {tenant_id}:{key_name} (как /keys/channels; бот расшифровывает тем же AAD). Бот тенанта берёт
+# их как creds для create_payment → приём оплаты за продукты клиента на ЕГО магазин.
+@app.post("/products/payments/connect")
+async def kassa_connect(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    key_name: str = Form(""),
+    value: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/products?err=no_tenant", status_code=303)
+    if not vault.enabled():
+        return RedirectResponse(url="/products?err=no_vault", status_code=303)
+    key_name = key_name.strip()
+    if key_name not in config.KASSA_SECRET_KEY_SET:
+        return RedirectResponse(url="/products?err=bad_key", status_code=303)
+    value = value.strip()
+    if not value:
+        return RedirectResponse(url="/products?err=empty", status_code=303)
+    if len(value) > config.TENANT_SECRET_VALUE_MAX:
+        return RedirectResponse(url="/products?err=too_long", status_code=303)
+    # shopId ЮKassa — числовой (как в ЛК). Валидируем, чтобы не сохранить мусор → «настроено,
+    # но платёж не создаётся» (BasicAuth по shopId упадёт). Секретный ключ — произвольная строка.
+    if key_name == "shop_yookassa_shop_id" and not value.isdigit():
+        return RedirectResponse(url="/products?err=bad_shop_id", status_code=303)
+    ct, nonce, ver = vault.encrypt(value, aad=f"{session.active_tenant_id}:{key_name}")
+    del value  # plaintext дальше не живёт
+    await db.upsert_tenant_secret(
+        session.active_tenant_id, key_name, ct, nonce, ver,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/products?kassa_saved=1", status_code=303)
+
+
+@app.post("/products/payments/disconnect")
+async def kassa_disconnect(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    key_name: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/products?err=no_tenant", status_code=303)
+    key_name = key_name.strip()
+    if key_name not in config.KASSA_SECRET_KEY_SET:
+        return RedirectResponse(url="/products?err=bad_key", status_code=303)
+    ok = await db.delete_tenant_secret(
+        session.active_tenant_id, key_name,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/products?kassa_saved=1" if ok else "/products?err=not_found", status_code=303)
 
 
 # =========================================================================== #

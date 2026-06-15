@@ -745,6 +745,13 @@ CHANNEL_CONNECT_CARDS = (
 # Плоский белый список ключей, которыми оперирует client-вид «Каналы» (анти-мусор в connect).
 CHANNEL_SECRET_KEY_SET = {k for c in CHANNEL_CONNECT_CARDS for k in c["secret_keys"]}
 
+# ── Слой C: self-serve подключение кассы клиента (ЮKassa) в разделе «Продукты» ──
+# Клиент вводит свой shopId + секретный ключ → tenant-vault; бот тенанта берёт их как creds для
+# create_payment, чтобы принимать оплату за СВОИ продукты на СВОЙ магазин. Касса «настроена» =
+# заданы ОБА ключа. Белый список — анти-мусор в /products/payments/connect.
+KASSA_SECRET_KEYS = ("shop_yookassa_shop_id", "shop_yookassa_secret_key")
+KASSA_SECRET_KEY_SET = set(KASSA_SECRET_KEYS)
+
 # Кошелёк платформы (Wave 2a): границы разового пополнения, ₽ (дефолт до решения
 # владельца по ТЗ §13.4 — зафиксировано в DECISIONS).
 WALLET_TOPUP_MIN_RUB = _opt_int("WALLET_TOPUP_MIN_RUB", 100)
