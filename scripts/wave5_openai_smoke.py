@@ -197,7 +197,7 @@ async def test_ask_ai_dispatch() -> None:
         calls.clear()
         res = await ai.ask_ai("q", None, {"backend": "cloud_ai", "system_prompt": "S"},
                               history=[{"role": "user", "content": "h"}])
-        check("cloud_ai успех → (ответ, None)", res == ("OPENAI_OTVET", None), str(res))
+        check("cloud_ai успех → (ответ, None, None, [])", res == ("OPENAI_OTVET", None, None, []), str(res))
         check("при успехе OpenAI нативный /call НЕ зван", "liya" not in calls)
 
         # 3b. cloud_ai жёсткий сбой OpenAI → фолбэк на нативный ask_liya.
@@ -211,7 +211,7 @@ async def test_ask_ai_dispatch() -> None:
         ai.ask_agent_openai, ai.ask_liya = fail_openai, fb_liya
         calls.clear()
         res = await ai.ask_ai("q", None, {"backend": "cloud_ai"}, history=None)
-        check("сбой OpenAI → фолбэк на /call", res == ("NATIVE_FALLBACK", "mid42"), str(res))
+        check("сбой OpenAI → фолбэк на /call", res == ("NATIVE_FALLBACK", "mid42", None, []), str(res))
         check("фолбэк реально позвал ask_liya", calls.get("liya") is True)
 
         # 3c. gateway-ветка не задета: openai/liya не зовутся, history игнорится.
@@ -227,7 +227,7 @@ async def test_ask_ai_dispatch() -> None:
         calls.clear()
         res = await ai.ask_ai("q", None, {"backend": "gateway"},
                               history=[{"role": "user", "content": "h"}])
-        check("gateway → (ответ, None)", res == ("GW_OTVET", None), str(res))
+        check("gateway → (ответ, None, None, [])", res == ("GW_OTVET", None, None, []), str(res))
         check("gateway не зовёт OpenAI-эндпоинт агента", "openai" not in calls)
         check("gateway-ветка реально позвала ask_gateway", calls.get("gw") is True)
     finally:

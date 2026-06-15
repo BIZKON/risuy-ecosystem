@@ -101,14 +101,20 @@ async def t_text(message: Message, bot: Bot) -> None:
         exclude_tg_message_id=message.message_id,
         limit=config.AI_HISTORY_MESSAGES,
     )
-    # A3 Слой A: ask_ai вырезает служебный маркер (клиент тенант-бота его НЕ видит); esc != None
-    # → горячий лид → карточка в адрес ТЕНАНТА (db.get_tenant_escalation; tenant_id из contextvar
-    # middleware → тот же бот тенанта постит в его группу менеджеров).
-    answer, _msg_id, esc = await ai.ask_ai(message.text, None, cfg, history=history)
+    # Слой B: intent-триггеры тенанта → их описания в системный промпт (Лия эмитит [[TRIGGER:N]]).
+    intent_trigs = await db.get_active_triggers(db.tenant_id(), types=("intent",))
+    if intent_trigs:
+        cfg = {**cfg, "system_prompt": (cfg.get("system_prompt") or "")
+               + "\n\n" + triggers.build_intent_addendum(intent_trigs)}
+    # A3 Слой A: ask_ai вырезает служебные маркеры (клиент тенант-бота их НЕ видит); esc != None
+    # → горячий лид → карточка в адрес ТЕНАНТА; trig_idxs → сработавшие intent-триггеры.
+    answer, _msg_id, esc, trig_idxs = await ai.ask_ai(message.text, None, cfg, history=history)
     # rich=True: ответ Лии тенант-бота — markdown→Telegram-HTML с фолбэком на plain (§8.7).
     await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
     if esc is not None:
         await escalation.escalate(bot, message.from_user.id, esc)
+    if trig_idxs:
+        await triggers.fire_intent(bot, message, intent_trigs, trig_idxs)
 
 
 @tenant_router.message(F.document)

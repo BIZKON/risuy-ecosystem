@@ -66,6 +66,50 @@ def format_trigger_card(t: dict, *, tg_user_id: int, reason: str, snippet: str,
     return "\n".join(lines)[:3500]
 
 
+# ── Тип «намерение»: распознаёт Лия (маркер [[TRIGGER:N]] в промпте, как [[ESCALATE]]) ──
+_TRIGGER_RE = re.compile(r"\[\[TRIGGER:(\d+)\]\]", re.IGNORECASE)
+_TRIGGER_FRAG_RE = re.compile(r"\[\[TRIGGER\b.*", re.DOTALL | re.IGNORECASE)
+
+
+def build_intent_addendum(intent_trigs: list) -> str:
+    """Служебный блок для системного промпта Лии: пронумерованный список условий intent-триггеров
+    тенанта + инструкция ставить метку [[TRIGGER:N]] (N = позиция, 1-based). reply_text (если есть
+    и действие с ответом) даём как ориентир ответа клиенту."""
+    lines = [
+        "## СЛУЖЕБНЫЕ ТРИГГЕРЫ (клиент НЕ видит):",
+        "Если в диалоге выполнилось одно из условий ниже — добавь в САМЫЙ КОНЕЦ ответа служебную "
+        "метку [[TRIGGER:N]] (N — номер условия), ПОСЛЕ обычного ответа клиенту, один раз за "
+        "срабатывание. Метку клиент НЕ видит и НЕ объясняй её.",
+    ]
+    for i, t in enumerate(intent_trigs, 1):
+        cond = re.sub(r"\s+", " ", (t.get("intent_desc") or "")).strip()
+        line = f"{i}. {cond}"
+        reply = (t.get("reply_text") or "").strip()
+        if reply and t.get("action") in ("notify_reply_continue", "notify_reply_pause"):
+            reply_norm = re.sub(r"\s+", " ", reply).strip()
+            line += f" — ответь клиенту в духе: «{reply_norm}»"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def parse_trigger_markers(text: str) -> tuple[str, list[int]]:
+    """(текст_без_меток, [индексы]). Метки [[TRIGGER:N]] Лия ставит при срабатывании intent-
+    триггера — клиент их НЕ видит. Вырезаем парные И усечённый/осиротевший фрагмент (LLM мог
+    оборвать ответ на открытой метке), как parse_escalation. Индексы — уникальные, по порядку."""
+    if not text or "[[TRIGGER" not in text.upper():
+        return text, []
+    idxs_raw = [int(m) for m in _TRIGGER_RE.findall(text)]
+    cleaned = _TRIGGER_RE.sub("", text)
+    if "[[TRIGGER" in cleaned.upper():            # усечённый/битый остаток метки
+        cleaned = _TRIGGER_FRAG_RE.sub("", cleaned)
+    seen, idxs = set(), []
+    for i in idxs_raw:
+        if i not in seen:
+            seen.add(i)
+            idxs.append(i)
+    return cleaned.strip(), idxs
+
+
 async def handle_text(bot, message) -> bool:
     """Оценить ТЕКСТОВЫЕ триггеры (стоп-слова, кол-во сообщений) текущего тенанта на это сообщение.
     Первый сработавший → действие, return True (вызывающий пропускает ИИ-ответ). Нет триггеров/
@@ -100,37 +144,56 @@ async def handle_document(bot, message) -> bool:
     return True
 
 
-async def _fire(bot, message, t: dict, *, reason: str) -> None:
-    """Выполнить действие триггера: ответ клиенту + уведомление менеджерам + опц. пауза.
-    НЕ бросает — триггер не должен ронять обработку сообщения."""
+async def _notify(bot, message, t: dict, *, reason: str) -> None:
+    """Карточка менеджерам через ЕДИНЫЙ бот-нотификатор (фолбэк на разговорный бот тенанта).
+    Пустой notify_chat_id → пропускаем. НЕ бросает наружу."""
+    chat_id = _parse_int(t.get("notify_chat_id"))
+    if chat_id is None:
+        return
     import messaging  # ленивый импорт (как escalation): тестируемость без aiogram
+    import notifier
+    send_bot = notifier.get_notifier_bot() or bot
+    tg = message.from_user.id
+    lead_id = await db.get_lead_id(tg)
+    snippet = message.text or getattr(message, "caption", None) or ""
+    card = format_trigger_card(
+        t, tg_user_id=tg, reason=reason, snippet=snippet,
+        lead_id=lead_id, panel_base=config.PANEL_BASE_URL or None)
+    try:
+        await messaging.raw_send_text(
+            send_bot, chat_id, card,
+            message_thread_id=_parse_int(t.get("notify_topic_id")), rich=False)
+    except Exception:  # noqa: BLE001
+        logger.warning("Уведомление по триггеру не ушло (tg=%s)", tg, exc_info=True)
+
+
+async def _fire(bot, message, t: dict, *, reason: str) -> None:
+    """Детерминированный триггер: ответ клиенту (canned, заменяет ИИ-ответ) + уведомление +
+    опц. пауза. source="trigger" (НЕ "liya"): canned-ответ без LLM не тарифицируется per_message-
+    метерингом (он списывает source='liya') и не попадает в стат «ответов Лии». НЕ бросает."""
+    import messaging
     tg = message.from_user.id
     action = t.get("action") or "notify_reply_continue"
     reply = (t.get("reply_text") or "").strip()
     try:
-        # 1. ответ клиенту (заменяет ИИ-ответ на этот ход). source="trigger" (НЕ "liya"):
-        # canned-ответ без LLM → НЕ должен тарифицироваться per_message-метерингом (он списывает
-        # source='liya') и не попадать в стат «ответов Лии».
         if action in ("notify_reply_continue", "notify_reply_pause") and reply:
             await messaging.send_text(bot, tg, reply, source="trigger", rich=True)
-        # 2. уведомление менеджерам через нотификатор (фолбэк на разговорный бот тенанта)
-        chat_id = _parse_int(t.get("notify_chat_id"))
-        if chat_id is not None:
-            import notifier
-            send_bot = notifier.get_notifier_bot() or bot
-            lead_id = await db.get_lead_id(tg)
-            snippet = message.text or getattr(message, "caption", None) or ""
-            card = format_trigger_card(
-                t, tg_user_id=tg, reason=reason, snippet=snippet,
-                lead_id=lead_id, panel_base=config.PANEL_BASE_URL or None)
-            try:
-                await messaging.raw_send_text(
-                    send_bot, chat_id, card,
-                    message_thread_id=_parse_int(t.get("notify_topic_id")), rich=False)
-            except Exception:  # noqa: BLE001
-                logger.warning("Уведомление по триггеру не ушло (tg=%s)", tg, exc_info=True)
-        # 3. пауза диалога
+        await _notify(bot, message, t, reason=reason)
         if action == "notify_reply_pause":
             await db.pause_lead(tg)
     except Exception:  # noqa: BLE001
         logger.warning("Срабатывание триггера не выполнено (tg=%s)", tg, exc_info=True)
+
+
+async def fire_intent(bot, message, intent_trigs: list, indices: list[int]) -> None:
+    """Сработавшие intent-триггеры (индексы из [[TRIGGER:N]]): уведомление менеджерам + опц. пауза.
+    Ответ клиенту отдельно НЕ шлём — Лия уже ответила (инструкция в промпте, build_intent_addendum).
+    Невалидный индекс игнорируем."""
+    for i in indices:
+        if not (1 <= i <= len(intent_trigs)):
+            continue
+        t = intent_trigs[i - 1]
+        cond = re.sub(r"\s+", " ", (t.get("intent_desc") or "")).strip()
+        await _notify(bot, message, t, reason=f"намерение: {cond}")
+        if (t.get("action") or "") == "notify_reply_pause":
+            await db.pause_lead(message.from_user.id)

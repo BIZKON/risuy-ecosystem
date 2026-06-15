@@ -65,6 +65,28 @@ async def main() -> None:
     check("карточка: tg-ссылка", f"tg://user?id={TG}" in card)
     check("карточка plain (без тегов)", "<" not in card)
 
+    # ── 2b. intent: parse_trigger_markers / build_intent_addendum (чистая логика) ──
+    print("2b. intent (маркеры + аддендум):")
+    c0, i0 = triggers.parse_trigger_markers("обычный ответ без меток")
+    check("нет метки → (текст, [])", c0 == "обычный ответ без меток" and i0 == [])
+    c1, i1 = triggers.parse_trigger_markers("Спасибо! Передам менеджеру.[[TRIGGER:1]]")
+    check("метка вырезана, индекс [1]", "[[TRIGGER" not in c1 and c1 == "Спасибо! Передам менеджеру." and i1 == [1], repr((c1, i1)))
+    c2, i2 = triggers.parse_trigger_markers("ответ [[TRIGGER:1]][[trigger:3]] хвост")
+    check("несколько меток (рег.незав.) → [1,3]", "trigger" not in c2.lower() and i2 == [1, 3], repr((c2, i2)))
+    c3, i3 = triggers.parse_trigger_markers("x [[TRIGGER:2]][[TRIGGER:2]]")
+    check("дубликаты схлопнуты → [2]", i3 == [2], repr(i3))
+    c4, i4 = triggers.parse_trigger_markers("Готово.[[TRIGGER:1")  # усечённая метка (нет ]])
+    check("усечённая метка вырезана (без утечки), индекс не сработал", "[[TRIGGER" not in c4 and c4 == "Готово." and i4 == [], repr((c4, i4)))
+
+    add = triggers.build_intent_addendum([
+        {"intent_desc": "просит оплату", "action": "notify_reply_continue", "reply_text": "вот ссылка"},
+        {"intent_desc": "негатив", "action": "notify_only", "reply_text": "не показывать"},
+    ])
+    check("аддендум: инструкция про [[TRIGGER:N]]", "[[TRIGGER:N]]" in add)
+    check("аддендум: условие 1 пронумеровано", "1. просит оплату" in add)
+    check("аддендум: подсказка ответа для reply-действия", "вот ссылка" in add)
+    check("аддендум: notify_only без подсказки ответа", "не показывать" not in add)
+
     # ── 3. БД: get_active_triggers / count / pause (risuy_dev) ──
     print("3. БД движка (risuy_dev):")
     db.pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)

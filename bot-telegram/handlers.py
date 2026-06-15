@@ -312,7 +312,13 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
         exclude_tg_message_id=message.message_id,
         limit=config.AI_HISTORY_MESSAGES,
     )
-    answer, msg_id, esc_payload = await ai.ask_ai(
+    # Слой B: intent-триггеры тенанта → их описания подмешиваем в системный промпт, Лия эмитит
+    # [[TRIGGER:N]] при срабатывании. Нет intent-триггеров (Школа) → ai_cfg без изменений.
+    intent_trigs = await db.get_active_triggers(db.tenant_id(), types=("intent",))
+    if intent_trigs:
+        ai_cfg = {**ai_cfg, "system_prompt": (ai_cfg.get("system_prompt") or "")
+                  + "\n\n" + triggers.build_intent_addendum(intent_trigs)}
+    answer, msg_id, esc_payload, trig_idxs = await ai.ask_ai(
         user_text, data.get("ai_parent_id"), ai_cfg, history=history
     )
     if msg_id:
@@ -328,6 +334,9 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # A3: горячий лид → карточка менеджерам в ТГ-группу/тему (дедуп; не роняет ответ клиенту).
     if esc_payload is not None:
         await escalation.escalate(bot, message.from_user.id, esc_payload)
+    # Слой B: сработавшие intent-триггеры → уведомление менеджерам (+ опц. пауза).
+    if trig_idxs:
+        await triggers.fire_intent(bot, message, intent_trigs, trig_idxs)
 
 
 @router.message(StateFilter(None), F.document)
