@@ -2657,6 +2657,16 @@ async def order_exists_for_payment(payment_id: str) -> bool:
         ))
 
 
+async def get_order_tenant_for_payment(payment_id: str) -> str | None:
+    """tenant_id заказа по id платежа ЮKassa, либо None (платёж не наш / не заказ). Слой C:
+    вебхук по нему выбирает, КАКИМИ кредами верифицировать платёж (магазин тенанта vs Школы).
+    orders НЕ под RLS (как в order_exists_for_payment) → читаем без app.tenant_id."""
+    async with pool.acquire() as c:
+        v = await c.fetchval(
+            "select tenant_id from orders where provider_payment_id = $1", payment_id)
+    return str(v) if v else None
+
+
 async def create_invoice_order_with_audit(
     lead_id, product_id: int, amount, currency: str,
     *, actor: str, ip: str | None, user_agent: str | None,
@@ -3299,6 +3309,37 @@ async def list_tenant_secrets(tenant_id) -> list[asyncpg.Record]:
             )
 
 
+async def get_tenant_shop_creds(tenant_id) -> tuple[str, str] | None:
+    """(shop_id, secret_key) магазина ЮKassa тенанта из vault — Слой C: вебхук верифицирует
+    платёж заказа тенанта ЕГО кредами. None если не заданы ОБА ключа или сбой расшифровки.
+    RLS: вебхук без сессии → ставим app.tenant_id ЯВНО (как list_tenant_secrets). AAD расшифровки
+    зеркалит запись: f"{tenant_id}:{key_name}"."""
+    from shared import vault
+    keys = ("shop_yookassa_shop_id", "shop_yookassa_secret_key")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            rows = await c.fetch(
+                "select key_name, ciphertext, nonce, key_version from tenant_secrets "
+                "where tenant_id = $1 and key_name = any($2::text[])",
+                tenant_id, list(keys),
+            )
+    by = {r["key_name"]: r for r in rows}
+    if not all(k in by for k in keys):
+        return None
+    try:
+        out = tuple(
+            vault.decrypt(bytes(by[k]["ciphertext"]), bytes(by[k]["nonce"]),
+                          by[k]["key_version"], aad=f"{tenant_id}:{k}")
+            for k in keys
+        )
+    except Exception:  # noqa: BLE001 — битый секрет/ключ vault: не верифицируем (заказ останется pending)
+        logging.getLogger("admin-panel").warning(
+            "get_tenant_shop_creds: сбой расшифровки кассы тенанта", exc_info=True)
+        return None
+    return (out[0], out[1])
+
+
 async def upsert_tenant_secret(
     tenant_id, key_name: str, ciphertext: bytes, nonce: bytes, key_version: int,
     *, actor: str, ip: str | None, user_agent: str | None,
@@ -3661,11 +3702,18 @@ async def webhook_event_new(external_id: str, event_type: str | None, payload: d
     """Дедуп входящих уведомлений (webhook_events.external_id unique).
     True — событие новое (обрабатываем); False — повтор (сразу 200)."""
     async with pool.acquire() as c:
+        # Слой C: повтор уведомления СБОЙНОГО события (status='failed') → переобрабатываем (ретраи
+        # ЮKassa идут ~сутки): транзиентный сбой верификации (сеть / vault / не та касса) не должен
+        # навсегда «съесть» оплату → заказ застрял бы pending. 'processed' остаётся дедуплицированным
+        # (ветки идемпотентны — оборона в глубину). 'received' (мид-обработка/краш) — не трогаем
+        # (без конкурентной двойной обработки). status='received' (не 'pending') — допустимо по CHECK.
         inserted = await c.fetchval(
             """
             insert into webhook_events (external_id, event_type, payload)
             values ($1, $2, $3)
-            on conflict (external_id) do nothing
+            on conflict (external_id) do update
+                set status = 'received', processed_at = null, payload = excluded.payload
+                where webhook_events.status = 'failed'
             returning id
             """,
             external_id, event_type, json.dumps(payload)[:100_000],

@@ -124,9 +124,11 @@ async def create_recurrent_payment(
     )
 
 
-async def get_payment(payment_id: str) -> dict:
-    """Перепроверить платёж ПОДПИСКИ по id (вебхук): статус succeeded/canceled, amount."""
-    return await asyncio.to_thread(_request, "GET", f"/payments/{payment_id}")
+async def get_payment(payment_id: str, *, creds: tuple[str, str] | None = None) -> dict:
+    """Перепроверить платёж по id (вебхук): статус succeeded/canceled, amount. creds=(shop_id,
+    secret_key) — магазин конкретного ТЕНАНТА (Слой C: верификация платежа заказа тенанта его же
+    кредами). None → магазин подписки платформы (config.YOOKASSA_*, поведение до Слоя C)."""
+    return await asyncio.to_thread(_request, "GET", f"/payments/{payment_id}", creds=creds)
 
 
 # ── Магазин ШКОЛЫ (Phase 1B: продажи лидам) ──────────────────────────────────

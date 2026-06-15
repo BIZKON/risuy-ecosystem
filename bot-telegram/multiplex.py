@@ -30,7 +30,9 @@ import logging
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+)
 
 import ai
 import config
@@ -39,6 +41,7 @@ import escalation
 import messaging
 import texts
 import triggers
+import yookassa
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +146,99 @@ async def t_document(message: Message, bot: Bot) -> None:
     await triggers.handle_document(ctx)
 
 
+# ── Слой C: продажи тенанта на ЕГО кассу ЮKassa (creds из vault) ──────────────
+def _shop_markup(products: list[dict]) -> InlineKeyboardMarkup:
+    """Кнопки «Купить» по продаваемым оферам тенанта (по одной на строку)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"💳 {p['name']} — {texts.format_price(p.get('price'), p.get('currency'))}",
+            callback_data=f"buy:{p['id']}")]
+        for p in products
+    ])
+
+
+@tenant_router.message(Command("shop", ignore_case=True))
+async def t_shop(message: Message, bot: Bot) -> None:
+    """Витрина тенанта: активные оферы с кнопками «Купить». Доступно, когда тенант подключил
+    кассу (shop_yookassa_* в vault, раздел «Продукты»). Лид создаётся, как при /start."""
+    try:
+        await db.upsert_start(tg_user_id=message.from_user.id, source="other")
+    except Exception:  # noqa: BLE001 — лид не критичен для показа витрины
+        logger.warning("multiplex: /shop не создал лид тенанта", exc_info=True)
+    if await db.get_tenant_shop_creds() is None:
+        await messaging.send_text(
+            bot, message.from_user.id,
+            "Онлайн-оплата у этого бота пока не подключена 🥲", source="system")
+        return
+    products = await db.list_sellable_products()
+    if not products:
+        await messaging.send_text(
+            bot, message.from_user.id,
+            "Сейчас нет товаров к покупке. Загляните позже 🌷", source="system")
+        return
+    await messaging.send_text(
+        bot, message.from_user.id, "Выберите, что хотите оплатить:",
+        source="system", reply_markup=_shop_markup(products))
+
+
+@tenant_router.callback_query(F.data.startswith("buy:"))
+async def t_buy(cb: CallbackQuery, bot: Bot) -> None:
+    """Клик «Купить» у тенант-бота → pending-заказ + платёж ЮKassa на КАССУ ТЕНАНТА (creds из
+    vault) → ссылка «Перейти к оплате». Зеркалит handlers.on_buy, но креды и продукт — тенанта
+    (get_sellable_product скоупит tenant_id → защита от крафтнутого buy:<чужой_id>). Подтверждение
+    ловит вебхук панели (маршрутизация по тенанту заказа). tenant-контекст ставит callback-middleware."""
+    creds = await db.get_tenant_shop_creds()
+    if creds is None:
+        await cb.answer("Оплата временно недоступна 🥲", show_alert=True)
+        return
+    try:
+        product_id = int((cb.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    lead = await db.get_lead_for_purchase(cb.from_user.id)
+    product = await db.get_sellable_product(product_id)
+    if lead is None or product is None:
+        await cb.answer("Этот товар сейчас недоступен 🥲", show_alert=True)
+        return
+    order = await db.create_or_reuse_pending_order(
+        lead["id"], product_id, product["price"], "RUB",
+        reuse_minutes=config.ORDER_REUSE_MINUTES)
+    if order["reused"]:
+        pay_url = order["payment_url"]
+    else:
+        try:
+            me = await bot.get_me()
+            return_url = f"https://t.me/{me.username}" if me.username else "https://t.me"
+        except Exception:  # noqa: BLE001
+            return_url = "https://t.me"
+        try:
+            payment = await yookassa.create_payment(
+                amount=product["price"], currency="RUB",
+                description=(product.get("name") or "Заказ")[:128],
+                return_url=return_url, idempotence_key=str(order["id"]),
+                metadata={"kind": "order", "order_id": str(order["id"])},
+                lead_phone=lead.get("phone"), creds=creds,
+            )
+            pay_url = (payment.get("confirmation") or {}).get("confirmation_url")
+            payment_id = payment.get("id")
+            if not pay_url or not payment_id:
+                raise yookassa.YooKassaError("нет confirmation_url/id в ответе")
+            await db.set_order_payment(order["id"], payment_id, pay_url)
+        except yookassa.YooKassaError as e:
+            logger.warning("multiplex: платёж тенанта по заказу %s не создался: %s", order["id"], e)
+            await db.mark_order_failed(order["id"], "платёж не создан (сбой ЮKassa)")
+            await cb.answer()
+            await messaging.send_text(bot, cb.from_user.id, texts.PAY_UNAVAILABLE, source="system")
+            return
+    await cb.answer()
+    pay_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=texts.PAY_BTN, url=pay_url)],
+    ])
+    await messaging.send_text(
+        bot, cb.from_user.id, texts.pay_message(product), source="system", reply_markup=pay_kb)
+
+
 # ── contextvar tenant_id per-update ──────────────────────────────────────────
 class _TenantContextMiddleware:
     """Ставит db.current_tenant_id на время обработки апдейта тенант-бота и
@@ -234,6 +330,9 @@ async def _run_tenant(tenant_id, bot: Bot) -> None:
     """Polling одного тенант-бота. Свой Dispatcher + contextvar-middleware + Лия-роутер."""
     dp = Dispatcher()
     dp.message.outer_middleware(_TenantContextMiddleware(tenant_id))
+    # Слой C: tenant-контекст и на callback_query — иначе buy-callback (оплата) обращался бы
+    # к БД без tenant_id (заказ/продукт/креды кассы ушли бы не тому тенанту или упали).
+    dp.callback_query.outer_middleware(_TenantContextMiddleware(tenant_id))
     dp.message.outer_middleware(messaging.LoggingMiddleware())  # лог входящих (tenant_id из contextvar)
     dp.include_router(tenant_router)
     try:

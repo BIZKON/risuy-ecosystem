@@ -706,6 +706,39 @@ async def get_product(product_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def list_sellable_products(limit: int = 20) -> list[dict]:
+    """Активные продаваемые оферы ТЕКУЩЕГО тенанта (цена в рублях > 0) — для команды /shop
+    тенант-бота (Слой C). tenant-scoped: бот — owner, фильтруем tenant_id() ЯВНО (анти-кросс-тенант).
+    Пусто (нет тенанта/товаров) → []."""
+    tid = tenant_id()
+    if tid is None:
+        return []
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select id, name, price, currency from products "
+            "where tenant_id = $1 and status = 'active' and price is not null and price > 0 "
+            "and coalesce(currency, 'RUB') = 'RUB' order by price, id limit $2",
+            tid, limit)
+    return [dict(r) for r in rows]
+
+
+async def get_sellable_product(product_id: int) -> dict | None:
+    """Продукт по id ТОЛЬКО если он принадлежит ТЕКУЩЕМУ тенанту и продаваем (active, RUB, price>0).
+    Защита от крафтнутого buy:<чужой_product_id> — get_product tenant НЕ фильтрует (бот owner).
+    None — нет/чужой/непродаваемый."""
+    tid = tenant_id()
+    if tid is None:
+        return None
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select id, name, price, currency, status from products where id = $1 and tenant_id = $2",
+            product_id, tid)
+    if (row is None or row["status"] != "active" or not row["price"] or row["price"] <= 0
+            or (row["currency"] or "RUB") != "RUB"):
+        return None
+    return dict(row)
+
+
 async def get_broadcast_product(broadcast_id: int) -> dict | None:
     """Офер, привязанный к рассылке (broadcasts.product_id → products), или None.
 
@@ -1084,6 +1117,25 @@ async def get_tenant_secret(tid, key_name: str) -> str | None:
         bytes(row["ciphertext"]), bytes(row["nonce"]), row["key_version"],
         aad=f"{tid}:{key_name}",
     )
+
+
+async def get_tenant_shop_creds(tid=None) -> tuple[str, str] | None:
+    """(shop_id, secret_key) магазина ЮKassa тенанта из vault — креды для create_payment
+    (Слой C: бот тенанта принимает оплату на СВОЙ счёт). None если не заданы ОБА ключа или
+    сбой расшифровки (тогда касса считается ненастроенной → кнопка «Купить» не показывается).
+    tid=None → активный тенант (db.tenant_id() из contextvar мультиплекса)."""
+    tid = tid or tenant_id()
+    if tid is None:
+        return None
+    try:
+        shop_id = await get_tenant_secret(tid, "shop_yookassa_shop_id")
+        secret = await get_tenant_secret(tid, "shop_yookassa_secret_key")
+    except Exception:  # noqa: BLE001 — сбой vault не должен ронять диалог/воронку
+        logging.getLogger(__name__).warning("get_tenant_shop_creds: сбой чтения vault", exc_info=True)
+        return None
+    if shop_id and secret:
+        return (shop_id, secret)
+    return None
 
 
 async def get_tenant_setting(tid, key: str) -> str | None:

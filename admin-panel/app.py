@@ -3178,10 +3178,29 @@ async def yookassa_webhook(request: Request):
         return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
     processed_ok = True
     try:
-        if config.SHOP_PAYMENTS_CONFIGURED and await db.order_exists_for_payment(payment_id):
-            # Ветка ЗАКАЗА школы (платёж создан ботом-кнопкой или панелью-«счётом»).
-            payment = await yookassa.get_shop_payment(payment_id)
-            if payment.get("status") == "succeeded" and payment.get("paid"):
+        order_tenant = await db.get_order_tenant_for_payment(payment_id)
+        if order_tenant is not None:
+            # Ветка ЗАКАЗА (Школы ИЛИ клиента, Слой C). Верифицируем ТЕМ магазином, что СОЗДАЛ
+            # платёж: пробуем кассу тенанта из vault, затем магазин Школы из env. Платёж живёт
+            # ровно в ОДНОМ магазине → чужие креды дают 404 (YooKassaError) и платёж ими не
+            # подтверждается. Покрывает все источники: бот-Школа и панель-«счёт» (env-магазин),
+            # бот-тенанта (vault-магазин), и «счёт» клиентского оператора на магазине Школы
+            # (vault не найдёт → фолбэк env). НЕ перебиваем env-магазин Школы её же vault-кассой.
+            # mark_order_paid_by_payment сам ставит app.tenant_id из заказа (конвертация/«спасибо»).
+            payment = None
+            creds = await db.get_tenant_shop_creds(order_tenant)
+            if creds is not None:
+                try:
+                    payment = await yookassa.get_payment(payment_id, creds=creds)
+                except yookassa.YooKassaError:
+                    payment = None  # платёж не в магазине тенанта → пробуем магазин Школы
+            if not (payment and payment.get("status") == "succeeded" and payment.get("paid")) \
+                    and config.SHOP_PAYMENTS_CONFIGURED:
+                try:
+                    payment = await yookassa.get_shop_payment(payment_id)
+                except yookassa.YooKassaError:
+                    pass  # не подтвердился ни тенант-, ни школа-кредами → заказ останется pending
+            if payment is not None and payment.get("status") == "succeeded" and payment.get("paid"):
                 await db.mark_order_paid_by_payment(payment_id)
         elif config.YOOKASSA_ENABLED:
             # Магазин платформы: топап кошелька (Wave 2a) ИЛИ счёт подписки (legacy).

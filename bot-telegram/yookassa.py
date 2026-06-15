@@ -63,14 +63,17 @@ def _receipt(phone: str | None, description: str, amount) -> dict | None:
 async def create_payment(
     *, amount, currency: str, description: str, return_url: str,
     idempotence_key: str, metadata: dict | None = None, lead_phone: str | None = None,
+    creds: tuple[str, str] | None = None,
 ) -> dict:
-    """Создать платёж в магазине школы. Возвращает dict ЮKassa
-    (id, status, confirmation.confirmation_url). capture=true — списание сразу.
+    """Создать платёж. Возвращает dict ЮKassa (id, status, confirmation.confirmation_url).
+    capture=true — списание сразу. Idempotence-Key = id заказа: ретрай не плодит платежи.
 
-    Idempotence-Key = id заказа: ретрай того же заказа не плодит платежи.
-    """
-    if not config.SHOP_PAYMENTS_CONFIGURED:
-        raise YooKassaError("ЮKassa магазина школы не настроена (нет SHOP_YOOKASSA_*)")
+    creds=(shop_id, secret_key) — магазин конкретного ТЕНАНТА (Слой C: бот тенанта берёт их
+    из своего vault → приём оплаты на СВОЙ счёт). None → магазин Школы из env (config.SHOP_YOOKASSA_*,
+    поведение до Слоя C). Без кред вовсе (None и Школа не настроена) → YooKassaError ДО сети."""
+    shop_id, secret_key = creds or (config.SHOP_YOOKASSA_SHOP_ID, config.SHOP_YOOKASSA_SECRET_KEY)
+    if not (shop_id and secret_key):
+        raise YooKassaError("ЮKassa не настроена (нет shopId/secretKey магазина)")
     body: dict = {
         "amount": {"value": amount_str(amount), "currency": currency},
         "capture": True,
@@ -78,11 +81,16 @@ async def create_payment(
         "description": description[:128],
         "metadata": metadata or {},
     }
-    receipt = _receipt(lead_phone, description, amount)
-    if receipt is not None:
-        body["receipt"] = receipt
+    # Чек 54-ФЗ — ТОЛЬКО для магазина Школы (env-конфиг SHOP_RECEIPT_ENABLED/SHOP_VAT_CODE). Для
+    # кассы ТЕНАНТА (creds задан) школьный чек НЕ прикладываем (кросс-тенант фиск-утечка: чужой
+    # ОФД/НДС-режим); фискализация тенанта — на стороне его магазина ЮKassa (per-tenant receipt —
+    # отдельная волна). Без чека строгий магазин может отвергнуть платёж — лид получит мягкий фолбэк.
+    if creds is None:
+        receipt = _receipt(lead_phone, description, amount)
+        if receipt is not None:
+            body["receipt"] = receipt
     url = f"{config.YOOKASSA_API_BASE.rstrip('/')}/payments"
-    auth = aiohttp.BasicAuth(config.SHOP_YOOKASSA_SHOP_ID, config.SHOP_YOOKASSA_SECRET_KEY)
+    auth = aiohttp.BasicAuth(shop_id, secret_key)
     headers = {"Idempotence-Key": idempotence_key, "Content-Type": "application/json"}
     timeout = aiohttp.ClientTimeout(total=20)
     try:
