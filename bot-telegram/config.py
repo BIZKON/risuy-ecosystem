@@ -178,6 +178,11 @@ MANAGER_GROUP_ID = int(MANAGER_GROUP_ID_raw) if MANAGER_GROUP_ID_raw.lstrip("-")
 MANAGER_TOPIC_ID_raw = os.environ.get("MANAGER_TOPIC_ID", "")
 MANAGER_TOPIC_ID = int(MANAGER_TOPIC_ID_raw) if MANAGER_TOPIC_ID_raw.isdigit() else None
 MANAGER_ESCALATION_ENABLED = MANAGER_GROUP_ID is not None
+# Единый сервис-бот-уведомитель (Слой B): ОДИН бот на платформу постит карточки эскалаций/
+# триггеров в группы менеджеров клиентов (клиент добавляет ЕГО в свою группу + вставляет id).
+# Пусто → фолбэк на разговорный бот тенанта (текущая эскалация Школы не ломается до провижининга).
+# Создаётся владельцем у BotFather, кладётся в env (twc-set-env.sh 201859 NOTIFIER_BOT_TOKEN=…).
+NOTIFIER_BOT_TOKEN = os.environ.get("NOTIFIER_BOT_TOKEN", "").strip()
 # Базовый URL админ-панели — для ссылки «открыть диалог и ответить» в карточке эскалации
 # ({PANEL_BASE_URL}/dialogs/<lead_id>). Пусто → панель-ссылку в карточку не кладём (остаётся
 # только прямой tg://user). Без завершающего слэша.

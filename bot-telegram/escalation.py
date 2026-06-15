@@ -141,6 +141,8 @@ async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = Non
             return  # адрес эскалации у тенанта не задан → карточку не шлём (маркер уже вырезан в ask_ai)
         chat_id, topic_id = target
         import messaging  # ленивый импорт: parse_escalation/format_card тестируемы без aiogram
+        import notifier   # единый сервис-бот; None → фолбэк на разговорный бот тенанта
+        send_bot = notifier.get_notifier_bot() or bot
         if not await db.claim_lead_escalation(tg_user_id):
             return  # уже эскалирован / нет лида / гонка проиграна
         try:
@@ -150,7 +152,7 @@ async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = Non
                 panel_base=config.PANEL_BASE_URL or None, raw=raw,
             )
             await messaging.raw_send_text(
-                bot, chat_id, text, message_thread_id=topic_id, rich=False,
+                send_bot, chat_id, text, message_thread_id=topic_id, rich=False,
             )
         except Exception:
             await db.release_lead_escalation(tg_user_id)  # откат claim → ретрай позже

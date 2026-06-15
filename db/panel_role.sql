@@ -245,6 +245,7 @@ grant select, insert                 on model_prices          to panel_rw;
 grant select, insert                 on agent_token_snapshots to panel_rw;
 grant select, insert, update, delete on tenant_secrets        to panel_rw;
 grant select, insert, update, delete on tenant_agents         to panel_rw;  -- Wave 3: реестр агент→тенант
+grant select, insert, update, delete on tenant_triggers       to panel_rw;  -- Слой B: CRUD триггеров клиента
 -- Парадная: внешние идентичности клиентских учёток (object — db/schema_account_identities.sql).
 -- Self-serve регистрация (за флагом PUBLIC_SIGNUP_ENABLED) пишет identity + создаёт tenant/
 -- membership (insert на них уже выдан выше). Резолв логина (email/ВК/ТГ→username) — select.
