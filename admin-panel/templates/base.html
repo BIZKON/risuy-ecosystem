@@ -84,14 +84,14 @@
     <nav class="snav" aria-label="Основная навигация">
       {{ nav_item('dashboard',    '/',           'Статистика', active) }}
       {{ nav_item('dialogs',      '/dialogs',    'Диалоги',    active, nav_dialogs_badge|default(0, true)) }}
-      {{ nav_item('channels',     '/channels',   'Каналы',     active) }}
       {%- if session and session.is_platform %}
+      {{ nav_item('channels',     '/channels',   'Каналы',     active) }}
       {{ nav_item('agents',       '/agents',     'ИИ-агенты',   active) }}
       {{ nav_item('knowledge',    '/knowledge',  'Базы знаний',  active) }}
+      {{ nav_item('integrations', '/integrations', 'Интеграции',   active) }}
       {%- else %}
       {{ nav_item('my_agent',     '/my-agent',   'Мой ИИ-сотрудник', active) }}
       {%- endif %}
-      {{ nav_item('integrations', '/integrations', 'Интеграции',   active) }}
       {{ nav_item('broadcasts',   '/broadcasts', 'Рассылки',   active) }}
       {{ nav_item('products',     '/products',   'Продукты',   active) }}
       {{ nav_item('payments',     '/payments',   'Платежи',    active) }}

@@ -3578,6 +3578,7 @@ async def integrations_page(
     saved: int = 0,
     err: str | None = None,
 ):
+    _require_admin(session)  # интеграции Школы (глобальный app_settings: гайд/оплата/токены) — только платформе
     ai = await db.get_ai_settings()
     runtime = await db.get_runtime_status()
     guide_override = await db.get_guide_url_setting()
@@ -3617,6 +3618,7 @@ async def integrations_set_guide_url(
     guide_url: str = Form(""),
     csrf_token: str = Form(""),
 ):
+    _require_admin(session)  # глобальный app_settings['guide_url'] Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     # Пусто → снять переопределение (бот фолбэчит на env GUIDE_URL).
     result = await db.set_guide_url_with_audit(
@@ -3637,6 +3639,7 @@ async def integrations_set_payments(
 ):
     """Тумблер онлайн-оплаты (1B): app_settings['online_payments_enabled'] — бот гейтит
     кнопку «Купить», панель — «счёт из диалога». Дефолт ВЫКЛ (включается явно)."""
+    _require_admin(session)  # глобальный app_settings['online_payments_enabled'] Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     await db.set_online_payments_with_audit(
         bool(enabled), actor=session.actor, ip=_ip(request), user_agent=_ua(request),
@@ -3690,6 +3693,7 @@ async def channels_page(
     saved_persona: int = 0,
     err: str | None = None,
 ):
+    _require_admin(session)  # назначения персон по каналам = глобальный app_settings Школы — только платформе
     attribution = _present_attribution(await db.attribution_by_source())
     clicks = await db.total_link_clicks()
     runtime = await db.get_runtime_status()
@@ -3742,6 +3746,7 @@ async def channels_set_persona(
     СВОЕГО cloud-ai агента через API (один на персону, реестр ai_persona_agent__<slug>) и
     каналу прописывается его access_id + промпт-каркас. Пустая персона — сброс («как у всех»).
     Бот подхватывает per-канальные ключи со следующего сообщения лида, без редеплоя."""
+    _require_admin(session)  # запись глобальных канальных ключей app_settings Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     source = source.strip()
     if source not in config.SOURCES:
