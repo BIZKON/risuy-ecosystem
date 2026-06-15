@@ -29,6 +29,7 @@
 {%- elif name == 'channels' -%}<path d="M4.9 4.9a16 16 0 0 0 0 14.2M19.1 4.9a16 16 0 0 1 0 14.2M7.8 7.8a8 8 0 0 0 0 8.4M16.2 7.8a8 8 0 0 1 0 8.4"/><circle cx="12" cy="12" r="1.5"/>
 {%- elif name == 'agents' -%}<path d="M12 3l1.6 3.6L17 8l-3.4 1.4L12 13l-1.6-3.6L7 8l3.4-1.4L12 3z"/><path d="M5 16l.8 1.8L8 18.6l-2.2.8L5 21l-.8-1.6L2 18.6l2.2-.8L5 16z"/>
 {%- elif name == 'my_agent' -%}<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 8V4M9 4h6"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/>
+{%- elif name == 'triggers' -%}<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/>
 {%- elif name == 'knowledge' -%}<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
 {%- elif name == 'integrations' -%}<path d="M14 7h3a2 2 0 0 1 2 2v3M10 7H7a2 2 0 0 0-2 2v3"/><rect x="9" y="3" width="6" height="6" rx="1"/><rect x="3" y="14" width="6" height="6" rx="1"/><rect x="15" y="14" width="6" height="6" rx="1"/>
 {%- elif name == 'broadcasts' -%}<path d="M3 11l18-8-8 18-2-7-8-3z"/>
@@ -67,7 +68,7 @@
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
   'subscription': 'Подписка', 'usage': 'Расход', 'team': 'Команда',
   'keys': 'Ключи', 'tenants': 'Клиенты', 'account': 'Профиль',
-  'my_agent': 'Мой ИИ-сотрудник',
+  'my_agent': 'Мой ИИ-сотрудник', 'triggers': 'Триггеры',
 } %}
 
 <body class="app {% block body_class %}{% endblock %}">
@@ -91,6 +92,7 @@
       {{ nav_item('integrations', '/integrations', 'Интеграции',   active) }}
       {%- else %}
       {{ nav_item('my_agent',     '/my-agent',   'Мой ИИ-сотрудник', active) }}
+      {{ nav_item('triggers',     '/triggers',   'Триггеры',         active) }}
       {%- endif %}
       {{ nav_item('broadcasts',   '/broadcasts', 'Рассылки',   active) }}
       {{ nav_item('products',     '/products',   'Продукты',   active) }}

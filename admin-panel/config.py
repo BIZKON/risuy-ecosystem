@@ -599,6 +599,30 @@ ESCALATION_CHAT_ID_SETTING_KEY = "escalation_chat_id"     # -100… (текст)
 ESCALATION_TOPIC_ID_SETTING_KEY = "escalation_topic_id"   # опц. message_thread_id (digits)
 ESCALATION_CHAT_ID_RE = r"^-?\d{5,}$"   # TG chat id (супергруппа -100…); валидируем форму ввода
 
+# ── Раздел КЛИЕНТА «Триггеры» (/triggers) — движок триггеров в tenant_triggers (Слой B) ──
+# Клиент создаёт триггеры: условие (стоп-слова/намерение/кол-во сообщений/документы) → действие
+# (уведомить менеджеров в свою TG-группу через бот-нотификатор + готовый ответ клиенту). Бот
+# читает и применяет их (bot-telegram/triggers.py). chat_id валидируется как у эскалации.
+TRIGGER_TYPE_LABELS = {
+    "stopwords": "Стоп-слова",
+    "intent": "Намерение (beta)",
+    "message_count": "Количество сообщений",
+    "documents": "Входящие документы",
+}
+TRIGGER_TYPE_ORDER = ("stopwords", "intent", "message_count", "documents")
+TRIGGER_ACTION_LABELS = {
+    "notify_reply_continue": "Уведомить, ответить и продолжить разговор",
+    "notify_reply_pause": "Уведомить, ответить и передать оператору (пауза ИИ)",
+    "notify_only": "Только уведомить менеджеров",
+}
+TRIGGER_ACTION_ORDER = ("notify_reply_continue", "notify_reply_pause", "notify_only")
+TRIGGER_STOPWORDS_MAX = 50        # потолок числа стоп-слов в одном триггере
+TRIGGER_STOPWORD_LEN_MAX = 80     # потолок длины одного стоп-слова/фразы
+TRIGGER_INTENT_MAX = 500          # описание намерения
+TRIGGER_REPLY_MAX = 2000          # готовый ответ клиенту
+TRIGGER_MSG_COUNT_MAX = 1000      # порог «кол-во сообщений»
+TRIGGER_MAX_PER_TENANT = 100      # анти-абьюз: лимит триггеров на тенанта
+
 # ── Управление cloud-ai АГЕНТОМ из панели (раздел «Базы знаний» = обучение Лии) ──
 # Панель ходит в Timeweb API под АККАУНТ-токеном (тем же, что у бота для вызова агента),
 # чтобы читать/править системный промпт агента и видеть базы знаний. Секрет — ТОЛЬКО env

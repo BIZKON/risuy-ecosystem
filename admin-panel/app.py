@@ -4282,6 +4282,175 @@ async def my_agent_escalation(
 
 
 # =========================================================================== #
+# Раздел КЛИЕНТА «Триггеры» (/triggers) — движок триггеров (Слой B). Клиент создаёт триггеры
+# (стоп-слова/намерение/кол-во сообщений/документы) → действие (уведомить менеджеров в свою
+# TG-группу через бот-нотификатор + готовый ответ клиенту). Пишется в tenant_triggers (RLS,
+# скоуп активного тенанта). Бот применяет (bot-telegram/triggers.py). Эталон UX — «Нейроагенты».
+# =========================================================================== #
+def _triggers_saved_text(saved: str | None) -> str | None:
+    return {"added": "Триггер добавлен.", "deleted": "Триггер удалён."}.get(saved or "")
+
+
+def _triggers_err_text(err: str | None) -> str | None:
+    return {
+        "no_tenant": "Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.",
+        "bad_type": "Неизвестный тип триггера.",
+        "bad_action": "Неизвестное действие.",
+        "bad_chat": "ID Telegram-чата должен быть числом вида -1002576119452.",
+        "bad_topic": "ID темы форума должен быть числом.",
+        "no_reply": "Для этого действия нужен текст ответа клиенту.",
+        "no_stopwords": "Добавьте хотя бы одно стоп-слово.",
+        "no_intent": "Опишите, в каком случае срабатывает триггер.",
+        "bad_count": f"Количество сообщений — число от 1 до {config.TRIGGER_MSG_COUNT_MAX}.",
+        "too_many": f"Достигнут лимит триггеров ({config.TRIGGER_MAX_PER_TENANT}).",
+        "not_found": "Триггер не найден.",
+    }.get(err or "")
+
+
+def _present_trigger(r) -> dict:
+    return {
+        "id": str(r["id"]), "type": r["type"], "action": r["action"],
+        "action_label": config.TRIGGER_ACTION_LABELS.get(r["action"], r["action"]),
+        "stopwords": list(r["stopwords"] or []),
+        "intent_desc": r["intent_desc"] or "", "msg_count": r["msg_count"],
+        "notify_chat_id": r["notify_chat_id"] or "", "notify_topic_id": r["notify_topic_id"],
+        "reply_text": r["reply_text"] or "", "enabled": r["enabled"],
+    }
+
+
+@app.get("/triggers", response_class=HTMLResponse)
+async def triggers_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: str | None = None,
+    err: str | None = None,
+):
+    tid = session.active_tenant_id
+    rows = await db.list_tenant_triggers(tid) if tid else []
+    by_type: dict[str, list] = {t: [] for t in config.TRIGGER_TYPE_ORDER}
+    for r in rows:
+        if r["type"] in by_type:
+            by_type[r["type"]].append(_present_trigger(r))
+    sections = [{"type": t, "label": config.TRIGGER_TYPE_LABELS[t], "items": by_type[t]}
+                for t in config.TRIGGER_TYPE_ORDER]
+    # Префилл TG-чата из блока «Эскалация» (чтобы клиент не вводил id повторно).
+    esc = await db.get_tenant_escalation_config(tid) if tid else {"chat_id": ""}
+    return templates.TemplateResponse(
+        request,
+        "triggers.html",
+        {
+            "active": "triggers",
+            "session": session,
+            "csrf_token": session.csrf_token,
+            "has_tenant": bool(tid),
+            "sections": sections,
+            "actions": [{"key": k, "label": config.TRIGGER_ACTION_LABELS[k]}
+                        for k in config.TRIGGER_ACTION_ORDER],
+            "default_chat_id": esc.get("chat_id") or "",
+            "stopword_len_max": config.TRIGGER_STOPWORD_LEN_MAX,
+            "intent_max": config.TRIGGER_INTENT_MAX,
+            "reply_max": config.TRIGGER_REPLY_MAX,
+            "count_max": config.TRIGGER_MSG_COUNT_MAX,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+            "saved": _triggers_saved_text(saved),
+            "err": _triggers_err_text(err),
+        },
+    )
+
+
+def _parse_stopwords(raw: str) -> list[str]:
+    """Стоп-слова из текстового поля: разделители — запятая/перевод строки. Тримминг, дедуп с
+    сохранением порядка, отбрасывание пустых, кап длины каждого и общего числа."""
+    seen, out = set(), []
+    for part in re.split(r"[,\n]", raw or ""):
+        w = part.strip()[: config.TRIGGER_STOPWORD_LEN_MAX]
+        if w and w.lower() not in seen:
+            seen.add(w.lower())
+            out.append(w)
+        if len(out) >= config.TRIGGER_STOPWORDS_MAX:
+            break
+    return out
+
+
+@app.post("/triggers/add")
+async def triggers_add(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    trigger_type: str = Form(""),
+    action: str = Form(""),
+    stopwords: str = Form(""),
+    intent_desc: str = Form(""),
+    msg_count: str = Form(""),
+    notify_chat_id: str = Form(""),
+    notify_topic_id: str = Form(""),
+    reply_text: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/triggers?err=no_tenant", status_code=303)
+    if trigger_type not in config.TRIGGER_TYPE_LABELS:
+        return RedirectResponse(url="/triggers?err=bad_type", status_code=303)
+    if action not in config.TRIGGER_ACTION_LABELS:
+        return RedirectResponse(url="/triggers?err=bad_action", status_code=303)
+    chat = notify_chat_id.strip()
+    if not re.match(config.ESCALATION_CHAT_ID_RE, chat):
+        return RedirectResponse(url="/triggers?err=bad_chat", status_code=303)
+    topic_raw = notify_topic_id.strip()
+    if topic_raw and not topic_raw.isdigit():
+        return RedirectResponse(url="/triggers?err=bad_topic", status_code=303)
+    topic = int(topic_raw) if topic_raw else None
+    reply = reply_text.strip()[: config.TRIGGER_REPLY_MAX]
+    if action in ("notify_reply_continue", "notify_reply_pause") and not reply:
+        return RedirectResponse(url="/triggers?err=no_reply", status_code=303)
+    # Условие по типу:
+    words: list[str] = []
+    intent = ""
+    count: int | None = None
+    if trigger_type == "stopwords":
+        words = _parse_stopwords(stopwords)
+        if not words:
+            return RedirectResponse(url="/triggers?err=no_stopwords", status_code=303)
+    elif trigger_type == "intent":
+        intent = intent_desc.strip()[: config.TRIGGER_INTENT_MAX]
+        if not intent:
+            return RedirectResponse(url="/triggers?err=no_intent", status_code=303)
+    elif trigger_type == "message_count":
+        if not (msg_count.strip().isdigit() and 1 <= int(msg_count) <= config.TRIGGER_MSG_COUNT_MAX):
+            return RedirectResponse(url="/triggers?err=bad_count", status_code=303)
+        count = int(msg_count)
+    if await db.count_tenant_triggers(tid) >= config.TRIGGER_MAX_PER_TENANT:
+        return RedirectResponse(url="/triggers?err=too_many", status_code=303)
+    await db.create_tenant_trigger(
+        tid, type_=trigger_type, action=action, stopwords=words, intent_desc=intent,
+        msg_count=count, notify_chat_id=chat, notify_topic_id=topic, reply_text=reply,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/triggers?saved=added", status_code=303)
+
+
+@app.post("/triggers/delete")
+async def triggers_delete(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    trigger_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/triggers?err=no_tenant", status_code=303)
+    try:
+        ok = await db.delete_tenant_trigger(
+            tid, trigger_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    except Exception:  # noqa: BLE001 — кривой uuid и т.п.
+        ok = False
+    return RedirectResponse(url="/triggers?saved=deleted" if ok else "/triggers?err=not_found",
+                            status_code=303)
+
+
+# =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #
 @app.exception_handler(AuthRedirect)

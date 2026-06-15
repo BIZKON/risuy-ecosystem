@@ -3109,6 +3109,87 @@ async def set_tenant_escalation_config(
             )
 
 
+# ── Слой B: CRUD триггеров клиента (tenant_triggers, RLS). Раздел панели «Триггеры». ──
+_TRIGGER_SELECT = ("id, type, action, stopwords, intent_desc, msg_count, "
+                   "notify_chat_id, notify_topic_id, reply_text, enabled, position")
+
+
+async def list_tenant_triggers(tenant_id) -> list[asyncpg.Record]:
+    """Все триггеры тенанта (для раздела «Триггеры»). Под set_config('app.tenant_id') (RLS)."""
+    if not tenant_id:
+        return []
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                f"select {_TRIGGER_SELECT} from tenant_triggers where tenant_id = $1 "
+                "order by type, position, created_at", tenant_id)
+
+
+async def count_tenant_triggers(tenant_id) -> int:
+    """Число триггеров тенанта (для лимита анти-абьюза)."""
+    if not tenant_id:
+        return 0
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return int(await c.fetchval(
+                "select count(*) from tenant_triggers where tenant_id = $1", tenant_id) or 0)
+
+
+async def create_tenant_trigger(
+    tenant_id, *, type_: str, action: str, stopwords: list[str], intent_desc: str,
+    msg_count: int | None, notify_chat_id: str, notify_topic_id: int | None, reply_text: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Создать триггер тенанта (insert tenant_triggers) + аудит под set_config('app.tenant_id')
+    (RLS). Валидность/длины уже проверены вызывающим (app.py). position = max+1."""
+    if not tenant_id:
+        raise ValueError("create_tenant_trigger: tenant_id обязателен")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            pos = int(await c.fetchval(
+                "select coalesce(max(position), 0) + 1 from tenant_triggers "
+                "where tenant_id = $1 and type = $2", tenant_id, type_) or 1)
+            await c.execute(
+                """
+                insert into tenant_triggers
+                    (tenant_id, type, action, stopwords, intent_desc, msg_count,
+                     notify_chat_id, notify_topic_id, reply_text, position)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                tenant_id, type_, action, stopwords, intent_desc, msg_count,
+                notify_chat_id, notify_topic_id, reply_text, pos,
+            )
+            await _insert_audit(
+                c, actor=actor, action="tenant_trigger_create", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "type": type_, "action": action,
+                        "chat_id": notify_chat_id or None},
+            )
+
+
+async def delete_tenant_trigger(
+    tenant_id, trigger_id, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Удалить триггер тенанта по id (RLS дополнительно скоупит по tenant_id). True — удалён."""
+    if not tenant_id:
+        return False
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            res = await c.execute(
+                "delete from tenant_triggers where id = $1 and tenant_id = $2",
+                trigger_id, tenant_id)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="tenant_trigger_delete", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "trigger_id": str(trigger_id)},
+            )
+            return True
+
+
 # ── Reseller-платформа Wave 1: tenancy + vault (ТЗ §4.1/§4.5) ────────────────
 # RLS: tenant_secrets закрыт политикой по current_setting('app.tenant_id') —
 # каждый запрос к нему идёт в транзакции ПОСЛЕ set_config(..., is_local=true).

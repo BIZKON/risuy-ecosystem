@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Триггеры{% endblock %}
+{% block body_class %}page-triggers{% endblock %}
+
+{% set DESC = {
+  'stopwords': 'Действия при появлении в сообщении клиента определённых слов или фраз.',
+  'intent': 'ИИ определяет, когда сработать (например «клиент просит оплату» или «негатив»). Сейчас сохраняется; автосрабатывание подключается следующим шагом.',
+  'message_count': 'Действие при достижении в диалоге заданного числа сообщений клиента.',
+  'documents': 'Действие, когда клиент присылает в диалог документ/файл.',
+} %}
+
+{% macro cond_summary(t) %}
+  {%- if t.type == 'stopwords' -%}слова: {{ t.stopwords | join(', ') }}
+  {%- elif t.type == 'intent' -%}намерение: {{ t.intent_desc }}
+  {%- elif t.type == 'message_count' -%}после {{ t.msg_count }} сообщений
+  {%- elif t.type == 'documents' -%}любой документ{%- endif -%}
+{% endmacro %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Триггеры</h1>
+  <p class="page-head__hint">Автоматические действия по событиям в диалоге: уведомить менеджеров в Telegram и ответить клиенту готовым текстом. Уведомления присылает наш бот-нотификатор — добавьте его в вашу группу менеджеров.</p>
+</div>
+
+{% if saved %}{{ flash(saved, 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{% if not has_tenant %}
+<section class="card">
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">Триггеры настраиваются в кабинете клиента. Сейчас к вашей учётной записи кабинет не привязан — напишите в поддержку.</p>
+  {% if support_url %}<div class="acct-actions"><a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a></div>{% endif %}
+</section>
+{% else %}
+
+{% for s in sections %}
+<section class="card" aria-label="{{ s.label }}">
+  <h2 class="card__title">{{ s.label }}</h2>
+  <p class="card__note">{{ DESC.get(s.type, '') }}</p>
+
+  {% if s.items %}
+  <div class="trig-list">
+    {% for t in s.items %}
+    <div class="trig-item">
+      <div class="trig-item__main">
+        <div class="trig-item__cond">{{ cond_summary(t) }}</div>
+        <div class="trig-item__meta">
+          <span class="pill pill--muted">{{ t.action_label }}</span>
+          <span class="trig-item__chat mono">→ {{ t.notify_chat_id }}{% if t.notify_topic_id %} / тема {{ t.notify_topic_id }}{% endif %}</span>
+        </div>
+        {% if t.reply_text %}<div class="trig-item__reply">Ответ: «{{ t.reply_text }}»</div>{% endif %}
+      </div>
+      <form method="post" action="/triggers/delete" onsubmit="return confirm('Удалить триггер?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="trigger_id" value="{{ t.id }}">
+        <button class="btn btn--danger-ghost btn--sm" type="submit" aria-label="Удалить">Удалить</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/triggers/add" autocomplete="off" class="trig-add">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="trigger_type" value="{{ s.type }}">
+
+    <label class="field">
+      <span class="field__label">Действие</span>
+      <select class="field__input" name="action">
+        {% for a in actions %}<option value="{{ a.key }}">{{ a.label }}</option>{% endfor %}
+      </select>
+    </label>
+
+    {% if s.type == 'stopwords' %}
+    <label class="field">
+      <span class="field__label">Стоп-слова <span class="field__hint">через запятую или с новой строки; добавляйте словоформы (отмена, отменить, отменю)</span></span>
+      <textarea class="field__input field__textarea" name="stopwords" rows="2" placeholder="отмена, перенести, больничный, когда менеджер свяжется"></textarea>
+    </label>
+    {% elif s.type == 'intent' %}
+    <label class="field">
+      <span class="field__label">Когда сработать <span class="field__hint">опишите ситуацию словами</span></span>
+      <input class="field__input" type="text" name="intent_desc" maxlength="{{ intent_max }}" placeholder="клиент просит ссылку на оплату">
+    </label>
+    {% elif s.type == 'message_count' %}
+    <label class="field">
+      <span class="field__label">После скольких сообщений клиента</span>
+      <input class="field__input" type="number" name="msg_count" min="1" max="{{ count_max }}" placeholder="5">
+    </label>
+    {% endif %}
+
+    <label class="field">
+      <span class="field__label">ID Telegram-чата менеджеров</span>
+      <input class="field__input" type="text" name="notify_chat_id" inputmode="numeric"
+             value="{{ default_chat_id|e }}" placeholder="-1002576119452" maxlength="32">
+    </label>
+    <label class="field">
+      <span class="field__label">ID темы форума <span class="field__hint">необязательно</span></span>
+      <input class="field__input" type="text" name="notify_topic_id" inputmode="numeric" placeholder="например, 12" maxlength="16">
+    </label>
+    <label class="field">
+      <span class="field__label">Ответ клиенту <span class="field__hint">для действий с ответом</span></span>
+      <textarea class="field__input field__textarea" name="reply_text" rows="2" maxlength="{{ reply_max }}" placeholder="Оставьте номер телефона, менеджер свяжется с вами 🌷"></textarea>
+    </label>
+
+    <div class="form-actions"><button class="btn btn--secondary" type="submit">Добавить</button></div>
+  </form>
+</section>
+{% endfor %}
+
+{% endif %}
+{% endblock %}
