@@ -84,10 +84,12 @@ def parse_escalation(text: str) -> tuple[str, dict | None]:
 
 
 def format_card(payload: dict, *, tg_user_id: int, lead_id: str | None = None,
-                panel_base: str | None = None, raw: str | None = None) -> str:
+                panel_base: str | None = None, raw: str | None = None,
+                client_link: tuple[str, str] | None = None) -> str:
     """Карточка лида менеджерам (plain, без разметки). Поля обрезаются; пустые/нестроковые
     пропускаются; нет данных → сырой сигнал. Внизу — ссылки: диалог в панели (читать+ответить
-    через бота) и прямой ЧС клиента в Telegram (best-effort: без username может не открыться)."""
+    через бота) и прямой ЧС клиента. client_link=(url, подпись) — канал-специфичная ссылка на
+    клиента; None → дефолт Telegram (tg://user?id=, обратная совместимость)."""
     lines = ["🔥 Горячий лид — передача менеджеру"]
     shown = False
     for key, label in _FIELDS:
@@ -112,7 +114,8 @@ def format_card(payload: dict, *, tg_user_id: int, lead_id: str | None = None,
     lines.append("—")
     if panel_base and lead_id:
         lines.append(f"💬 Открыть диалог и ответить клиенту: {panel_base}/dialogs/{lead_id}")
-    lines.append(f"👤 Написать клиенту в Telegram: tg://user?id={tg_user_id}")
+    url, label = client_link or (f"tg://user?id={tg_user_id}", "Написать клиенту в Telegram")
+    lines.append(f"👤 {label}: {url}")
     return "\n".join(lines)[:3500]
 
 
@@ -130,11 +133,22 @@ async def resolve_escalation_target(tid) -> tuple[int, int | None] | None:
     return None
 
 
-async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = None) -> None:
+def _client_link(messenger: str, external_id: int) -> tuple[str, str] | None:
+    """Канал-специфичная ссылка на клиента для карточки менеджеру. None → дефолт Telegram (tg://)."""
+    if messenger == "vk":
+        import vk_driver  # чистые функции (stdlib-импорт), без aiohttp на уровне модуля
+        return vk_driver.vk_client_link(external_id)
+    # tg → None (format_card дефолтит tg://); max → ссылка появится в C1
+    return None
+
+
+async def escalate(bot, tg_user_id: int, payload: dict, *,
+                   messenger: str = "tg", raw: str | None = None) -> None:
     """Передать лида менеджерам в адрес ТЕНАНТА (дедуп: одна карточка на лид). НЕ бросает —
     эскалация не должна ронять ответ клиенту. Порядок: резолв адреса тенанта → атомарный claim →
-    отправка → при сбое release (чтобы лид не потерялся и следующее квал-сообщение попробовало
-    снова). Адрес берётся per-tenant (db.tenant_id() из contextvar мультиплекса / дефолт Школы)."""
+    отправка → при сбое release. Адрес per-tenant (db.tenant_id() из contextvar). tg_user_id —
+    внешний id лида в канале messenger; bot — разговорный бот (фолбэк отправки; для vk None,
+    карточку шлёт единый нотификатор в TG-группу). claim/get_lead_id/release — по messenger."""
     try:
         target = await resolve_escalation_target(db.tenant_id())
         if target is None:
@@ -143,19 +157,22 @@ async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = Non
         import messaging  # ленивый импорт: parse_escalation/format_card тестируемы без aiogram
         import notifier   # единый сервис-бот; None → фолбэк на разговорный бот тенанта
         send_bot = notifier.get_notifier_bot() or bot
-        if not await db.claim_lead_escalation(tg_user_id):
+        if send_bot is None:
+            return  # ни нотификатора, ни разговорного бота (vk без нотификатора) → слать нечем
+        if not await db.claim_lead_escalation(tg_user_id, messenger=messenger):
             return  # уже эскалирован / нет лида / гонка проиграна
         try:
-            lead_id = await db.get_lead_id(tg_user_id)  # для ссылки на диалог в панели
+            lead_id = await db.get_lead_id(tg_user_id, messenger=messenger)
             text = format_card(
                 payload, tg_user_id=tg_user_id, lead_id=lead_id,
                 panel_base=config.PANEL_BASE_URL or None, raw=raw,
+                client_link=_client_link(messenger, tg_user_id),
             )
             await messaging.raw_send_text(
                 send_bot, chat_id, text, message_thread_id=topic_id, rich=False,
             )
         except Exception:
-            await db.release_lead_escalation(tg_user_id)  # откат claim → ретрай позже
+            await db.release_lead_escalation(tg_user_id, messenger=messenger)  # откат claim → ретрай позже
             raise
     except Exception:  # noqa: BLE001
-        logger.warning("Эскалация менеджерам не удалась (tg=%s)", tg_user_id, exc_info=True)
+        logger.warning("Эскалация менеджерам не удалась (%s=%s)", messenger, tg_user_id, exc_info=True)

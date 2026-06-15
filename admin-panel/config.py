@@ -706,7 +706,8 @@ TENANT_SECRET_KEYS = (
     ("telegram_bot_token",       "Токен Telegram-бота клиента"),
     ("shop_yookassa_shop_id",    "Касса клиента: shopId"),
     ("shop_yookassa_secret_key", "Касса клиента: секретный ключ"),
-    ("vk_token",                 "Токен VK (опционально)"),
+    ("vk_token",                 "Токен сообщества ВК (право «Сообщения»)"),
+    ("vk_group_id",              "ID сообщества ВК (число, без минуса)"),  # Слой C: VK-канал
 )
 TENANT_SECRET_KEY_SET = {k for k, _ in TENANT_SECRET_KEYS}
 TENANT_SECRET_VALUE_MAX = 4096   # потолок длины значения секрета

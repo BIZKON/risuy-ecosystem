@@ -87,6 +87,13 @@ async def main() -> None:
     check("без panel_base — только tg-ссылка, без /dialogs/", f"tg://user?id={TG}" in card_nopanel and "/dialogs/" not in card_nopanel)
     card_empty = escalation.format_card({}, tg_user_id=TG, raw="raw-signal")
     check("пустой payload → сырой сигнал + tg-ссылка", "raw-signal" in card_empty and f"tg://user?id={TG}" in card_empty)
+    # Слой C: client_link для VK (карточка ведёт на vk.com, а не tg://)
+    import vk_driver  # noqa: E402
+    card_vk = escalation.format_card({"name": "Вика"}, tg_user_id=778899, client_link=vk_driver.vk_client_link(778899))
+    check("VK-карточка: ссылка vk.com/id (НЕ tg://)", "https://vk.com/id778899" in card_vk and "tg://" not in card_vk, repr(card_vk))
+    check("VK-карточка: подпись про ВКонтакте", "ВКонтакте" in card_vk)
+    check("_client_link('vk') → vk-url", escalation._client_link("vk", 778899) == ("https://vk.com/id778899", "Написать клиенту в ВКонтакте"))
+    check("_client_link('tg') → None (дефолт tg://)", escalation._client_link("tg", 778899) is None)
 
     # ── 3. claim/release дедуп (risuy_dev) ──
     print("3. claim/release дедуп:")

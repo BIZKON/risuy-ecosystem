@@ -150,17 +150,24 @@ async def run(interval: int | None = None) -> None:
     гасит тенант-ботов. Запускается доп. таской в bot.py рядом с воронкой Школы."""
     interval = interval or _RELOAD_INTERVAL
     logger.info("Мультиплекс тенант-ботов запущен (сверка каждые %s c)", interval)
-    running: dict = {}  # tenant_id -> {"task": Task, "bot": Bot}
+    running: dict = {}     # tenant_id -> {"task": Task, "bot": Bot}  (Telegram)
+    running_vk: dict = {}  # tenant_id -> {"task": Task, "bot": VKBot} (Слой C: ВКонтакте)
     try:
         while True:
             try:
                 await _reconcile(running)
             except Exception as e:  # noqa: BLE001 — сбой сверки не валит Школу/других
-                logger.exception("Мультиплекс: ошибка сверки реестра: %s", e)
+                logger.exception("Мультиплекс: ошибка сверки реестра (tg): %s", e)
+            try:
+                await _reconcile_vk(running_vk)   # аддитивный VK-проход (TG не трогает)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Мультиплекс: ошибка сверки реестра (vk): %s", e)
             await asyncio.sleep(interval)
     finally:
-        for tid, h in list(running.items()):
+        for tid in list(running.keys()):
             await _stop_tenant(running, tid)
+        for tid in list(running_vk.keys()):
+            await _stop_channel(running_vk, tid, "VK")
 
 
 async def _reconcile(running: dict) -> None:
@@ -229,3 +236,95 @@ async def _stop_tenant(running: dict, tenant_id) -> None:
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
     logger.info("Мультиплекс: тенант-бот %s остановлен", tenant_id)
+
+
+# ── Слой C: канал ВКонтакте (аддитивно к Telegram-проходу) ────────────────────────────
+async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str) -> None:
+    """VK-лид → ответ Лии тенанта (ядро: разговор + эскалация). tenant-контекст ставим ЯВНО
+    (VK-поллер не идёт через aiogram-middleware). Зеркалит t_text, канал messenger='vk'.
+    Триггеры на VK — отдельный шаг; здесь ядро (диалог + горячий лид)."""
+    token = db.current_tenant_id.set(tenant_id)
+    try:
+        cfg = await db.get_tenant_ai_overrides(tenant_id)
+        if not cfg["enabled"]:
+            return
+        await db.upsert_start(from_id, source="vk", messenger="vk")
+        await db.log_message(tg_user_id=from_id, messenger="vk", direction="in", text=text)
+        # cloud-ai без agent_id тенанта не зовём (иначе расход ушёл бы Школе); gateway — без agent_id.
+        if cfg["backend"] != "gateway" and not cfg["agent_id"]:
+            return
+        if await db.is_ai_wallet_blocked():
+            await vkbot.send(peer_id, texts.WALLET_PAUSED)
+            return
+        history = await db.get_ai_history(from_id, messenger="vk", limit=config.AI_HISTORY_MESSAGES)
+        answer, _msg_id, esc, _trig = await ai.ask_ai(text, None, cfg, history=history)
+        await vkbot.send(peer_id, answer)
+        await db.log_message(tg_user_id=from_id, messenger="vk", direction="out", source="liya", text=answer)
+        if esc is not None:
+            # bot=None → карточку шлёт ЕДИНЫЙ нотификатор в TG-группу менеджеров; ссылка на клиента — vk.com.
+            await escalation.escalate(None, from_id, esc, messenger="vk")
+    finally:
+        db.current_tenant_id.reset(token)
+
+
+async def _reconcile_vk(running_vk: dict) -> None:
+    """Доводит набор VK-поллеров до желаемого: тенанты с заданными vk_token + vk_group_id (vault).
+    Школа (дефолт-тенант) — не здесь (живёт из env). Аддитивно к Telegram-проходу."""
+    default_tid = db.default_tenant_id()
+    desired: dict = {}
+    for t in await db.list_active_tenants():
+        if t["id"] == default_tid:
+            continue
+        try:
+            token = await db.get_tenant_secret(t["id"], "vk_token")
+            group_id = await db.get_tenant_secret(t["id"], "vk_group_id")
+        except Exception:  # noqa: BLE001 — битый секрет одного тенанта не валит сверку
+            logger.warning("Мультиплекс: не прочитал VK-секреты тенанта %s", t["id"], exc_info=True)
+            continue
+        gid = (group_id or "").strip()
+        if token and gid.isdigit():
+            desired[t["id"]] = (token, int(gid))
+
+    for tid in list(running_vk.keys()):
+        if tid not in desired or running_vk[tid]["task"].done():
+            await _stop_channel(running_vk, tid, "VK")
+    for tid, (token, gid) in desired.items():
+        if tid not in running_vk:
+            await _start_vk(running_vk, tid, token, gid)
+
+
+async def _start_vk(running_vk: dict, tenant_id, token: str, group_id: int) -> None:
+    """Поднимает VK-long-poll-таску тенанта. api.vk.com из РФ-ЦОД — напрямую, без прокси."""
+    import vk_driver
+    vkbot = vk_driver.VKBot(token, group_id, on_message=None)
+
+    async def _on_message(from_id, peer_id, text):
+        await _vk_respond(vkbot, tenant_id, from_id, peer_id, text)
+
+    vkbot.on_message = _on_message
+    task = asyncio.create_task(_run_vk(tenant_id, vkbot))
+    running_vk[tenant_id] = {"task": task, "bot": vkbot}
+    logger.info("Мультиплекс: VK-бот тенанта %s поднят (group=%s)", tenant_id, group_id)
+
+
+async def _run_vk(tenant_id, vkbot) -> None:
+    """Long-poll одного VK-бота. Упавший не валит остальных."""
+    try:
+        await vkbot.run()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Мультиплекс: VK-поллер тенанта %s упал: %s", tenant_id, e)
+
+
+async def _stop_channel(running: dict, tenant_id, label: str) -> None:
+    """Гасит канальную таску (VK/будущие). Сессию канал закрывает в своём finally."""
+    h = running.pop(tenant_id, None)
+    if h is None:
+        return
+    h["task"].cancel()
+    try:
+        await h["task"]
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+    logger.info("Мультиплекс: %s-бот тенанта %s остановлен", label, tenant_id)
