@@ -2969,6 +2969,82 @@ async def set_subscription_canceled(
             )
 
 
+# ── Раздел клиента «Мой ИИ-сотрудник»: per-tenant конфиг ИИ в tenant_settings ──
+# Клиент правит ТОЛЬКО свои инструкции + фолбэк + тумблер; бот их читает в мультиплексе
+# (bot-telegram/db.py::get_tenant_ai_overrides). tenant_settings под RLS (deny-by-default):
+# каждый запрос — в транзакции ПОСЛЕ set_config('app.tenant_id') (panel_rw без bypassrls,
+# зеркало денежных/секрет-функций). Инфра-ключи (ai_backend/ai_agent_id/ai_model/
+# ai_gateway_base_url) НЕ трогаем — их провижионит владелец; читаем лишь факт «бот привязан»
+# (есть ли ai_agent_id) для баннера в UI. Дефолты совпадают с get_tenant_ai_overrides бота:
+# enabled=True при отсутствии строки (ИИ-сотрудник не «молчит» из-за пустого конфига).
+_TENANT_AI_KEYS = (
+    config.AI_ENABLED_SETTING_KEY,
+    config.AI_SYSTEM_PROMPT_SETTING_KEY,
+    config.AI_FALLBACK_SETTING_KEY,
+    config.AI_AGENT_ID_SETTING_KEY,   # read-only тут: «бот подключён?» (не пишем)
+)
+
+
+async def get_tenant_ai_config(tenant_id) -> dict:
+    """Конфиг ИИ-сотрудника тенанта из tenant_settings (для раздела /my-agent). Зеркалит
+    дефолты get_tenant_ai_overrides бота: enabled=True при отсутствии строки. provisioned —
+    привязан ли бот (ai_agent_id задан владельцем); агент клиент не видит/не правит."""
+    if not tenant_id:
+        return {"enabled": True, "system_prompt": "", "fallback": "", "provisioned": False}
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            rows = await c.fetch(
+                "select key, value from tenant_settings "
+                "where tenant_id = $1 and key = any($2::text[])",
+                tenant_id, list(_TENANT_AI_KEYS),
+            )
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    enabled_raw = kv.get(config.AI_ENABLED_SETTING_KEY)  # None=нет строки; ''=выключено явно
+    return {
+        "enabled": True if enabled_raw is None else bool(enabled_raw.strip()),
+        "system_prompt": kv.get(config.AI_SYSTEM_PROMPT_SETTING_KEY) or "",
+        "fallback": kv.get(config.AI_FALLBACK_SETTING_KEY) or "",
+        "provisioned": bool((kv.get(config.AI_AGENT_ID_SETTING_KEY) or "").strip()),
+    }
+
+
+async def set_tenant_ai_config(
+    tenant_id, *, enabled: bool, system_prompt: str, fallback: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Сохранить конфиг ИИ-сотрудника тенанта (upsert 3 ключей tenant_settings) + аудит —
+    ОДНОЙ транзакцией под set_config('app.tenant_id') (RLS). Пишем ТОЛЬКО клиентские ключи;
+    инфра-ключи (agent_id/backend/model) НЕ трогаем (провижининг владельца). «Выключено»/
+    пусто — пустым value (delete на tenant_settings не нужен; чтение трактует '' как выкл/нет).
+    Длины уже проверены вызывающим (app.py). Аудит — без текста промпта/фолбэка (только флаги)."""
+    if not tenant_id:
+        raise ValueError("set_tenant_ai_config: tenant_id обязателен")
+    pairs = (
+        (config.AI_ENABLED_SETTING_KEY, "1" if enabled else ""),
+        (config.AI_SYSTEM_PROMPT_SETTING_KEY, system_prompt),
+        (config.AI_FALLBACK_SETTING_KEY, fallback),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into tenant_settings (tenant_id, key, value)
+                    values ($1, $2, $3)
+                    on conflict (tenant_id, key) do update
+                        set value = excluded.value, updated_at = now()
+                    """,
+                    tenant_id, key, value,
+                )
+            await _insert_audit(
+                c, actor=actor, action="tenant_ai_config_set", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "enabled": enabled,
+                        "system_prompt_set": bool(system_prompt), "fallback_set": bool(fallback)},
+            )
+
+
 # ── Reseller-платформа Wave 1: tenancy + vault (ТЗ §4.1/§4.5) ────────────────
 # RLS: tenant_secrets закрыт политикой по current_setting('app.tenant_id') —
 # каждый запрос к нему идёт в транзакции ПОСЛЕ set_config(..., is_local=true).

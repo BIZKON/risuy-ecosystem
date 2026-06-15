@@ -3193,6 +3193,7 @@ async def agents_page(
     err: str | None = None,
     preset: str | None = None,
 ):
+    _require_admin(session)  # глобальные настройки Школы (app_settings) — только платформе; клиент → /my-agent
     ai = await db.get_ai_settings()
     since = datetime.now(timezone.utc) - timedelta(days=config.AI_ACTIVITY_WINDOW_DAYS)
     act = await db.ai_activity_summary(since)
@@ -3281,6 +3282,7 @@ async def agents_save(
     persona: str = Form(""),
     csrf_token: str = Form(""),
 ):
+    _require_admin(session)  # запись глобальных app_settings — только платформе (анти-кросс-тенант)
     await _enforce_csrf(request, session, csrf_token)
     backend = backend.strip()
     if backend not in config.AI_BACKENDS:
@@ -3320,6 +3322,7 @@ async def agent_role_page(
     warn: int = 0,
     err: str | None = None,
 ):
+    _require_admin(session)  # «ИИ-сотрудники» Школы (глобальный реестр персон) — только платформе
     if slug not in config.PERSONA_PRESETS:
         raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
     preset = config.PERSONA_PRESETS[slug]
@@ -3372,6 +3375,7 @@ async def agent_role_save(
     """Сохранить роль + задачи + правила поведения + базу знаний роли. Эффективный промпт
     (склейка) пишется в реестр (его берёт gateway-бэкенд и создание агента) и, если агент роли
     уже создан, пушится на живого cloud-ai агента (PATCH). Сбой пуша не теряет сохранённое → warn."""
+    _require_admin(session)  # запись глобального реестра персон Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     if slug not in config.PERSONA_PRESETS:
         raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
@@ -3439,6 +3443,7 @@ async def knowledge_page(
     kb_saved: int = 0,
     err: str | None = None,
 ):
+    _require_admin(session)  # база знаний Школы (глобальный pgvector + app_settings) — только платформе
     # Раздел теперь — только своя база знаний (загрузка файлов). Промпт/инструкции агента
     # живут в «ИИ-Агенты» → карточка роли (/agents/role/<slug>).
     kb_docs = await db.kb_list_documents()
@@ -3471,6 +3476,7 @@ async def knowledge_toggle(
     csrf_token: str = Form(""),
 ):
     """Тумблер поиска по базе знаний (app_settings['kb_enabled'], бот читает его при retrieval)."""
+    _require_admin(session)  # глобальный app_settings Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     await db.set_kb_enabled(
         kb_enabled.strip() == "1",
@@ -3490,6 +3496,7 @@ async def knowledge_upload(
 ):
     """Файл (txt/md/csv/pdf) → текст → чанки → эмбеддинг (TEI) → pgvector. role '' = общая
     справка (все роли). Эмбеддер должен быть задан в env панели (EMBEDDER_URL)."""
+    _require_admin(session)  # загрузка в базу знаний Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     if not config.EMBEDDER_ENABLED:
         return RedirectResponse(url="/knowledge?err=kb_off", status_code=303)
@@ -3535,6 +3542,7 @@ async def knowledge_delete(
     csrf_token: str = Form(""),
 ):
     """Удалить документ базы знаний (каскад чистит чанки)."""
+    _require_admin(session)  # удаление из базы знаний Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     doc_id = doc_id.strip()
     if not doc_id:
@@ -4145,6 +4153,83 @@ async def account_revoke_sessions(
         session.actor, keep_sid=session.sid, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/account?saved=sessions", status_code=303)
+
+
+# =========================================================================== #
+# Раздел КЛИЕНТА «Мой ИИ-сотрудник» (/my-agent) — per-tenant конфиг ИИ в tenant_settings.
+# Клиент (operator своего тенанта) правит ТОЛЬКО инструкции ИИ-сотрудника + текст-фолбэк +
+# тумблер; пишется в tenant_settings (RLS, скоуп активного тенанта сессии). Бот читает их
+# в мультиплексе (get_tenant_ai_overrides) и шлёт как system-сообщение per-request. Инфра
+# (движок/agent_id/модель) клиенту НЕ показываем (white-label) и НЕ трогаем — провижининг
+# владельца. Глобальные настройки Школы живут отдельно в /agents (платформенный супер).
+# =========================================================================== #
+def _my_agent_saved_text(saved: str | None) -> str | None:
+    return {"settings": "Настройки ИИ-сотрудника сохранены."}.get(saved or "")
+
+
+def _my_agent_err_text(err: str | None) -> str | None:
+    return {
+        "no_tenant": "Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.",
+        "bad_prompt": "Инструкции слишком длинные — сократите текст.",
+        "bad_fallback": "Сообщение-заглушка слишком длинное.",
+    }.get(err or "")
+
+
+@app.get("/my-agent", response_class=HTMLResponse)
+async def my_agent_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: str | None = None,
+    err: str | None = None,
+):
+    tid = session.active_tenant_id
+    cfg = await db.get_tenant_ai_config(tid) if tid else {
+        "enabled": True, "system_prompt": "", "fallback": "", "provisioned": False}
+    return templates.TemplateResponse(
+        request,
+        "my_agent.html",
+        {
+            "active": "my_agent",
+            "session": session,
+            "csrf_token": session.csrf_token,
+            "has_tenant": bool(tid),
+            "tenant_name": session.active_tenant_name,
+            "tenant_status": session.active_tenant_status,
+            "enabled": cfg["enabled"],
+            "system_prompt": cfg["system_prompt"],
+            "fallback": cfg["fallback"],
+            "provisioned": cfg["provisioned"],
+            "default_fallback": config.AI_DEFAULT_FALLBACK,
+            "prompt_max": config.TENANT_AI_PROMPT_MAX,
+            "fallback_max": config.AI_FALLBACK_MAX,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+            "saved": _my_agent_saved_text(saved),
+            "err": _my_agent_err_text(err),
+        },
+    )
+
+
+@app.post("/my-agent")
+async def my_agent_save(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    enabled: str = Form(""),
+    system_prompt: str = Form(""),
+    fallback: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:                                          # team-оператор без membership / легаси-сессия
+        return RedirectResponse(url="/my-agent?err=no_tenant", status_code=303)
+    # Длины режем до сохранения (как /agents): пользовательский ввод не должен распухать БД.
+    system_prompt = system_prompt.strip()[: config.TENANT_AI_PROMPT_MAX]
+    fallback = fallback.strip()[: config.AI_FALLBACK_MAX]
+    await db.set_tenant_ai_config(
+        tid, enabled=bool(enabled), system_prompt=system_prompt, fallback=fallback,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/my-agent?saved=settings", status_code=303)
 
 
 # =========================================================================== #

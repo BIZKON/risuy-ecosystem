@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Мой ИИ-сотрудник{% endblock %}
+{% block body_class %}page-my-agent{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Мой ИИ-сотрудник</h1>
+  <p class="page-head__hint">Инструкции, по которым ваш ИИ-сотрудник общается с клиентами в чате. Меняются здесь — применяются сразу, без перезапуска.</p>
+</div>
+
+{% if saved %}{{ flash(saved, 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{% if not has_tenant %}
+{# Сессия без привязанного клиента (сотрудник платформы без membership / легаси-сессия). #}
+<section class="card" aria-label="Кабинет не привязан">
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">Этот раздел настраивает ИИ-сотрудника вашего кабинета. Сейчас к вашей учётной записи кабинет не привязан — напишите в поддержку, поможем.</p>
+  {% if support_url %}
+  <div class="acct-actions">
+    <a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a>
+  </div>
+  {% endif %}
+</section>
+{% else %}
+
+{% if not provisioned %}
+{# Бот ещё не привязан владельцем (нет agent_id) — инструкции можно готовить заранее. #}
+<section class="card" aria-label="Бот подключается">
+  <div class="card__title">🔧 Бот подключается</div>
+  <p class="card__note">Ваш ИИ-сотрудник ещё подключается к каналам — этим занимается менеджер. Инструкции ниже можно заполнить уже сейчас: они применятся автоматически, как только бот заработает.</p>
+</section>
+{% endif %}
+
+<section class="card" aria-label="Настройки ИИ-сотрудника">
+  <h2 class="card__title">Настройки</h2>
+  <p class="card__note">Инструкции применяются к ответам ИИ-сотрудника в чатах вашего кабинета{% if tenant_name %} «{{ tenant_name|e }}»{% endif %}. Доступы и движок ИИ настроены на нашей стороне — здесь вы управляете только поведением сотрудника.</p>
+
+  <form method="post" action="/my-agent" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label class="field field--check">
+      <input type="checkbox" name="enabled" value="1"{% if enabled %} checked{% endif %}>
+      <span class="field__label">ИИ-сотрудник отвечает клиентам автоматически</span>
+    </label>
+    <p class="hint hint--block">Если выключить — ИИ-сотрудник молчит, и клиентам отвечаете вы вручную.</p>
+
+    <label class="field">
+      <span class="field__label">Инструкции для ИИ-сотрудника
+        <span class="field__hint">кто он, что продаёт, тон общения, что можно и чего нельзя</span></span>
+      <textarea class="field__input field__textarea field__textarea--lg" name="system_prompt"
+                maxlength="{{ prompt_max }}" rows="14"
+                placeholder="Например: Ты — Анна, администратор студии. Отвечай тепло и на «вы», кратко. Опирайся только на факты ниже, не выдумывай цены и скидки. Услуги и цены: … График работы: … Сложные вопросы и возвраты — передавай менеджеру.">{{ system_prompt }}</textarea>
+    </label>
+    <p class="hint hint--block">Чем конкретнее факты (услуги, цены, график, правила), тем точнее ответы. Не указывайте пароли и платёжные данные.</p>
+
+    <label class="field">
+      <span class="field__label">Сообщение, если ИИ временно недоступен
+        <span class="field__hint">его увидит клиент при сбое</span></span>
+      <textarea class="field__input field__textarea" name="fallback"
+                maxlength="{{ fallback_max }}" rows="3"
+                placeholder="{{ default_fallback }}">{{ fallback }}</textarea>
+    </label>
+    <p class="hint hint--block">Если оставить пустым — используется стандартное вежливое сообщение.</p>
+
+    <div class="form-actions"><button class="btn btn--primary" type="submit">Сохранить</button></div>
+  </form>
+</section>
+
+{% if support_url %}
+<section class="card" aria-label="Поддержка">
+  <div class="card__title">Нужна помощь с настройкой?</div>
+  <p class="card__note">Поможем составить инструкции и проверим, что ИИ-сотрудник отвечает как нужно.</p>
+  <div class="acct-actions">
+    <a class="btn btn--secondary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a>
+  </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}
