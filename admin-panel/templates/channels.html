@@ -153,6 +153,8 @@
 {% include "_channel_cards.html" %}
 {% endif %}
 
+{% include "_notifier_hint.html" %}
+
 {% else %}
 {# ═══ КЛИЕНТСКИЙ ВИД (operator): self-serve подключение каналов разговора ═══ #}
 <div class="page-head">
@@ -172,6 +174,8 @@
 {% include "_channel_cards.html" %}
 
 <p class="hint hint--block">Значения передаются один раз и сразу шифруются (AES-GCM); в журналах и аудите не появляются. Подключение канала — только для вашего кабинета. {% if support_url %}Нужна помощь? <a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Поддержка</a>.{% endif %}</p>
+
+{% include "_notifier_hint.html" %}
 
 {% endif %}
 {% endif %}

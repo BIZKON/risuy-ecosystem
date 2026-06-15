@@ -1,0 +1,10 @@
+{# Слой C: блок бота-нотификатора в разделе «Каналы». Клиент добавляет бота в свою группу
+   менеджеров одним тапом (deep-link ?startgroup). Контекст: notifier_username. #}
+<section class="section" aria-label="Бот уведомлений менеджерам">
+  <h2 class="section__title section__title--lg">Бот уведомлений менеджерам</h2>
+  <p class="hint hint--block">Карточки горячих лидов (эскалация) и сработавших триггеров присылает бот <code class="mono">@{{ notifier_username }}</code>. Добавьте его в вашу Telegram-группу менеджеров — без этого карточки не дойдут (правило Telegram: бот должен быть участником группы).</p>
+  <p>
+    <a class="btn btn--dark" href="https://t.me/{{ notifier_username }}?startgroup=true" target="_blank" rel="noopener noreferrer">➕ Добавить бота в группу менеджеров</a>
+  </p>
+  <p class="hint hint--block">Нажмите кнопку → Telegram предложит выбрать группу → выберите свою группу менеджеров. Затем укажите эту группу в разделе <a href="/my-agent">«Мой ИИ-сотрудник» → Эскалация</a> (и/или в «Триггерах»), чтобы бот знал, куда слать карточки.</p>
+</section>
