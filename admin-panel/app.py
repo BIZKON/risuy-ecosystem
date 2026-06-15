@@ -3767,11 +3767,21 @@ async def channels_page(
          "persona": cp["personas"].get(s, "")}
         for s in config.SOURCES
     ]
+    # Слой C: платформа тоже подключает каналы — ЗА активного клиента (решение владельца). Карточки
+    # скоупятся по session.active_tenant_id (тот же self-serve путь, что у клиента); connect/disconnect
+    # пишут в vault активного тенанта. Для дефолт-тенанта (Школа) VK/MAX через мультиплекс не поднимается.
+    plat_cards: list = []
+    if session.active_tenant_id and vault.enabled():
+        plat_cards = _channel_cards_view(await db.list_tenant_secrets(session.active_tenant_id))
     return templates.TemplateResponse(
         request,
         "channels.html",
         {
             "is_platform": True,
+            "vault_enabled": vault.enabled(),
+            "channel_cards": plat_cards,
+            "value_max": config.TENANT_SECRET_VALUE_MAX,
+            "saved_flash": bool(saved),
             "attribution": attribution,
             "clicks": clicks,
             "runtime": runtime,

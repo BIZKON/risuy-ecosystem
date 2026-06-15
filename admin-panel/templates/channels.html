@@ -12,6 +12,7 @@
 </div>
 
 {% if saved_persona %}{{ flash('ИИ-сотрудник назначен каналу. Бот применит это со следующего сообщения лида.', 'ok') }}{% endif %}
+{% if saved_flash %}{{ flash('Сохранено. Канал подключится автоматически в течение ~минуты.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 
 {# ── Сводные карточки ── #}
@@ -143,6 +144,15 @@
   {% endif %}
 </section>
 
+{# ── Подключение каналов (Слой C): платформа подключает каналы ЗА активного клиента ── #}
+<h2 class="section__title section__title--lg">Подключение каналов</h2>
+<p class="hint hint--block">Подключаете каналы для активного клиента: <b>{{ session.active_tenant_name|e if session.active_tenant_name else '—' }}</b>. Чтобы подключить каналы другому клиенту — смените активного в разделе «Клиенты». Токены хранятся в зашифрованном виде; бот подхватит их в течение ~минуты. <i>Для самой Школы (дефолт-тенант) VK/MAX через мультиплекс не поднимается — она работает из env; карточки полезны для клиентских тенантов.</i></p>
+{% if not vault_enabled %}
+<p class="hint hint--block">⚠️ Хранилище ключей не настроено: задайте <code class="mono">VAULT_MASTER_KEY</code> в env панели (twc-set-env), затем передеплой.</p>
+{% else %}
+{% include "_channel_cards.html" %}
+{% endif %}
+
 {% else %}
 {# ═══ КЛИЕНТСКИЙ ВИД (operator): self-serve подключение каналов разговора ═══ #}
 <div class="page-head">
@@ -159,36 +169,7 @@
 <p class="hint hint--block">⚠️ Хранилище ключей не настроено. Обратитесь в поддержку.</p>
 {% else %}
 
-{% for card in channel_cards %}
-<section class="section" aria-label="Канал {{ card.title|e }}">
-  <h2 class="section__title section__title--lg">
-    {{ card.title }}
-    {% if card.connected %}<span class="badge">настроен</span>{% else %}<span class="muted">не настроен</span>{% endif %}
-  </h2>
-  <p class="hint hint--block">{{ card.guide }}</p>
-
-  {% for f in card.fields %}
-  <form method="post" action="/channels/connect" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="key_name" value="{{ f.key }}">
-    <label class="field">
-      <span class="field__label">{{ f.label }} {% if f.is_set %}<span class="badge">задан</span>{% else %}<span class="muted">не задан</span>{% endif %}</span>
-      <input class="field__input mono" type="password" name="value" required
-             maxlength="{{ value_max }}" autocomplete="off"
-             placeholder="{% if f.is_set %}Введите заново, чтобы заменить{% else %}Вставьте значение{% endif %}">
-    </label>
-    <button class="btn btn--dark btn--sm" type="submit">{% if f.is_set %}Заменить{% else %}Сохранить{% endif %}</button>
-  </form>
-  {% if f.is_set %}
-  <form method="post" action="/channels/disconnect" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="key_name" value="{{ f.key }}">
-    <button class="btn btn--soft btn--sm" type="submit">Отключить «{{ f.label }}»</button>
-  </form>
-  {% endif %}
-  {% endfor %}
-</section>
-{% endfor %}
+{% include "_channel_cards.html" %}
 
 <p class="hint hint--block">Значения передаются один раз и сразу шифруются (AES-GCM); в журналах и аудите не появляются. Подключение канала — только для вашего кабинета. {% if support_url %}Нужна помощь? <a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Поддержка</a>.{% endif %}</p>
 
