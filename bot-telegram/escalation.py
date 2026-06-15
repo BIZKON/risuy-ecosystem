@@ -116,14 +116,31 @@ def format_card(payload: dict, *, tg_user_id: int, lead_id: str | None = None,
     return "\n".join(lines)[:3500]
 
 
+async def resolve_escalation_target(tid) -> tuple[int, int | None] | None:
+    """(chat_id, topic_id) куда слать карточку для тенанта tid — либо None (эскалация не настроена).
+
+    Приоритет (Слой A): per-tenant адрес из tenant_settings (клиент задаёт в панели «Мой
+    ИИ-сотрудник») → env-фолбэк ТОЛЬКО для дефолт-тенанта (Школа), чтобы текущее env-поведение
+    Школы не сломать. Клиентский тенант без заданного адреса → None (карточку не шлём)."""
+    cfg = await db.get_tenant_escalation(tid)
+    if cfg["enabled"] and cfg["chat_id"] is not None:
+        return cfg["chat_id"], cfg["topic_id"]
+    if tid == db.default_tenant_id() and config.MANAGER_GROUP_ID is not None:
+        return config.MANAGER_GROUP_ID, config.MANAGER_TOPIC_ID
+    return None
+
+
 async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = None) -> None:
-    """Передать лида менеджерам (дедуп: одна карточка на лид). НЕ бросает — эскалация не
-    должна ронять ответ клиенту. Порядок: атомарный claim → отправка → при сбое release
-    (чтобы лид не потерялся и следующее квал-сообщение попробовало снова)."""
-    if not config.MANAGER_ESCALATION_ENABLED:
-        return
-    import messaging  # ленивый импорт: parse_escalation/format_card тестируемы без aiogram
+    """Передать лида менеджерам в адрес ТЕНАНТА (дедуп: одна карточка на лид). НЕ бросает —
+    эскалация не должна ронять ответ клиенту. Порядок: резолв адреса тенанта → атомарный claim →
+    отправка → при сбое release (чтобы лид не потерялся и следующее квал-сообщение попробовало
+    снова). Адрес берётся per-tenant (db.tenant_id() из contextvar мультиплекса / дефолт Школы)."""
     try:
+        target = await resolve_escalation_target(db.tenant_id())
+        if target is None:
+            return  # адрес эскалации у тенанта не задан → карточку не шлём (маркер уже вырезан в ask_ai)
+        chat_id, topic_id = target
+        import messaging  # ленивый импорт: parse_escalation/format_card тестируемы без aiogram
         if not await db.claim_lead_escalation(tg_user_id):
             return  # уже эскалирован / нет лида / гонка проиграна
         try:
@@ -133,8 +150,7 @@ async def escalate(bot, tg_user_id: int, payload: dict, *, raw: str | None = Non
                 panel_base=config.PANEL_BASE_URL or None, raw=raw,
             )
             await messaging.raw_send_text(
-                bot, config.MANAGER_GROUP_ID, text,
-                message_thread_id=config.MANAGER_TOPIC_ID, rich=False,
+                bot, chat_id, text, message_thread_id=topic_id, rich=False,
             )
         except Exception:
             await db.release_lead_escalation(tg_user_id)  # откат claim → ретрай позже

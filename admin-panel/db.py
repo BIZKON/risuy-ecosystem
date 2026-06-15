@@ -3045,6 +3045,70 @@ async def set_tenant_ai_config(
             )
 
 
+# ── A3 Слой A: per-tenant адрес эскалации (тот же tenant_settings, RLS) ──────
+_TENANT_ESCALATION_KEYS = (
+    config.ESCALATION_ENABLED_SETTING_KEY,
+    config.ESCALATION_CHAT_ID_SETTING_KEY,
+    config.ESCALATION_TOPIC_ID_SETTING_KEY,
+)
+
+
+async def get_tenant_escalation_config(tenant_id) -> dict:
+    """Адрес эскалации тенанта из tenant_settings (для блока «Эскалация» в /my-agent). Зеркалит
+    bot-telegram/db.py::get_tenant_escalation. Нет строки → выключено и пусто (клиент задаёт сам)."""
+    if not tenant_id:
+        return {"enabled": False, "chat_id": "", "topic_id": ""}
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            rows = await c.fetch(
+                "select key, value from tenant_settings "
+                "where tenant_id = $1 and key = any($2::text[])",
+                tenant_id, list(_TENANT_ESCALATION_KEYS),
+            )
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    return {
+        "enabled": bool((kv.get(config.ESCALATION_ENABLED_SETTING_KEY) or "").strip()),
+        "chat_id": kv.get(config.ESCALATION_CHAT_ID_SETTING_KEY) or "",
+        "topic_id": kv.get(config.ESCALATION_TOPIC_ID_SETTING_KEY) or "",
+    }
+
+
+async def set_tenant_escalation_config(
+    tenant_id, *, enabled: bool, chat_id: str, topic_id: str,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Сохранить адрес эскалации тенанта (upsert 3 ключей tenant_settings) + аудит — ОДНОЙ
+    транзакцией под set_config('app.tenant_id') (RLS). chat_id/topic_id — операционный конфиг
+    (id группы, не ПДн/секрет), но в аудит кладём только факт/значение chat_id (как guide_url).
+    Формат/валидность уже проверены вызывающим (app.py)."""
+    if not tenant_id:
+        raise ValueError("set_tenant_escalation_config: tenant_id обязателен")
+    pairs = (
+        (config.ESCALATION_ENABLED_SETTING_KEY, "1" if enabled else ""),
+        (config.ESCALATION_CHAT_ID_SETTING_KEY, chat_id),
+        (config.ESCALATION_TOPIC_ID_SETTING_KEY, topic_id),
+    )
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            for key, value in pairs:
+                await c.execute(
+                    """
+                    insert into tenant_settings (tenant_id, key, value)
+                    values ($1, $2, $3)
+                    on conflict (tenant_id, key) do update
+                        set value = excluded.value, updated_at = now()
+                    """,
+                    tenant_id, key, value,
+                )
+            await _insert_audit(
+                c, actor=actor, action="tenant_escalation_set", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "enabled": enabled,
+                        "chat_id": chat_id or None, "topic_id": topic_id or None},
+            )
+
+
 # ── Reseller-платформа Wave 1: tenancy + vault (ТЗ §4.1/§4.5) ────────────────
 # RLS: tenant_secrets закрыт политикой по current_setting('app.tenant_id') —
 # каждый запрос к нему идёт в транзакции ПОСЛЕ set_config(..., is_local=true).

@@ -109,6 +109,29 @@ async def main() -> None:
         c3 = await db.claim_lead_escalation(TG)
         check("после release claim снова True (ретрай при сбое отправки)", c3 is True)
         check("claim несуществующего лида = False", (await db.claim_lead_escalation(999000111)) is False)
+
+        # ── 4. resolve_escalation_target: per-tenant адрес + env-фолбэк только для Школы ──
+        print("4. resolve_escalation_target (Слой A):")
+        import config as botcfg
+        db.current_tenant_id.set(tid)
+        db._default_tenant_id = None                      # тестовый тенант — НЕ Школа
+        check("тенант без адреса (не Школа) → None", (await escalation.resolve_escalation_target(tid)) is None)
+        async with db.pool.acquire() as c:
+            await c.execute(
+                "insert into tenant_settings(tenant_id,key,value) values "
+                "($1,'escalation_enabled','1'),($1,'escalation_chat_id','-1009998887'),($1,'escalation_topic_id','42') "
+                "on conflict (tenant_id,key) do update set value=excluded.value", tid)
+        check("тенант с включённым адресом → (chat_id, topic)",
+              (await escalation.resolve_escalation_target(tid)) == (-1009998887, 42))
+        async with db.pool.acquire() as c:
+            await c.execute("update tenant_settings set value='' where tenant_id=$1 and key='escalation_enabled'", tid)
+        check("тенант с выключенным тумблером → None", (await escalation.resolve_escalation_target(tid)) is None)
+        # env-фолбэк ТОЛЬКО для дефолт-тенанта (Школа): делаем tid дефолтным + задаём env-группу
+        botcfg.MANAGER_GROUP_ID, botcfg.MANAGER_TOPIC_ID = -100123, 7
+        db._default_tenant_id = tid
+        check("дефолт-тенант (Школа) без своего адреса → env-фолбэк",
+              (await escalation.resolve_escalation_target(tid)) == (-100123, 7))
+        db._default_tenant_id = None
     finally:
         async with db.pool.acquire() as c:
             await c.execute("delete from leads where tg_user_id = $1", TG)

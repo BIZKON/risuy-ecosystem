@@ -1101,6 +1101,36 @@ async def get_tenant_ai_overrides(tid) -> dict:
     }
 
 
+# ── A3 Слой A: per-tenant адрес эскалации (карточка горячего лида в свою ТГ-группу) ──
+async def get_tenant_escalation(tid) -> dict:
+    """Куда тенант шлёт карточку эскалации (из tenant_settings, пишет панель «Мой ИИ-сотрудник»).
+    Бот — owner, RLS обходит, фильтрует tenant_id явно. Сбой/нет строк → выключено (эскалация не
+    должна падать из-за БД). chat_id/topic_id — int или None (нечисловое игнорируем)."""
+    out = {"enabled": False, "chat_id": None, "topic_id": None}
+    if tid is None:
+        return out
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "select key, value from tenant_settings "
+                "where tenant_id = $1 and key = any($2::text[])",
+                tid, ["escalation_enabled", "escalation_chat_id", "escalation_topic_id"],
+            )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Не удалось прочитать настройки эскалации тенанта %s", tid, exc_info=True)
+        return out
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    out["enabled"] = bool((kv.get("escalation_enabled") or "").strip())
+    cid = (kv.get("escalation_chat_id") or "").strip()
+    if cid.lstrip("-").isdigit():
+        out["chat_id"] = int(cid)
+    top = (kv.get("escalation_topic_id") or "").strip()
+    if top.isdigit():
+        out["topic_id"] = int(top)
+    return out
+
+
 # ── Метеринг (Wave 3): мягкая пауза ИИ при пустом кошельке prepaid-тенанта ────
 async def is_ai_wallet_blocked() -> bool:
     """True — кошелёк активного тенанта пуст и ИИ на мягкой паузе (флаг ставит

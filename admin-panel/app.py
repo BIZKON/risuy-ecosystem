@@ -4169,7 +4169,10 @@ async def account_revoke_sessions(
 # владельца. Глобальные настройки Школы живут отдельно в /agents (платформенный супер).
 # =========================================================================== #
 def _my_agent_saved_text(saved: str | None) -> str | None:
-    return {"settings": "Настройки ИИ-сотрудника сохранены."}.get(saved or "")
+    return {
+        "settings": "Настройки ИИ-сотрудника сохранены.",
+        "escalation": "Настройки эскалации сохранены.",
+    }.get(saved or "")
 
 
 def _my_agent_err_text(err: str | None) -> str | None:
@@ -4177,6 +4180,9 @@ def _my_agent_err_text(err: str | None) -> str | None:
         "no_tenant": "Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.",
         "bad_prompt": "Инструкции слишком длинные — сократите текст.",
         "bad_fallback": "Сообщение-заглушка слишком длинное.",
+        "bad_chat": "ID Telegram-чата должен быть числом вида -1002576119452.",
+        "bad_topic": "ID темы форума должен быть числом.",
+        "esc_no_chat": "Чтобы включить эскалацию, укажите ID Telegram-чата менеджеров.",
     }.get(err or "")
 
 
@@ -4190,6 +4196,8 @@ async def my_agent_page(
     tid = session.active_tenant_id
     cfg = await db.get_tenant_ai_config(tid) if tid else {
         "enabled": True, "system_prompt": "", "fallback": "", "provisioned": False}
+    esc = await db.get_tenant_escalation_config(tid) if tid else {
+        "enabled": False, "chat_id": "", "topic_id": ""}
     return templates.TemplateResponse(
         request,
         "my_agent.html",
@@ -4207,6 +4215,10 @@ async def my_agent_page(
             "default_fallback": config.AI_DEFAULT_FALLBACK,
             "prompt_max": config.TENANT_AI_PROMPT_MAX,
             "fallback_max": config.AI_FALLBACK_MAX,
+            # Блок «Эскалация» (Слой A): клиент задаёт свой TG-чат менеджеров.
+            "esc_enabled": esc["enabled"],
+            "esc_chat_id": esc["chat_id"],
+            "esc_topic_id": esc["topic_id"],
             "support_url": _safe_support_url(config.SUPPORT_URL),
             "saved": _my_agent_saved_text(saved),
             "err": _my_agent_err_text(err),
@@ -4235,6 +4247,38 @@ async def my_agent_save(
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/my-agent?saved=settings", status_code=303)
+
+
+@app.post("/my-agent/escalation")
+async def my_agent_escalation(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    esc_enabled: str = Form(""),
+    chat_id: str = Form(""),
+    topic_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Адрес эскалации горячего лида (Слой A): TG-чат менеджеров клиента + опц. тема + тумблер →
+    tenant_settings (бот читает get_tenant_escalation). chat_id/topic — числа; включение требует
+    chat_id (иначе слать некуда)."""
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/my-agent?err=no_tenant", status_code=303)
+    chat_id = chat_id.strip()
+    topic_id = topic_id.strip()
+    enabled = bool(esc_enabled)
+    if chat_id and not re.match(config.ESCALATION_CHAT_ID_RE, chat_id):
+        return RedirectResponse(url="/my-agent?err=bad_chat", status_code=303)
+    if topic_id and not topic_id.isdigit():
+        return RedirectResponse(url="/my-agent?err=bad_topic", status_code=303)
+    if enabled and not chat_id:                          # включили без адреса — слать некуда
+        return RedirectResponse(url="/my-agent?err=esc_no_chat", status_code=303)
+    await db.set_tenant_escalation_config(
+        tid, enabled=enabled, chat_id=chat_id, topic_id=topic_id,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/my-agent?saved=escalation", status_code=303)
 
 
 # =========================================================================== #
