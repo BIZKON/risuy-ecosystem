@@ -106,8 +106,10 @@ grant select on messages to panel_rw;
 -- update для отмены — опционален и по умолчанию НЕ выдаётся (сужаем write-поверхность).
 grant select, insert on outbox to panel_rw;
 
--- Рассылки: панель создаёт заявку и двигает draft→queued→canceled;
--- started_at/finished_at/totals/recipient_count проставляет бот при исполнении.
+-- Рассылки: панель создаёт заявку и двигает draft→queued→canceled.
+-- recipient_count пишут ОБА: панель ставит ОЦЕНКУ при queue (гейт claim бота — он берёт только
+-- recipient_count is not null), бот ПЕРЕЗАПИСЫВАЕТ фактическим после материализации. started_at/
+-- finished_at/totals — проставляет бот при исполнении.
 grant select, insert, update on broadcasts to panel_rw;
 
 -- Получатели: только SELECT. Материализацию и статусы ведёт БОТ (owner) — единый источник

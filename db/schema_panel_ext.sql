@@ -48,8 +48,11 @@ create index if not exists leads_unsubscribed_idx on leads (unsubscribed_at) whe
 
 -- ── Блок 1: переписка (пишет БОТ; панель только SELECT) ──────────────────────
 -- lead_id nullable: резолв по tg_user_id может опоздать (входящее логируется ДО роутинга,
--- лида может ещё не быть). tg_user_id есть ВСЕГДА. direction in|out. kind — реальные типы
--- Telegram. source — классификатор исходящих: funnel|liya|nurture|manual|broadcast|system.
+-- лида может ещё не быть). direction in|out. kind — реальные типы Telegram. source —
+-- классификатор исходящих: funnel|liya|nurture|manual|broadcast|system.
+-- ⚠️ ПОСТ-МИГРАЦИЯ (migrate_layer_c_identity): tg_user_id СНЯТ с NOT NULL и добавлен messenger
+-- ('tg'|'vk'|'max'). Для vk/max tg_user_id=NULL (адрес лида = lead_id; внешний id — в leads по каналу).
+-- DDL ниже — исходный baseline для свежей БД; на накатанных БД смотри реальное состояние.
 create table if not exists messages (
     id            bigserial   primary key,
     lead_id       uuid        references leads(id) on delete cascade,   -- nullable: резолв по tg_user_id может опоздать
@@ -70,6 +73,8 @@ create index if not exists messages_tg_created_idx   on messages (tg_user_id, cr
 -- ── Блок 3a: outbox (панель INSERT 'queued'; бот дренаж) ─────────────────────
 -- tg_user_id денормализуется при постановке (панель знает адрес из лида). status-машина
 -- queued→sending→sent|failed. claimed_at — для reclaim застрявших 'sending' после краша (§3 плана).
+-- ⚠️ ПОСТ-МИГРАЦИЯ (migrate_c3_channel_outbound): + messenger ('tg'|'vk'|'max'), tg_user_id СНЯТ с
+-- NOT NULL. Для vk/max адрес ответа резолвит воркер из leads по (lead_id, messenger) — vk_user_id/max_chat_id.
 create table if not exists outbox (
     id         bigserial   primary key,
     lead_id    uuid        not null references leads(id) on delete cascade,
@@ -89,14 +94,15 @@ create table if not exists outbox (
 create index if not exists outbox_queued_idx on outbox (created_at) where status = 'queued';
 
 -- ── Блок 3b: broadcasts (панель INSERT заявку; бот ведёт) ────────────────────
--- id bigserial (не uuid: проще sequence-грант + сортировка/URL). messenger tg|max (max — задел,
--- disabled в композере). body_template несёт плейсхолдер {link} для /r (§5.7). audience_filter —
+-- id bigserial (не uuid: проще sequence-грант + сортировка/URL). messenger: ИЗНАЧАЛЬНО был задел
+-- tg|max; ПОСЛЕ C3 активны tg|vk|max (BROADCAST_MESSENGERS, композер шлёт во все). body_template
+-- несёт плейсхолдер {link} для /r (§5.7). audience_filter —
 -- подмножество build_filters (jsonb, НЕ сырой SQL). recipient_count материализуется ДО старта.
 -- totals — {sent,failed,skipped} сводка. status-машина draft→queued→sending→paused→done|canceled.
 create table if not exists broadcasts (
     id              bigserial   primary key,
     title           text,
-    messenger       text        not null default 'tg',                 -- tg | max (max — задел)
+    messenger       text        not null default 'tg',                 -- tg|vk|max (после C3 все активны)
     kind            text        not null default 'text',
     body_template   text        not null,                              -- с плейсхолдером {link} для /r, §5.7 плана
     audience_filter jsonb       not null default '{}'::jsonb,          -- подмножество build_filters, НЕ сырой SQL
@@ -116,6 +122,8 @@ create index if not exists broadcasts_created_idx on broadcasts (created_at desc
 -- первой отправки), on conflict (broadcast_id,lead_id) do nothing. click_token — per-recipient
 -- токен для атрибуции (§5). status-машина pending→sending→sent|failed|skipped (skipped — отписался/
 -- erase между материализацией и send, §5.1 TOCTOU). unique(broadcast_id,lead_id) — идемпотентность.
+-- ⚠️ ПОСТ-МИГРАЦИЯ (migrate_c3_channel_outbound): + messenger + reply_address (адрес vk/max), tg_user_id
+-- СНЯТ с NOT NULL. tg → tg_user_id; vk/max → reply_address (vk_user_id / max_chat_id).
 create table if not exists broadcast_recipients (
     id           bigserial   primary key,
     broadcast_id bigint      not null references broadcasts(id) on delete cascade,

@@ -400,13 +400,12 @@ async def send_by_kind(
 
 
 # ── Тип отправки по MIME (картинка → photo, иначе document) ──────────────────
-# Единственное правило вывода kind из mime на стороне БОТА. Для рассылок kind считает
-# и хранит панель (broadcasts.kind, admin-panel/app.py::_kind_for_mime); для ПРОДУКТОВ
-# каталога файл лежит с file_mime, а kind в БД не хранится — бот выводит его этой же
-# функцией (схема schema_products.sql: «Тип отправки код выводит из file_mime тем же
-# правилом, что и рассылки»). ПОБАЙТОВО совпадает с панельным _kind_for_mime:
-# image/* → photo, всё прочее (pdf/doc/xls/zip/mp4/…) → document. gif с mime image/gif
-# уйдёт как photo (как и в рассылках) — Telegram сам отрисует анимацию.
+# Единственное правило вывода kind из mime на стороне БОТА. Для рассылок/продуктов kind считает
+# и хранит ПАНЕЛЬ, но ДРУГИМ механизмом: admin-panel/security.py::sniff_product_file (allow-list
+# по расширению + magic-byte) → spec["send"], нормализуется admin-panel/app.py::_product_kind_send.
+# Это ФУНКЦИОНАЛЬНО ЭКВИВАЛЕНТНО (для текущего allow-list: image/* → photo, прочее → document), но
+# НЕ «побайтово» одинаковая реализация — при добавлении новых типов сверять обе стороны вручную.
+# gif (image/gif) уйдёт как photo — Telegram сам отрисует анимацию.
 def kind_for_mime(mime: str | None) -> str:
     return "photo" if (mime or "").lower().startswith("image/") else "document"
 
