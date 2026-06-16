@@ -26,6 +26,9 @@ import yookassa
 logger = logging.getLogger(__name__)
 router = Router()
 
+# ⚠️ Держать в синхроне с admin-panel/config.py::SOURCES + SOURCE_LABELS и комментом-списком в
+# db/schema.sql (колонка source). Бот и панель — РАЗНЫЕ процессы (импорт невозможен): новая площадка
+# = править ВСЕ три места. Бот валидирует входящий deep-link source против этого набора.
 VALID_SOURCES = {"reels", "dzen", "youtube", "vk", "max", "other"}
 _SUBSCRIBED = {
     ChatMemberStatus.MEMBER,
@@ -41,6 +44,8 @@ class Funnel(StatesGroup):
     gate = State()
 
 
+# ⚠️ ИДЕНТИЧНО панели admin-panel/db.py::phone_query_hash (sha256 только-цифры). Любое расхождение
+# → поиск лида по телефону в панели молча вернёт пусто. Меняешь алгоритм — синхронно в обоих местах.
 def _phone_hash(phone: str) -> str:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return hashlib.sha256(digits.encode()).hexdigest() if digits else ""

@@ -677,6 +677,14 @@ async def enqueue_manual_reply(
                 )
                 count += 1
             for a in attachments:
+                # defence-in-depth: kind машинно-выводится _read_reply_file (magic-byte), но не пускаем
+                # неизвестный в outbox молча. ⚠️ набор синхронен с bot _MSG_KINDS (bot-telegram/db.py) и
+                # канальными vk/max_media_type_for_kind. Неизвестный → document (универсален во всех
+                # каналах), graceful — без 500 и без молчаливой потери вложения.
+                a_kind = a.get("kind") if a.get("kind") in ("photo", "document", "voice", "audio") else "document"
+                if a_kind != a.get("kind"):
+                    logging.getLogger(__name__).warning(
+                        "enqueue_manual_reply: неизвестный kind вложения %r → document", a.get("kind"))
                 await c.execute(
                     """
                     insert into outbox
@@ -685,7 +693,7 @@ async def enqueue_manual_reply(
                     values ($1, $2, $3, $4, null, 'queued', $5, $6, $7, $8,
                             (select tenant_id from leads where id = $1))
                     """,
-                    lead_id, tg, messenger, a["kind"], actor, a["bytes"], a["name"], a["mime"],
+                    lead_id, tg, messenger, a_kind, actor, a["bytes"], a["name"], a["mime"],
                 )
                 count += 1
             await _insert_audit(

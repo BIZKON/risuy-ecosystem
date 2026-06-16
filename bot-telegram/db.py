@@ -68,12 +68,25 @@ _CHANNEL_USER_COL = {"tg": "tg_user_id", "max": "max_user_id", "vk": "vk_user_id
 _CHANNEL_REPLY_COL = {"tg": "tg_user_id", "max": "max_chat_id", "vk": "vk_user_id"}
 
 
+# Фолбэк на tg_user_id для неизвестного messenger — намеренный (TG как дефолт-канал), НО он
+# молчаливый: новый канал, забытый в карте, тихо писал бы/читал TG-колонку → кросс-канальный
+# мисроут. Поэтому логируем неизвестный messenger (валидный ввод today — только tg/vk/max от
+# драйверов; строгая валидация значения messenger — на границе панели, _BROADCAST_MESSENGER_SET).
+def _resolve_channel_col(table_map: dict, messenger: str) -> str:
+    col = table_map.get(messenger)
+    if col is None:
+        logging.getLogger(__name__).warning(
+            "db: неизвестный messenger=%r → фолбэк tg_user_id (риск кросс-канального мисроута)", messenger)
+        return "tg_user_id"
+    return col
+
+
 def _user_col(messenger: str) -> str:
-    return _CHANNEL_USER_COL.get(messenger, "tg_user_id")
+    return _resolve_channel_col(_CHANNEL_USER_COL, messenger)
 
 
 def _reply_addr_col(messenger: str) -> str:
-    return _CHANNEL_REPLY_COL.get(messenger, "tg_user_id")
+    return _resolve_channel_col(_CHANNEL_REPLY_COL, messenger)
 
 
 async def upsert_start(tg_user_id: int, source: str, *, messenger: str = "tg") -> None:

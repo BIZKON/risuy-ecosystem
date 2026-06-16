@@ -73,6 +73,7 @@
       <select class="field__input" name="messenger">
         <option value="">Все</option>
         <option value="tg"  {% if filters.get('messenger') == 'tg' %}selected{% endif %}>Telegram</option>
+        <option value="vk"  {% if filters.get('messenger') == 'vk' %}selected{% endif %}>ВКонтакте</option>
         <option value="max" {% if filters.get('messenger') == 'max' %}selected{% endif %}>MAX</option>
       </select>
     </label>

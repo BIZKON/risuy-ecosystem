@@ -232,8 +232,12 @@ ERASE_AFTER_DAYS = _opt_int("ERASE_AFTER_DAYS", 30)      # срок обезли
 # --- Справочники (defence-in-depth; значения совпадают со схемой/ботом) ---
 # status валидируется против STATUSES в хендлере UPDATE (§2 плана).
 STATUSES = ("new", "guide_sent", "nurturing", "converted", "lost")
+# ⚠️ SOURCES — держать в синхроне с bot-telegram/handlers.py::VALID_SOURCES (бот валидирует
+# входящий source) и комментом-списком в db/schema.sql (колонка source). Новая площадка = ВСЕ три места.
 SOURCES = ("reels", "dzen", "youtube", "vk", "max", "other")
-MESSENGERS = ("tg", "max")
+# vk добавлен (C3: VK-канал активен) → бейдж/фильтр лидов знают VK. Синхрон с MESSENGER_LABELS ниже
+# и BROADCAST_MESSENGERS (db.py). Инвариант: каждый канал из BROADCAST_MESSENGERS имеет лейбл.
+MESSENGERS = ("tg", "vk", "max")
 
 # Человекочитаемые подписи для UI (бейджи, фильтры, дашборд).
 STATUS_LABELS = {
@@ -251,7 +255,7 @@ SOURCE_LABELS = {
     "max": "MAX",
     "other": "Другое",
 }
-MESSENGER_LABELS = {"tg": "Telegram", "max": "MAX"}
+MESSENGER_LABELS = {"tg": "Telegram", "vk": "ВКонтакте", "max": "MAX"}
 
 # ── Платежи / заказы (раздел «Платежи», schema_orders.sql) ───────────────────
 # Статусы заказа — синхронны CHECK orders_status_chk. Валюты переиспользуем из
