@@ -138,7 +138,11 @@ grant select on link_clicks to panel_rw;
 -- INSERT не включаем: id даёт sequence (default), created_at/updated_at — default+триггер;
 -- их явная запись панели не нужна. updated_at бампается trg_products_updated_at — не трогаем.
 grant select on products to panel_rw;
-grant insert (name, kind, price, currency, caption, link, file, file_name, file_mime, status, created_by)
+-- tenant_id — create_product_with_audit ИМЕНУЕТ его (Wave 3, фолбэк tenant сессии); migrate_w3_drop_default
+-- снял DEFAULT tenant_id с products → значение теперь пишет код. Без гранта INSERT падает «permission denied
+-- for column tenant_id» после переприменения роли (в проде маскируется широким arwd-грантом реконсиляции
+-- Timeweb DBaaS) — латентный гэп, чиним превентивно (чистое +право; как уже сделано для orders/service_invoices).
+grant insert (name, kind, price, currency, caption, link, file, file_name, file_mime, status, created_by, tenant_id)
     on products to panel_rw;
 -- upload_attempts/upload_error в UPDATE: панель СБРАСЫВАЕТ счётчик попыток заливки в 0
 -- при ЗАМЕНЕ/снятии файла офера (новый файл заслуживает свежий бюджет попыток; иначе
