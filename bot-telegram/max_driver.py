@@ -114,9 +114,10 @@ class MAXBot:
                 f"{MAX_API}/messages", params={"chat_id": int(chat_id)}, json=body) as r:
             return r.status, await r.text()
 
-    async def send(self, chat_id: int, text: str, *, attachments: list | None = None) -> None:
+    async def send(self, chat_id: int, text: str, *, attachments: list | None = None) -> bool:
         """POST /messages?chat_id=<id>. attachments — вложения MAX (inline_keyboard и т.п.).
-        НЕ бросает — ответ не должен ронять loop."""
+        НЕ бросает — ответ не должен ронять loop. Возвращает True при HTTP 200, иначе False —
+        воркер рассылки/outbox по False помечает failed/release; разговорный путь возврат игнорит."""
         import aiohttp
         body = {"text": text[:4000], "format": "html"}
         if attachments:
@@ -125,8 +126,11 @@ class MAXBot:
             status, txt = await self._post_message(chat_id, body)
             if status != 200:
                 logger.error("MAX messages HTTP %s: %s", status, txt[:200])
+                return False
+            return True
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("MAX send не удался (chat=%s): %s", chat_id, e)
+            return False
 
     async def upload_media(self, content: bytes, *, media_type: str, filename: str) -> dict:
         """Загрузка медиа MAX: POST /uploads?type=image|file → {url} → POST байтов на url → ответ
@@ -143,11 +147,12 @@ class MAXBot:
             return await r.json(content_type=None)
 
     async def send_media(self, chat_id: int, *, media_type: str, content: bytes, caption: str = "",
-                         filename: str = "file") -> None:
+                         filename: str = "file") -> bool:
         """Фото/файл MAX: upload_media → max_attachment → POST /messages. media_type: 'image'|'file'.
         Сразу после загрузки вложение может быть «ещё не готово» (attachment.not.ready) → ретраим
-        ОТПРАВКУ (без перезагрузки байтов). НЕ бросает. ⚠️ форма ответа upload-сервера MAX вживую
-        не проверена — при расхождении смотреть лог и поправить max_attachment."""
+        ОТПРАВКУ (без перезагрузки байтов). НЕ бросает. Возвращает True/False (успех) для ветвления
+        воркера. ⚠️ форма ответа upload-сервера MAX вживую не проверена — при расхождении смотреть
+        лог и поправить max_attachment."""
         import aiohttp
         try:
             up = await self.upload_media(content, media_type=media_type, filename=filename)
@@ -156,14 +161,16 @@ class MAXBot:
             for _ in range(_MEDIA_SEND_RETRIES):
                 status, txt = await self._post_message(chat_id, body)
                 if status == 200:
-                    return
+                    return True
                 if "attachment.not.ready" not in (txt or ""):
                     logger.error("MAX send_media HTTP %s: %s", status, txt[:200])
-                    return
+                    return False
                 await asyncio.sleep(_MEDIA_NOT_READY_PAUSE)
             logger.warning("MAX send_media: вложение не готово после ретраев (chat=%s)", chat_id)
+            return False
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("MAX send_media не удался (chat=%s): %s", chat_id, e)
+            return False
 
     async def send_keyboard(self, chat_id: int, text: str, buttons: list[dict]) -> None:
         """inline_keyboard с callback-кнопками: buttons=[{label, payload(dict)}], по кнопке на строку.

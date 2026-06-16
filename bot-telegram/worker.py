@@ -43,7 +43,9 @@ _PERMANENT = (TelegramForbiddenError, TelegramNotFound, TelegramBadRequest)
 _LINK_RE = re.compile(r"\{link\}")
 
 # C3: футер отписки для VK/MAX-рассылок (у каналов нет inline-кнопки «Отписаться» как в TG —
-# отписка по ключевому слову СТОП, обрабатывается в multiplex._vk_respond/_max_respond).
+# отписка по ключевому слову, обрабатывается в multiplex._vk_respond/_max_respond).
+# ⚠️ 152-ФЗ-ИНВАРИАНТ: слово, которое тут ИНСТРУКТИРУЕМ ответить (СТОП), ОБЯЗАНО входить в
+# multiplex._UNSUB_WORDS — иначе лид физически не сможет отписаться. Меняешь слово — синхронно там.
 _CHANNEL_UNSUB_FOOTER = "\n\n—\nЧтобы больше не получать рассылку, ответьте: СТОП"
 
 
@@ -181,19 +183,19 @@ async def _drain_outbox(bot: Bot) -> None:
 
 # ── OUTBOX каналов VK/MAX (C3): ответ оператора через живой канальный бот ──────
 async def _channel_send_media(cbot, messenger: str, addr: int, kind: str, text: str,
-                              content: bytes, filename: str) -> None:
+                              content: bytes, filename: str) -> bool:
     """Отправка медиа-вложения в VK/MAX через драйвер (байты напрямую — без TG file_id-стейджинга).
-    kind — photo|document|voice|audio (из строки outbox/рассылки)."""
+    kind — photo|document|voice|audio (из строки outbox/рассылки). Возвращает успех доставки (bool)."""
     import max_driver
     import vk_driver
     if messenger == "vk":
         if vk_driver.vk_media_type_for_kind(kind) == "photo":
-            await cbot.send_photo(addr, content, caption=text, filename=filename)
-        else:
-            await cbot.send_document(addr, content, filename=filename, caption=text)
-    elif messenger == "max":
-        await cbot.send_media(addr, media_type=max_driver.max_media_type_for_kind(kind),
-                              content=content, caption=text, filename=filename)
+            return await cbot.send_photo(addr, content, caption=text, filename=filename)
+        return await cbot.send_document(addr, content, filename=filename, caption=text)
+    if messenger == "max":
+        return await cbot.send_media(addr, media_type=max_driver.max_media_type_for_kind(kind),
+                                     content=content, caption=text, filename=filename)
+    return False
 
 
 async def _drain_outbox_channels() -> None:
@@ -226,10 +228,16 @@ async def _drain_outbox_channels() -> None:
             text = it.get("text") or ""
             raw = it.get("file_bytes")
             if kind == "text" or not raw:
-                await cbot.send(int(addr), text)
+                ok = await cbot.send(int(addr), text)
             else:
-                await _channel_send_media(cbot, messenger, int(addr), kind, text,
-                                          bytes(raw), it.get("file_name") or "file")
+                ok = await _channel_send_media(cbot, messenger, int(addr), kind, text,
+                                               bytes(raw), it.get("file_name") or "file")
+            if not ok:
+                # Драйвер сообщил о неуспехе (VK error-в-теле / MAX HTTP≠200 / сеть). НЕ помечаем 'sent'
+                # при недоставке — возвращаем в очередь (транзиент, потолок attempts → failed). #1 аудита.
+                await db.release_outbox(item_id, "канал: доставка не удалась",
+                                        config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS)
+                continue
             await db.mark_outbox_sent(item_id)
             # Зеркало операторского ответа в тред (source='manual'), как в TG-ветке.
             await db.log_message(tg_user_id=int(addr), messenger=messenger, direction="out",
@@ -600,13 +608,19 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
                 tg_message_id = getattr(sent, "message_id", None)
             else:
                 # VK/MAX: футер отписки (нет inline-кнопки как в TG); текст или медиа байтами.
-                # Драйверы fire-and-forget (не бросают) → best-effort, ретрая на канальный сбой нет.
+                # Драйверы НЕ бросают, но ВОЗВРАЩАЮТ успех (bool) → ветвим как TG (#1 аудита).
                 ch_text = text + _CHANNEL_UNSUB_FOOTER
                 if kind == "text" or not bc.get("_file_bytes"):
-                    await cbot.send(int(addr), ch_text)
+                    ok = await cbot.send(int(addr), ch_text)
                 else:
-                    await _channel_send_media(cbot, messenger, int(addr), kind, ch_text,
-                                              bc["_file_bytes"], bc.get("_file_name") or "file")
+                    ok = await _channel_send_media(cbot, messenger, int(addr), kind, ch_text,
+                                                   bc["_file_bytes"], bc.get("_file_name") or "file")
+                if not ok:
+                    # Недоставка (VK error / MAX HTTP≠200 / сеть). НЕ помечаем 'sent' — иначе статус
+                    # врёт и circuit-breaker слеп для каналов. Возврат в pending (транзиент, потолок
+                    # attempts → failed); доля failed снова осмысленна для _post_batch.
+                    await db.release_recipient(rid, "канал: доставка не удалась", config.MAX_SEND_ATTEMPTS)
+                    continue
                 tg_message_id = None
 
             await db.mark_recipient_sent(rid)

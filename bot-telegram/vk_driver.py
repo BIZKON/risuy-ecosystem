@@ -109,9 +109,11 @@ class VKBot:
         return lp["server"], lp["key"], str(lp["ts"])
 
     async def send(self, peer_id: int, text: str, *, keyboard: dict | None = None,
-                   attachment: str | None = None) -> None:
+                   attachment: str | None = None) -> bool:
         """messages.send (random_id ОБЯЗАТЕЛЕН и уникален). keyboard — VK-клавиатура (dict → JSON).
-        attachment — строка вложений ('photo<o>_<id>,doc<o>_<id>'). НЕ бросает — не роняет loop."""
+        attachment — строка вложений ('photo<o>_<id>,doc<o>_<id>'). НЕ бросает — не роняет loop.
+        Возвращает True при успешной отправке, False при ошибке (VK error-в-теле / сеть) — воркер
+        рассылки/outbox по False помечает доставку failed/release; разговорный путь возврат игнорит."""
         import aiohttp
         self._send_counter += 1
         rid = next_random_id(self._send_counter)
@@ -126,8 +128,11 @@ class VKBot:
                 data = await r.json()
             if "error" in data:
                 logger.error("VK messages.send error: %s", data["error"])
+                return False
+            return True
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("VK messages.send не удался (peer=%s): %s", peer_id, e)
+            return False
 
     async def _upload(self, upload_url: str, field: str, content: bytes, filename: str,
                       content_type: str) -> dict:
@@ -140,9 +145,10 @@ class VKBot:
             return await r.json(content_type=None)
 
     async def send_photo(self, peer_id: int, content: bytes, *, caption: str = "",
-                         filename: str = "photo.jpg") -> None:
+                         filename: str = "photo.jpg") -> bool:
         """Фото в ЛС: photos.getMessagesUploadServer(peer_id) → upload(поле 'photo') →
-        photos.saveMessagesPhoto → attachment 'photo<owner>_<id>' → messages.send. НЕ бросает."""
+        photos.saveMessagesPhoto → attachment 'photo<owner>_<id>' → messages.send. НЕ бросает.
+        Возвращает True/False (успех доставки) — для ветвления воркера."""
         import aiohttp
         try:
             up = await self._api("photos.getMessagesUploadServer", peer_id=int(peer_id))
@@ -150,14 +156,15 @@ class VKBot:
             saved = await self._api("photos.saveMessagesPhoto", photo=res["photo"],
                                     server=res["server"], hash=res["hash"])
             ph = saved[0]
-            await self.send(peer_id, caption, attachment=vk_attachment("photo", ph["owner_id"], ph["id"]))
+            return await self.send(peer_id, caption, attachment=vk_attachment("photo", ph["owner_id"], ph["id"]))
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("VK send_photo не удался (peer=%s): %s", peer_id, e)
+            return False
 
     async def send_document(self, peer_id: int, content: bytes, *, filename: str,
-                            caption: str = "") -> None:
+                            caption: str = "") -> bool:
         """Документ/файл в ЛС: docs.getMessagesUploadServer(type='doc',peer_id) → upload(поле 'file')
-        → docs.save → attachment 'doc<owner>_<id>' → messages.send. НЕ бросает."""
+        → docs.save → attachment 'doc<owner>_<id>' → messages.send. НЕ бросает. Возвращает True/False."""
         import aiohttp
         try:
             up = await self._api("docs.getMessagesUploadServer", type="doc", peer_id=int(peer_id))
@@ -165,9 +172,10 @@ class VKBot:
                                      "application/octet-stream")
             saved = await self._api("docs.save", file=res["file"], title=filename)
             doc = saved["doc"]
-            await self.send(peer_id, caption, attachment=vk_attachment("doc", doc["owner_id"], doc["id"]))
+            return await self.send(peer_id, caption, attachment=vk_attachment("doc", doc["owner_id"], doc["id"]))
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("VK send_document не удался (peer=%s): %s", peer_id, e)
+            return False
 
     async def send_keyboard(self, peer_id: int, text: str, buttons: list[dict]) -> None:
         """Inline-клавиатура: buttons=[{label, payload(dict)}], по кнопке на строку. text-кнопка с
