@@ -65,6 +65,18 @@ def vk_client_link(vk_user_id: int) -> tuple[str, str]:
     return f"https://vk.com/id{vk_user_id}", "Написать клиенту в ВКонтакте"
 
 
+def vk_attachment(media_type: str, owner_id: int, media_id: int) -> str:
+    """VK attachment-строка для messages.send: '<type><owner_id>_<media_id>' (owner_id сообщества
+    отрицательный). media_type: 'photo' | 'doc'. Несколько вложений — через запятую."""
+    return f"{media_type}{owner_id}_{media_id}"
+
+
+def vk_media_type_for_kind(kind: str) -> str:
+    """outbox/broadcast kind (photo|document|voice|audio) → VK media_type. Фото → photo;
+    всё прочее (документ/голос/аудио) → doc (VK шлёт их как документ-вложение)."""
+    return "photo" if kind == "photo" else "doc"
+
+
 # ── HTTP-клиент VK (aiohttp; импорт ленивый — модуль тестируем без aiohttp/сети) ──
 class VKError(Exception):
     pass
@@ -96,9 +108,10 @@ class VKBot:
         lp = await self._api("groups.getLongPollServer", group_id=self.group_id)
         return lp["server"], lp["key"], str(lp["ts"])
 
-    async def send(self, peer_id: int, text: str, *, keyboard: dict | None = None) -> None:
+    async def send(self, peer_id: int, text: str, *, keyboard: dict | None = None,
+                   attachment: str | None = None) -> None:
         """messages.send (random_id ОБЯЗАТЕЛЕН и уникален). keyboard — VK-клавиатура (dict → JSON).
-        НЕ бросает — ответ не должен ронять loop."""
+        attachment — строка вложений ('photo<o>_<id>,doc<o>_<id>'). НЕ бросает — не роняет loop."""
         import aiohttp
         self._send_counter += 1
         rid = next_random_id(self._send_counter)
@@ -107,12 +120,54 @@ class VKBot:
                       "access_token": self.token, "v": VK_API_VERSION}
             if keyboard is not None:
                 params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
+            if attachment:
+                params["attachment"] = attachment
             async with self._session.post(f"{VK_API}/messages.send", data=params) as r:
                 data = await r.json()
             if "error" in data:
                 logger.error("VK messages.send error: %s", data["error"])
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("VK messages.send не удался (peer=%s): %s", peer_id, e)
+
+    async def _upload(self, upload_url: str, field: str, content: bytes, filename: str,
+                      content_type: str) -> dict:
+        """Multipart-загрузка байтов на upload-сервер VK (он свежий на КАЖДЫЙ файл — берётся из
+        getMessagesUploadServer). upload-сервер отдаёт JSON иногда с text/plain → content_type=None."""
+        import aiohttp
+        form = aiohttp.FormData()
+        form.add_field(field, content, filename=filename, content_type=content_type)
+        async with self._session.post(upload_url, data=form) as r:
+            return await r.json(content_type=None)
+
+    async def send_photo(self, peer_id: int, content: bytes, *, caption: str = "",
+                         filename: str = "photo.jpg") -> None:
+        """Фото в ЛС: photos.getMessagesUploadServer(peer_id) → upload(поле 'photo') →
+        photos.saveMessagesPhoto → attachment 'photo<owner>_<id>' → messages.send. НЕ бросает."""
+        import aiohttp
+        try:
+            up = await self._api("photos.getMessagesUploadServer", peer_id=int(peer_id))
+            res = await self._upload(up["upload_url"], "photo", content, filename, "image/jpeg")
+            saved = await self._api("photos.saveMessagesPhoto", photo=res["photo"],
+                                    server=res["server"], hash=res["hash"])
+            ph = saved[0]
+            await self.send(peer_id, caption, attachment=vk_attachment("photo", ph["owner_id"], ph["id"]))
+        except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+            logger.warning("VK send_photo не удался (peer=%s): %s", peer_id, e)
+
+    async def send_document(self, peer_id: int, content: bytes, *, filename: str,
+                            caption: str = "") -> None:
+        """Документ/файл в ЛС: docs.getMessagesUploadServer(type='doc',peer_id) → upload(поле 'file')
+        → docs.save → attachment 'doc<owner>_<id>' → messages.send. НЕ бросает."""
+        import aiohttp
+        try:
+            up = await self._api("docs.getMessagesUploadServer", type="doc", peer_id=int(peer_id))
+            res = await self._upload(up["upload_url"], "file", content, filename,
+                                     "application/octet-stream")
+            saved = await self._api("docs.save", file=res["file"], title=filename)
+            doc = saved["doc"]
+            await self.send(peer_id, caption, attachment=vk_attachment("doc", doc["owner_id"], doc["id"]))
+        except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+            logger.warning("VK send_document не удался (peer=%s): %s", peer_id, e)
 
     async def send_keyboard(self, peer_id: int, text: str, buttons: list[dict]) -> None:
         """Inline-клавиатура: buttons=[{label, payload(dict)}], по кнопке на строку. text-кнопка с

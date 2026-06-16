@@ -42,6 +42,10 @@ _PERMANENT = (TelegramForbiddenError, TelegramNotFound, TelegramBadRequest)
 # Строгий поиск плейсхолдера трекинг-ссылки в шаблоне.
 _LINK_RE = re.compile(r"\{link\}")
 
+# C3: футер отписки для VK/MAX-рассылок (у каналов нет inline-кнопки «Отписаться» как в TG —
+# отписка по ключевому слову СТОП, обрабатывается в multiplex._vk_respond/_max_respond).
+_CHANNEL_UNSUB_FOOTER = "\n\n—\nЧтобы больше не получать рассылку, ответьте: СТОП"
+
 
 async def run(bot: Bot, interval: int | None = None) -> None:
     """Главный цикл воркера. interval по умолчанию из config.WORKER_INTERVAL."""
@@ -52,6 +56,7 @@ async def run(bot: Bot, interval: int | None = None) -> None:
             await _reclaim()
             await _drain_outbox_uploads(bot)  # байты вложения ответа → file_id (ДО отправки)
             await _drain_outbox(bot)
+            await _drain_outbox_channels()    # C3: ответы оператора в VK/MAX (живой канальный бот)
             await _drain_product_uploads(bot)
             await _run_broadcasts(bot)
         except Exception as e:  # noqa: BLE001 — цикл не должен падать
@@ -172,6 +177,69 @@ async def _drain_outbox(bot: Bot) -> None:
             await db.release_outbox(
                 item_id, str(e), config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS
             )
+
+
+# ── OUTBOX каналов VK/MAX (C3): ответ оператора через живой канальный бот ──────
+async def _channel_send_media(cbot, messenger: str, addr: int, kind: str, text: str,
+                              content: bytes, filename: str) -> None:
+    """Отправка медиа-вложения в VK/MAX через драйвер (байты напрямую — без TG file_id-стейджинга).
+    kind — photo|document|voice|audio (из строки outbox/рассылки)."""
+    import max_driver
+    import vk_driver
+    if messenger == "vk":
+        if vk_driver.vk_media_type_for_kind(kind) == "photo":
+            await cbot.send_photo(addr, content, caption=text, filename=filename)
+        else:
+            await cbot.send_document(addr, content, filename=filename, caption=text)
+    elif messenger == "max":
+        await cbot.send_media(addr, media_type=max_driver.max_media_type_for_kind(kind),
+                              content=content, caption=text, filename=filename)
+
+
+async def _drain_outbox_channels() -> None:
+    """C3: дренаж outbox для НЕ-tg каналов (vk/max). Отправка через ЖИВОЙ канальный бот тенанта
+    из реестра multiplex (тот же процесс) — текст или медиа байтами. TG-путь (_drain_outbox) не
+    трогаем. Канал не поднят / нет адреса → возврат в очередь / failed (как TG-ветка)."""
+    import multiplex  # лениво: исключить любой риск цикла импорта (общий процесс через bot.py)
+    items = await db.claim_outbox_channels(config.OUTBOX_BATCH)
+    for it in items:
+        item_id = it["id"]
+        messenger = it["messenger"]
+        tid = it["tenant_id"]
+        addr = it.get("reply_address")
+        ctx = db.current_tenant_id.set(tid)   # мультитенантно: лог/резолв в правильного тенанта
+        try:
+            if it.get("erase_requested_at") is not None:
+                await db.mark_outbox_failed(item_id, "erased")
+                continue
+            if not addr:
+                # vk: нет vk_user_id; max: ещё не знаем chat_id (лид не писал в личку) — слать некуда.
+                await db.mark_outbox_failed(item_id, "no_address")
+                continue
+            cbot = multiplex.get_channel_bot(tid, messenger)
+            if cbot is None:
+                # Канал не поднят (не настроен / только что рестарт) — вернуть в очередь, повторим.
+                await db.release_outbox(item_id, "channel bot offline",
+                                        config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS)
+                continue
+            kind = it.get("kind") or "text"
+            text = it.get("text") or ""
+            raw = it.get("file_bytes")
+            if kind == "text" or not raw:
+                await cbot.send(int(addr), text)
+            else:
+                await _channel_send_media(cbot, messenger, int(addr), kind, text,
+                                          bytes(raw), it.get("file_name") or "file")
+            await db.mark_outbox_sent(item_id)
+            # Зеркало операторского ответа в тред (source='manual'), как в TG-ветке.
+            await db.log_message(tg_user_id=int(addr), messenger=messenger, direction="out",
+                                 kind=kind, text=text, source="manual", lead_id=str(it["lead_id"]))
+        except Exception as e:  # noqa: BLE001 — транзиентная: вернуть в очередь с потолком
+            logger.warning("Outbox(%s) %s: %s → возврат в очередь", messenger, item_id, e)
+            await db.release_outbox(item_id, str(e), config.OUTBOX_MAX_ATTEMPTS,
+                                    config.OUTBOX_MAX_AGE_HOURS)
+        finally:
+            db.current_tenant_id.reset(ctx)
 
 
 # ── КАТАЛОГ ПРОДУКТОВ: однократная заливка файла офера в служебный чат ────────
@@ -354,7 +422,8 @@ async def _list_sending_broadcasts() -> list[dict]:
     async with db.pool.acquire() as c:
         rows = await c.fetch(
             """
-            select id, title, messenger, kind, body_template, recipient_count, product_id
+            select id, title, messenger, kind, body_template, recipient_count, product_id,
+                   tenant_id
             from broadcasts
             where status = 'sending'
             order by id
@@ -376,6 +445,16 @@ async def _ensure_file_ready(bot: Bot, bc: dict) -> bool:
     if fr is None:
         logger.error("Рассылка #%s: kind=%s, но broadcast_files пуст", bc["id"], kind)
         return False
+    # C3: VK/MAX — НЕ стейджим в OPS_CHAT (TG file_id неприменим). Шлём байты per-recipient
+    # канальным драйвером. bytes остаются в broadcast_files (set_broadcast_file_id для них не зовём).
+    if (bc.get("messenger") or "tg") != "tg":
+        content = fr.get("bytes")
+        if not content:
+            logger.error("Рассылка #%s (%s): bytes пусты, медиа недоступно", bc["id"], bc.get("messenger"))
+            return False
+        bc["_file_bytes"] = bytes(content)
+        bc["_file_name"] = fr.get("filename") or "file"
+        return True
     if fr.get("tg_file_id"):
         bc["_tg_file_id"] = fr["tg_file_id"]
         return True
@@ -448,6 +527,17 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
     if status not in ("sending",):
         return
 
+    # C3: канал рассылки. Для VK/MAX — берём ЖИВОЙ канальный бот тенанта из реестра multiplex.
+    # Если канал не поднят (не настроен / рестарт) — НЕ клеймим батч (не жжём attempts), ждём тик.
+    messenger = bc.get("messenger") or "tg"
+    cbot = None
+    if messenger != "tg":
+        import multiplex
+        cbot = multiplex.get_channel_bot(bc.get("tenant_id"), messenger)
+        if cbot is None:
+            logger.info("Рассылка #%s: канал %s не поднят — ждём", broadcast_id, messenger)
+            return
+
     batch = await db.claim_broadcast_recipients(broadcast_id, config.BROADCAST_BATCH)
     if not batch:
         # Получателей в pending не осталось → если и sending нет, финализируем.
@@ -480,11 +570,15 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
     for r in batch:
         rid = r["id"]
         lead_id = r["lead_id"]
-        chat_id = r["tg_user_id"]
+        # Адрес доставки: tg → tg_user_id; vk/max → reply_address (vk_user_id / max_chat_id).
+        addr = r["tg_user_id"] if messenger == "tg" else r.get("reply_address")
         try:
-            # TOCTOU re-check перед КАЖДЫМ send: отписался/erase/consent/перехват → skipped.
-            if not await db.recipient_recheck(lead_id):
+            # TOCTOU re-check перед КАЖДЫМ send (по адресу НУЖНОГО канала): отписка/erase/перехват.
+            if not await db.recipient_recheck(lead_id, messenger):
                 await db.mark_recipient_skipped(rid, "audience_changed")
+                continue
+            if not addr:
+                await db.mark_recipient_skipped(rid, "no_address")
                 continue
 
             text = template
@@ -496,24 +590,37 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
                 # {link} есть, но трекинг не настроен — убираем плейсхолдер, не шлём «{link}».
                 text = template.replace("{link}", "")
 
-            if kind == "text" or not tg_file_id:
-                sent = await messaging.raw_send_text(bot, chat_id, text, reply_markup=unsub_kb)
+            if messenger == "tg":
+                if kind == "text" or not tg_file_id:
+                    sent = await messaging.raw_send_text(bot, addr, text, reply_markup=unsub_kb)
+                else:
+                    sent = await messaging.raw_send_by_kind(
+                        bot, addr, kind, file_id=tg_file_id, caption=text, reply_markup=unsub_kb
+                    )
+                tg_message_id = getattr(sent, "message_id", None)
             else:
-                sent = await messaging.raw_send_by_kind(
-                    bot, chat_id, kind, file_id=tg_file_id, caption=text, reply_markup=unsub_kb
-                )
+                # VK/MAX: футер отписки (нет inline-кнопки как в TG); текст или медиа байтами.
+                # Драйверы fire-and-forget (не бросают) → best-effort, ретрая на канальный сбой нет.
+                ch_text = text + _CHANNEL_UNSUB_FOOTER
+                if kind == "text" or not bc.get("_file_bytes"):
+                    await cbot.send(int(addr), ch_text)
+                else:
+                    await _channel_send_media(cbot, messenger, int(addr), kind, ch_text,
+                                              bc["_file_bytes"], bc.get("_file_name") or "file")
+                tg_message_id = None
 
             await db.mark_recipient_sent(rid)
             # Зеркало в тред (source='broadcast').
             await db.log_message(
-                tg_user_id=chat_id,
+                tg_user_id=int(addr),
+                messenger=messenger,
                 direction="out",
                 kind=kind,
                 text=text,
-                file_id=tg_file_id,
+                file_id=(tg_file_id if messenger == "tg" else None),
                 source="broadcast",
                 lead_id=lead_id,
-                tg_message_id=getattr(sent, "message_id", None),
+                tg_message_id=tg_message_id,
             )
         except _PERMANENT as e:
             await db.mark_recipient_failed(rid, type(e).__name__)

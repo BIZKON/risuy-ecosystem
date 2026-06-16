@@ -2086,7 +2086,7 @@ async def kassa_disconnect(
 def _parse_audience(form) -> dict:
     """Собрать фильтр аудитории из формы композера (подмножество, не сырой SQL).
 
-    messenger ограничен tg (max — disabled-задел). source/status — против allow-list.
+    messenger ∈ db.BROADCAST_MESSENGERS (C3: tg/vk/max). source/status — против allow-list.
     exclude_unsubscribed — чекбокс, ВКЛ по умолчанию (приходит 'on'/отсутствует).
     """
     messenger = (form.get("messenger") or "tg").strip()

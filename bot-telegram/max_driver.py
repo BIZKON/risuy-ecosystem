@@ -19,6 +19,8 @@ MAX_API = "https://platform-api.max.ru"
 _LP_TIMEOUT = 30          # сек long-poll
 _HTTP_PAD = 15            # запас к таймауту HTTP-клиента
 _LP_LIMIT = 100
+_MEDIA_SEND_RETRIES = 4       # попыток POST /messages при attachment.not.ready
+_MEDIA_NOT_READY_PAUSE = 1.5  # сек паузы между ретраями отправки медиа
 
 
 def parse_message_created(update: dict) -> tuple[int, int, str] | None:
@@ -76,6 +78,26 @@ def max_client_link(max_user_id: int) -> tuple[str, str]:
     return "", f"Клиент в MAX (id {max_user_id}) — ответьте через панель"
 
 
+def max_media_type_for_kind(kind: str) -> str:
+    """outbox/broadcast kind (photo|document|voice|audio) → MAX upload-тип. Фото → image;
+    всё прочее → file."""
+    return "image" if kind == "photo" else "file"
+
+
+def max_attachment(media_type: str, upload_result: dict) -> dict:
+    """MAX-attachment из ответа upload-сервера. image: payload {photos:{...}} если сервер вернул
+    объект photos, иначе {token}; file/video: {token}. media_type: 'image' | 'file'.
+    ⚠️ Точная форма ответа upload-сервера MAX (image vs file) вживую не проверена — при расхождении
+    поправить здесь по реальному ответу (логируется в send_media)."""
+    ur = upload_result or {}
+    if media_type == "image":
+        photos = ur.get("photos")
+        if photos:
+            return {"type": "image", "payload": {"photos": photos}}
+        return {"type": "image", "payload": {"token": ur.get("token")}}
+    return {"type": "file", "payload": {"token": ur.get("token")}}
+
+
 class MAXBot:
     """Один бот MAX тенанта: long-poll приём + send. token — из vault тенанта (max_bot_token).
     on_message(user_id, chat_id, text) — async-колбэк пайплайна ответа."""
@@ -86,6 +108,12 @@ class MAXBot:
         self.on_callback = on_callback   # Слой C: нажатие inline-кнопки (покупка)
         self._session = None  # aiohttp.ClientSession
 
+    async def _post_message(self, chat_id: int, body: dict) -> tuple[int, str]:
+        """POST /messages?chat_id= с готовым телом. Возвращает (status, text). Бросает сетевые."""
+        async with self._session.post(
+                f"{MAX_API}/messages", params={"chat_id": int(chat_id)}, json=body) as r:
+            return r.status, await r.text()
+
     async def send(self, chat_id: int, text: str, *, attachments: list | None = None) -> None:
         """POST /messages?chat_id=<id>. attachments — вложения MAX (inline_keyboard и т.п.).
         НЕ бросает — ответ не должен ронять loop."""
@@ -94,13 +122,48 @@ class MAXBot:
         if attachments:
             body["attachments"] = attachments
         try:
-            async with self._session.post(
-                f"{MAX_API}/messages", params={"chat_id": int(chat_id)}, json=body,
-            ) as r:
-                if r.status != 200:
-                    logger.error("MAX messages HTTP %s: %s", r.status, (await r.text())[:200])
+            status, txt = await self._post_message(chat_id, body)
+            if status != 200:
+                logger.error("MAX messages HTTP %s: %s", status, txt[:200])
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
             logger.warning("MAX send не удался (chat=%s): %s", chat_id, e)
+
+    async def upload_media(self, content: bytes, *, media_type: str, filename: str) -> dict:
+        """Загрузка медиа MAX: POST /uploads?type=image|file → {url} → POST байтов на url → ответ
+        с токеном/photos. Возвращает СЫРОЙ ответ upload-сервера (парсится max_attachment).
+        media_type: 'image' | 'file'. Бросает при сбое."""
+        import aiohttp
+        async with self._session.post(f"{MAX_API}/uploads", params={"type": media_type}) as r:
+            url = (await r.json()).get("url")
+        if not url:
+            raise RuntimeError("MAX /uploads не вернул url")
+        form = aiohttp.FormData()
+        form.add_field("data", content, filename=filename, content_type="application/octet-stream")
+        async with self._session.post(url, data=form) as r:
+            return await r.json(content_type=None)
+
+    async def send_media(self, chat_id: int, *, media_type: str, content: bytes, caption: str = "",
+                         filename: str = "file") -> None:
+        """Фото/файл MAX: upload_media → max_attachment → POST /messages. media_type: 'image'|'file'.
+        Сразу после загрузки вложение может быть «ещё не готово» (attachment.not.ready) → ретраим
+        ОТПРАВКУ (без перезагрузки байтов). НЕ бросает. ⚠️ форма ответа upload-сервера MAX вживую
+        не проверена — при расхождении смотреть лог и поправить max_attachment."""
+        import aiohttp
+        try:
+            up = await self.upload_media(content, media_type=media_type, filename=filename)
+            att = max_attachment(media_type, up)
+            body = {"text": caption[:4000], "format": "html", "attachments": [att]}
+            for _ in range(_MEDIA_SEND_RETRIES):
+                status, txt = await self._post_message(chat_id, body)
+                if status == 200:
+                    return
+                if "attachment.not.ready" not in (txt or ""):
+                    logger.error("MAX send_media HTTP %s: %s", status, txt[:200])
+                    return
+                await asyncio.sleep(_MEDIA_NOT_READY_PAUSE)
+            logger.warning("MAX send_media: вложение не готово после ретраев (chat=%s)", chat_id)
+        except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+            logger.warning("MAX send_media не удался (chat=%s): %s", chat_id, e)
 
     async def send_keyboard(self, chat_id: int, text: str, buttons: list[dict]) -> None:
         """inline_keyboard с callback-кнопками: buttons=[{label, payload(dict)}], по кнопке на строку.

@@ -49,6 +49,31 @@ logger = logging.getLogger(__name__)
 _RELOAD_INTERVAL = 60          # период сверки реестра тенантов, сек
 _TENANT_GREETING = "Здравствуйте! 🌷 Я на связи — задайте свой вопрос."
 
+# C3: отписка от рассылок в VK/MAX по ключевому слову (у каналов нет inline-кнопки «Отписаться»
+# как в TG; футер рассылки просит ответить «СТОП»). Точное совпадение, без ведущего «/».
+_UNSUB_WORDS = {"стоп", "stop", "отписаться", "отписка", "отписать"}
+
+
+def _is_unsub(text: str | None) -> bool:
+    return (text or "").strip().lower().lstrip("/") in _UNSUB_WORDS
+
+# ── Реестр живых канальных ботов (Слой C3) ────────────────────────────────────
+# VK/MAX-боты живут ТОЛЬКО в этом процессе (long-poll-таски). worker.py (тот же процесс,
+# см. bot.py) берёт их отсюда для ИСХОДЯЩЕЙ доставки (ответ оператора / рассылка), чтобы НЕ
+# открывать второе подключение к API канала. Заполняются в run() (алиасятся как локали реконсайла).
+_running_vk: dict = {}    # tenant_id -> {"task", "bot": VKBot}
+_running_max: dict = {}   # tenant_id -> {"task", "bot": MAXBot}
+
+
+def get_channel_bot(tenant_id, messenger: str):
+    """Живой канальный бот тенанта для исходящей доставки (VKBot/MAXBot) или None, если канал
+    не поднят (не настроен / только что рестартнули). Воркер при None оставит строку в очереди."""
+    reg = _running_vk if messenger == "vk" else _running_max if messenger == "max" else None
+    if reg is None:
+        return None
+    h = reg.get(tenant_id)
+    return h["bot"] if h else None
+
 
 # ── Тенант-роутер (v1: только Лия) ───────────────────────────────────────────
 tenant_router = Router()
@@ -269,8 +294,11 @@ async def run(interval: int | None = None) -> None:
     interval = interval or _RELOAD_INTERVAL
     logger.info("Мультиплекс тенант-ботов запущен (сверка каждые %s c)", interval)
     running: dict = {}      # tenant_id -> {"task": Task, "bot": Bot}    (Telegram)
-    running_vk: dict = {}   # tenant_id -> {"task": Task, "bot": VKBot}  (Слой C: ВКонтакте)
-    running_max: dict = {}  # tenant_id -> {"task": Task, "bot": MAXBot} (Слой C: MAX)
+    # VK/MAX-реестры — МОДУЛЬНЫЕ (доступны worker.get_channel_bot для исходящей доставки C3).
+    running_vk = _running_vk    # tenant_id -> {"task": Task, "bot": VKBot}  (Слой C: ВКонтакте)
+    running_max = _running_max  # tenant_id -> {"task": Task, "bot": MAXBot} (Слой C: MAX)
+    running_vk.clear()
+    running_max.clear()
     try:
         while True:
             try:
@@ -386,6 +414,12 @@ async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, p
     token = db.current_tenant_id.set(tenant_id)
     try:
         await db.upsert_start(from_id, source="vk", messenger="vk")
+        # C3: отписка от рассылок по слову «СТОП» (футер VK/MAX-рассылки). До продаж/Лии.
+        if _is_unsub(text):
+            await db.log_message(tg_user_id=from_id, messenger="vk", direction="in", text=text)
+            await db.set_unsubscribed(from_id, messenger="vk")
+            await vkbot.send(peer_id, texts.UNSUBSCRIBED_OK)
+            return
         # Слой C: продажи — по кнопке (payload) или слову-триггеру; независимо от тумблера Лии.
         sell = selling.selling_command(text, payload)
         if sell is not None:
@@ -530,6 +564,7 @@ async def _max_callback(maxbot, tenant_id, user_id: int, chat_id: int, payload, 
     token = db.current_tenant_id.set(tenant_id)
     try:
         await db.upsert_start(user_id, source="max", messenger="max")
+        await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
         sell = selling.selling_command(None, payload)
         if sell is not None and sell[0] == "buy":
             pay_url, product = await _make_pay_url("max", user_id, sell[1], "https://max.ru")
@@ -548,6 +583,13 @@ async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str)
     token = db.current_tenant_id.set(tenant_id)
     try:
         await db.upsert_start(user_id, source="max", messenger="max")
+        await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
+        # C3: отписка от рассылок по слову «СТОП» (футер VK/MAX-рассылки). До продаж/Лии.
+        if _is_unsub(text):
+            await db.log_message(tg_user_id=user_id, messenger="max", direction="in", text=text)
+            await db.set_unsubscribed(user_id, messenger="max")
+            await maxbot.send(chat_id, texts.UNSUBSCRIBED_OK)
+            return
         # Слой C: витрина по слову-триггеру (покупка — кнопкой → message_callback → _max_callback).
         sell = selling.selling_command(text, None)
         if sell is not None and sell[0] == "shop":

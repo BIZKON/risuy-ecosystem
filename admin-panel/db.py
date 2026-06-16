@@ -340,8 +340,12 @@ async def get_lead(lead_id) -> asyncpg.Record | None:
                phone is not null and phone <> '' as has_phone,
                phone_hash, consent, subscribed, status,
                guide_sent_at, follow_up_1_at, follow_up_2_at, follow_up_3_at,
-               tg_user_id, max_user_id, notes, survey, erase_requested_at,
-               bot_paused, unsubscribed_at, ai_persona
+               tg_user_id, max_user_id, vk_user_id, max_chat_id, notes, survey,
+               erase_requested_at, bot_paused, unsubscribed_at, ai_persona,
+               -- C3: можно ли ответить лиду в его канале (есть адрес доставки)?
+               (case messenger when 'tg' then tg_user_id
+                               when 'vk' then vk_user_id
+                               when 'max' then max_chat_id end) is not null as can_reply
         from leads
         where id = $1
     """
@@ -646,32 +650,42 @@ async def enqueue_manual_reply(
         return None
     async with pool.acquire() as c:
         async with c.transaction():
+            # C3: канал лида определяет адрес доставки. tg → tg_user_id (как было); vk → vk_user_id;
+            # max → max_chat_id (адрес ответа в личке). Нет адреса в канале лида → не ставим
+            # (бот всё равно не доставит). outbox.messenger → канальный дренаж воркера.
             lead = await c.fetchrow(
-                "select tg_user_id from leads where id = $1 for update", lead_id
+                "select messenger, tg_user_id, vk_user_id, max_chat_id "
+                "from leads where id = $1 for update",
+                lead_id,
             )
-            if lead is None or lead["tg_user_id"] is None:
-                return None  # нет лида/адреса → ничего не ставим (бот всё равно не отправит)
-            tg = lead["tg_user_id"]
+            if lead is None:
+                return None
+            messenger = lead["messenger"] or "tg"
+            addr = {"tg": lead["tg_user_id"], "vk": lead["vk_user_id"],
+                    "max": lead["max_chat_id"]}.get(messenger)
+            if addr is None:
+                return None  # нет адреса в канале лида → ничего не ставим
+            tg = lead["tg_user_id"] if messenger == "tg" else None  # tg_user_id только для tg
             count = 0
             if text:
                 await c.execute(
-                    "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by, "
-                    "                    tenant_id) "
-                    "values ($1, $2, 'text', $3, 'queued', $4, "
+                    "insert into outbox (lead_id, tg_user_id, messenger, kind, text, status, "
+                    "                    created_by, tenant_id) "
+                    "values ($1, $2, $3, 'text', $4, 'queued', $5, "
                     "        (select tenant_id from leads where id = $1))",
-                    lead_id, tg, text, actor,
+                    lead_id, tg, messenger, text, actor,
                 )
                 count += 1
             for a in attachments:
                 await c.execute(
                     """
                     insert into outbox
-                        (lead_id, tg_user_id, kind, text, status, created_by,
+                        (lead_id, tg_user_id, messenger, kind, text, status, created_by,
                          file_bytes, file_name, file_mime, tenant_id)
-                    values ($1, $2, $3, null, 'queued', $4, $5, $6, $7,
+                    values ($1, $2, $3, $4, null, 'queued', $5, $6, $7, $8,
                             (select tenant_id from leads where id = $1))
                     """,
-                    lead_id, tg, a["kind"], actor, a["bytes"], a["name"], a["mime"],
+                    lead_id, tg, messenger, a["kind"], actor, a["bytes"], a["name"], a["mime"],
                 )
                 count += 1
             await _insert_audit(
@@ -692,9 +706,12 @@ async def enqueue_manual_reply(
 # даёт предпросмотр количества тем же фильтром, что бот возьмёт как snapshot-базу.
 # =========================================================================== #
 
-# Канон значений messenger рассылки. tg активна; max — disabled-задел (план §11.4).
-BROADCAST_MESSENGERS: tuple[str, ...] = ("tg",)            # реально отправляемые
+# Канон значений messenger рассылки. C3: tg/vk/max активны (доставка — канальными драйверами
+# через реестр multiplex; для vk/max нужен поднятый канал тенанта). Адрес-колонка по каналу — ниже.
+BROADCAST_MESSENGERS: tuple[str, ...] = ("tg", "vk", "max")  # реально отправляемые
 _BROADCAST_MESSENGER_SET = frozenset(BROADCAST_MESSENGERS)
+# Колонка адреса доставки по каналу (зеркало bot-telegram/db.py::_CHANNEL_REPLY_COL).
+_BROADCAST_REPLY_COL = {"tg": "tg_user_id", "vk": "vk_user_id", "max": "max_chat_id"}
 BROADCAST_STATUSES: tuple[str, ...] = (
     "draft", "queued", "sending", "paused", "done", "canceled",
 )
@@ -718,9 +735,15 @@ def _broadcast_audience_where(
     опц. исключение отписанных (exclude_unsubscribed, вкл. по умолчанию). Значения через
     allow-list+$-плейсхолдеры. Возвращает (where_sql, params, next_idx).
     """
+    # C3: канал аудитории из фильтра (tg по умолчанию). Адрес-колонка по каналу — зеркало
+    # bot-telegram/db.py::_audience_where(messenger). Для tg ядро ПОБАЙТОВО прежнее.
+    messenger = audience.get("messenger")
+    if messenger not in _BROADCAST_MESSENGER_SET:
+        messenger = "tg"
+    addr_col = _BROADCAST_REPLY_COL[messenger]
     clauses: list[str] = [
-        "messenger = 'tg'",
-        "tg_user_id is not null",
+        f"messenger = '{messenger}'",
+        f"{addr_col} is not null",
         "consent = true",
         "erase_requested_at is null",
         "bot_paused = false",

@@ -62,9 +62,18 @@ async def close() -> None:
 # Telegram-путь не меняется (messenger='tg' → tg_user_id, как было).
 _CHANNEL_USER_COL = {"tg": "tg_user_id", "max": "max_user_id", "vk": "vk_user_id"}
 
+# Колонка АДРЕСА ОТВЕТА (куда слать исходящее) по каналу. Для tg/vk совпадает с идентичностью
+# (peer_id == user_id в личке VK); для MAX — отдельный max_chat_id (recipient.chat_id ≠ user_id
+# в личке, персистится при входящем). C3: исходящая доставка адресуется этой колонкой.
+_CHANNEL_REPLY_COL = {"tg": "tg_user_id", "max": "max_chat_id", "vk": "vk_user_id"}
+
 
 def _user_col(messenger: str) -> str:
     return _CHANNEL_USER_COL.get(messenger, "tg_user_id")
+
+
+def _reply_addr_col(messenger: str) -> str:
+    return _CHANNEL_REPLY_COL.get(messenger, "tg_user_id")
 
 
 async def upsert_start(tg_user_id: int, source: str, *, messenger: str = "tg") -> None:
@@ -265,13 +274,16 @@ async def is_bot_paused(tg_user_id: int, *, messenger: str = "tg") -> bool:
 
 
 # ── Отписка (152-ФЗ) ─────────────────────────────────────────────────────────
-async def set_unsubscribed(tg_user_id: int) -> None:
-    """Идемпотентная отписка: первый момент фиксируем, повторный /stop не перетирает."""
+async def set_unsubscribed(external_id: int, messenger: str = "tg") -> None:
+    """Идемпотентная отписка: первый момент фиксируем, повторный /stop не перетирает.
+    messenger — канал (C3: vk/max отписываются ключевым словом «стоп»). external_id — id лида
+    В КАНАЛЕ (tg→tg_user_id, vk→vk_user_id, max→max_user_id)."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         await c.execute(
-            "update leads set unsubscribed_at = coalesce(unsubscribed_at, now()) "
-            "where tg_user_id = $1 and tenant_id = $2",
-            tg_user_id, tenant_id(),
+            f"update leads set unsubscribed_at = coalesce(unsubscribed_at, now()) "
+            f"where {col} = $1 and tenant_id = $2",
+            external_id, tenant_id(),
         )
 
 
@@ -340,7 +352,7 @@ async def claim_outbox(limit: int) -> list[dict]:
             update outbox set status = 'sending', attempts = attempts + 1, claimed_at = now()
             where id in (
                 select id from outbox
-                where status = 'queued'
+                where status = 'queued' and messenger = 'tg'
                 order by id
                 limit $1
                 for update skip locked
@@ -350,6 +362,54 @@ async def claim_outbox(limit: int) -> list[dict]:
             limit,
         )
     return [dict(r) for r in rows]
+
+
+async def claim_outbox_channels(limit: int) -> list[dict]:
+    """C3: дренаж outbox для НЕ-tg каналов (vk/max) — отдельная очередь (TG-путь не трогаем).
+    Резолвит адрес ответа из leads (vk→vk_user_id, max→max_chat_id) и erase-флаг в одной tx.
+    file_bytes для медиа отдаём как есть (для vk/max шлём байты напрямую, без OPS_CHAT-стейджинга).
+    Возвращает строки с messenger/reply_address/tenant_id + байты вложения."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            with claimed as (
+                update outbox set status = 'sending', attempts = attempts + 1, claimed_at = now()
+                where id in (
+                    select id from outbox
+                    where status = 'queued' and messenger <> 'tg'
+                    order by id
+                    limit $1
+                    for update skip locked
+                )
+                returning id, lead_id, messenger, kind, text, file_bytes, file_name, file_mime,
+                          attempts, created_at, tenant_id
+            )
+            select c.*,
+                   case c.messenger when 'vk' then l.vk_user_id
+                                    when 'max' then l.max_chat_id end as reply_address,
+                   l.erase_requested_at
+            from claimed c
+            join leads l on l.id = c.lead_id
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def note_max_chat_id(max_user_id: int, chat_id: int) -> None:
+    """C3: персистит адрес ответа MAX (recipient.chat_id ≠ user_id в личке) на лиде тенанта.
+    Пишется при ВХОДЯЩЕМ (multiplex). Без него панель/воркер не смогли бы ответить в личку MAX.
+    НЕ бросает — приём сообщения важнее. tenant_id из контекста таски канала."""
+    if not chat_id:
+        return
+    try:
+        async with pool.acquire() as c:
+            await c.execute(
+                "update leads set max_chat_id = $2 where max_user_id = $1 and tenant_id = $3",
+                max_user_id, chat_id, tenant_id(),
+            )
+    except Exception:  # noqa: BLE001 — адрес ответа не критичен к приёму входящего
+        logging.getLogger(__name__).warning("note_max_chat_id не записан (user=%s)", max_user_id)
 
 
 async def outbox_recheck_address(tg_user_id: int) -> str | None:
@@ -422,10 +482,18 @@ async def reclaim_stuck_outbox(after_seconds: int) -> int:
 # ── РАССЫЛКИ: подхват заявок, материализация, claim, статусы ─────────────────
 # Жёсткий, неотменяемый фильтр «кому МОЖНО писать» (§5.1). Применяется И при
 # материализации, И повторно перед КАЖДЫМ send. Бот не доверяет панели.
-_AUDIENCE_WHERE = (
-    "messenger = 'tg' and tg_user_id is not null and consent = true "
-    "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false"
-)
+def _audience_where(messenger: str = "tg") -> str:
+    """Неотменяемый WHERE «кому можно слать» рассылку для КАНАЛА (§5.2). messenger — из белого
+    списка (валидируется панелью/драйверами), не пользовательский ввод → безопасная f-string.
+    Адрес-колонка по каналу: tg→tg_user_id, vk→vk_user_id, max→max_chat_id (адрес ответа).
+    ⚠️ ДОЛЖНО побайтово совпадать с admin-panel/db.py::_broadcast_audience_where(messenger)."""
+    addr = _reply_addr_col(messenger)
+    return (f"messenger = '{messenger}' and {addr} is not null and consent = true "
+            "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false")
+
+
+# tg-вариант как константа (обратная совместимость; для tg строка идентична прежней).
+_AUDIENCE_WHERE = _audience_where("tg")
 
 
 async def claim_broadcast_to_send() -> dict | None:
@@ -439,7 +507,8 @@ async def claim_broadcast_to_send() -> dict | None:
         async with c.transaction():
             row = await c.fetchrow(
                 """
-                select id, title, messenger, kind, body_template, recipient_count, product_id
+                select id, title, messenger, kind, body_template, recipient_count, product_id,
+                       tenant_id
                 from broadcasts
                 where status = 'queued' and recipient_count is not null
                   and tenant_id = $1
@@ -468,16 +537,34 @@ async def materialize_recipients(broadcast_id: int) -> int:
     """
     # tenant-скоуп: адресаты — ТОЛЬКО лиды тенанта рассылки (бот=owner → RLS на leads его
     # не ограничивает; без этого фильтра рассылка одного клиента ушла бы лидам всех тенантов).
-    q = f"""
-        insert into broadcast_recipients (broadcast_id, lead_id, tg_user_id, tenant_id)
-        select $1, id, tg_user_id,
-               (select tenant_id from broadcasts where id = $1)
-        from leads
-        where {_AUDIENCE_WHERE}
-          and tenant_id = (select tenant_id from broadcasts where id = $1)
-        on conflict (broadcast_id, lead_id) do nothing
-    """
+    # C3: канал рассылки задаёт колонку адреса и WHERE. tg-путь без изменений (адрес=tg_user_id);
+    # vk/max — денорм messenger + reply_address (vk_user_id / max_chat_id).
     async with pool.acquire() as c:
+        messenger = await c.fetchval(
+            "select messenger from broadcasts where id = $1", broadcast_id) or "tg"
+        where = _audience_where(messenger)
+        if messenger == "tg":
+            q = f"""
+                insert into broadcast_recipients (broadcast_id, lead_id, tg_user_id, tenant_id)
+                select $1, id, tg_user_id,
+                       (select tenant_id from broadcasts where id = $1)
+                from leads
+                where {where}
+                  and tenant_id = (select tenant_id from broadcasts where id = $1)
+                on conflict (broadcast_id, lead_id) do nothing
+            """
+        else:
+            addr = _reply_addr_col(messenger)
+            q = f"""
+                insert into broadcast_recipients
+                    (broadcast_id, lead_id, reply_address, messenger, tenant_id)
+                select $1, id, {addr}, '{messenger}',
+                       (select tenant_id from broadcasts where id = $1)
+                from leads
+                where {where}
+                  and tenant_id = (select tenant_id from broadcasts where id = $1)
+                on conflict (broadcast_id, lead_id) do nothing
+            """
         await c.execute(q, broadcast_id)
         cnt = await c.fetchval(
             "select count(*) from broadcast_recipients where broadcast_id = $1", broadcast_id
@@ -509,19 +596,20 @@ async def claim_broadcast_recipients(broadcast_id: int, limit: int) -> list[dict
                 limit $2
                 for update skip locked
             )
-            returning id, lead_id, tg_user_id, click_token, attempts
+            returning id, lead_id, tg_user_id, reply_address, messenger, click_token, attempts
             """,
             broadcast_id, limit,
         )
     return [dict(r) for r in rows]
 
 
-async def recipient_recheck(lead_id: str) -> bool:
+async def recipient_recheck(lead_id: str, messenger: str = "tg") -> bool:
     """TOCTOU re-check перед КАЖДЫМ send (§5.1): все 4+1 условия ещё держатся?
 
     True = слать можно. False = отписался/erase/consent отозван/перехват → skipped.
+    messenger — канал рассылки (для проверки адреса нужного канала; tg по умолчанию).
     """
-    q = f"select 1 from leads where id = $1 and {_AUDIENCE_WHERE}"
+    q = f"select 1 from leads where id = $1 and {_audience_where(messenger)}"
     async with pool.acquire() as c:
         return await c.fetchval(q, lead_id) is not None
 
@@ -829,6 +917,7 @@ async def list_outbox_pending_upload(limit: int, max_attempts: int) -> list[dict
             select id, kind, file_bytes, file_name, file_mime, upload_attempts
             from outbox
             where file_bytes is not null and file_id is null
+              and messenger = 'tg'
               and upload_attempts < $2
             order by id
             limit $1

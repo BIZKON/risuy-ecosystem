@@ -69,8 +69,10 @@
           <span class="field__label">Мессенджер</span>
           <select class="field__input" name="messenger">
             <option value="tg" selected>Telegram</option>
-            {# MAX — задел: канал ещё не подключён к отправке, выбор отключён. #}
-            <option value="max" disabled>MAX (скоро)</option>
+            {# C3: VK/MAX-доставка — канальными драйверами через реестр multiplex (нужен поднятый
+               канал тенанта: токены в разделе «Каналы»/«Ключи»). #}
+            <option value="vk">ВКонтакте</option>
+            <option value="max">MAX</option>
           </select>
         </label>
 
@@ -104,7 +106,7 @@
           <span class="estimate__num">{{ estimate }}</span>
           <span class="estimate__hint">получателей (оценка по текущей базе; точный список бот возьмёт при запуске)</span>
         </div>
-        <p class="hint hint--block">Бот всё равно отправит только тем, у кого есть согласие и Telegram-адрес и кто не отозвал согласие — даже если фильтр шире.</p>
+        <p class="hint hint--block">Бот всё равно отправит только тем, у кого есть согласие и адрес в выбранном канале и кто не отозвал согласие — даже если фильтр шире.</p>
       </section>
 
       {# ── Прикрепить продукт из каталога (опц.). Привязка в broadcasts.product_id. ── #}

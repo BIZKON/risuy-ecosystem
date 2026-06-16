@@ -21,7 +21,7 @@
 
 {# Ручной ответ → outbox 'queued' (НЕ прямой Telegram). Реально шлёт бот.
    multipart: текст и/или НЕСКОЛЬКО вложений (файлы + голос). #}
-{% if lead.tg_user_id is not none %}
+{% if lead.can_reply %}
 <form class="composer-form" method="post" action="/leads/{{ lead.id }}/reply"
       enctype="multipart/form-data" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -53,7 +53,7 @@
     {# required снят: допустим ответ-вложение без текста (файл/голос). rows=1 + авто-рост в reply.js. #}
     <textarea class="composer__input" name="text" id="reply-text" rows="1"
               maxlength="{{ msg_max|default(4096, true) }}"
-              placeholder="Написать клиенту в Telegram…"></textarea>
+              placeholder="Написать клиенту…"></textarea>
 
     <button class="composer__send" type="submit" title="Отправить" aria-label="Отправить">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
@@ -96,5 +96,5 @@
 </form>
 {% endif %}
 {% else %}
-<p class="hint hint--block muted">У лида нет Telegram-адреса — написать нельзя.</p>
+<p class="hint hint--block muted">У лида пока нет адреса в его канале — написать нельзя (он ещё не писал боту).</p>
 {% endif %}
