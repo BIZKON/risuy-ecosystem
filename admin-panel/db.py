@@ -739,9 +739,10 @@ def _broadcast_audience_where(
     включая bot_paused=false (план §11.2, решение владельца ДА — промо не идёт поверх
     живого ручного диалога). Иначе предпросмотр/cap-гейт/recipient_count считаются по
     суперсету, а бот разошлёт МЕНЬШЕ — «точное число» при превышении лимита и аудит
-    разъезжаются с реальностью. Поверх ядра — операторские сужения (source/status) и
-    опц. исключение отписанных (exclude_unsubscribed, вкл. по умолчанию). Значения через
-    allow-list+$-плейсхолдеры. Возвращает (where_sql, params, next_idx).
+    разъезжаются с реальностью. ⚠️ unsubscribed_at is null теперь В ЯДРЕ ВСЕГДА (порядок клауз ==
+    bot _audience_where; решение владельца) → предпросмотр/recipient_count == реальной доставке.
+    Поверх ядра — операторские сужения (source/status). Значения через allow-list+$-плейсхолдеры.
+    Возвращает (where_sql, params, next_idx).
     """
     # C3: канал аудитории из фильтра (tg по умолчанию). Адрес-колонка по каналу — зеркало
     # bot-telegram/db.py::_audience_where(messenger). Для tg ядро ПОБАЙТОВО прежнее.
@@ -749,10 +750,14 @@ def _broadcast_audience_where(
     if messenger not in _BROADCAST_MESSENGER_SET:
         messenger = "tg"
     addr_col = _BROADCAST_REPLY_COL[messenger]
+    # ⚠️ ЯДРО ПОБАЙТОВО == bot-telegram/db.py::_audience_where(messenger): тот же порядок клауз,
+    # unsubscribed_at is null В ЯДРЕ ВСЕГДА (решение владельца — бот всё равно режет отписанных,
+    # теперь предпросмотр/recipient_count/cap совпадают с реальной доставкой). Golden-smoke сверяет.
     clauses: list[str] = [
         f"messenger = '{messenger}'",
         f"{addr_col} is not null",
         "consent = true",
+        "unsubscribed_at is null",
         "erase_requested_at is null",
         "bot_paused = false",
     ]
@@ -772,12 +777,8 @@ def _broadcast_audience_where(
     if status is not None and status in _STATUS_SET:
         add("status = ${i}", status)
 
-    # Исключить отписанных (по умолчанию True). Если оператор снимет — отписанные
-    # всё равно НЕ получат: бот режет unsubscribed на своей стороне (§5.1). Здесь —
-    # лишь честный предпросмотр и snapshot-база.
-    if audience.get("exclude_unsubscribed", True):
-        clauses.append("unsubscribed_at is null")
-
+    # unsubscribed_at — теперь в ЯДРЕ (выше), всегда. Тумблер exclude_unsubscribed больше НЕ влияет
+    # на WHERE (бот в любом случае режет отписанных); оставлен в audience лишь для совместимости/аудита.
     return " and ".join(clauses), params, i
 
 

@@ -96,10 +96,9 @@
           </select>
         </label>
 
-        <label class="field field--check">
-          <input type="checkbox" name="exclude_unsubscribed" value="1" checked>
-          <span>Исключить отписавшихся <span class="field__hint">(рекомендуется)</span></span>
-        </label>
+        {# Отписавшиеся исключаются ВСЕГДА (152-ФЗ; в ядре audience-WHERE и бота, и панели) —
+           отдельный тумблер убран как вводящий в заблуждение (он был no-op: бот всё равно режет). #}
+        <p class="hint hint--block">Отписавшиеся в рассылку не попадают — исключаются всегда (152-ФЗ).</p>
 
         <div class="estimate">
           <span class="estimate__label">Сейчас под условия подходит:</span>
