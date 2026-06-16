@@ -2603,7 +2603,7 @@ async def set_order_status_with_audit(
     async with pool.acquire() as c:
         async with c.transaction():
             old = await c.fetchrow(
-                "select status from orders where id = $1 for update", order_id
+                "select status, lead_id, tenant_id from orders where id = $1 for update", order_id
             )
             if old is None:
                 return None
@@ -2617,24 +2617,80 @@ async def set_order_status_with_audit(
                 """,
                 new_status, order_id,
             )
+            # #10: единый путь к 'paid'. Ручной перевод оператором ТОЖЕ конвертит лида (как вебхук
+            # mark_order_paid_by_payment) — иначе при офлайн-оплате лид навсегда без конверсии (гонка).
+            # «Спасибо» здесь НЕ шлём: ручной статус ≠ онлайн-оплата (лид мог заплатить вне бота),
+            # авто-сообщение было бы неожиданным. orders НЕ под RLS, leads под RLS → ставим app.tenant_id
+            # из заказа явно (как в вебхук-ветке), иначе конвертация отвергнется (0 строк).
+            converted = False
+            if new_status == "paid" and old["status"] != "paid" and old["lead_id"] is not None:
+                await c.execute("select set_config('app.tenant_id', $1, true)", str(old["tenant_id"]))
+                await c.execute("update leads set status = 'converted' where id = $1", old["lead_id"])
+                converted = True
             await _insert_audit(
                 c, actor=actor, action="order_status", ip=ip, user_agent=user_agent,
                 detail={"order_id": str(order_id),
-                        "status": {"old": old["status"], "new": new_status}},
+                        "status": {"old": old["status"], "new": new_status},
+                        "lead_converted": converted},
             )
             return row
 
 
 # ── Phase 1B: онлайн-оплата продаж школы (вебхук + «счёт из диалога») ─────────
 
-async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
-    """Отметить ЗАКАЗ оплаченным по id платёжа ЮKassa (вебхук-ветка заказов). Идемпотентно;
-    None — заказа с таким provider_payment_id нет (значит платёж не наш / уже не матчится).
+async def _apply_order_paid(c, row, payment_id: str) -> asyncpg.Record:
+    """Общее ядро «заказ оплачен» (в ОТКРЫТОЙ транзакции c): orders.paid (+paid_at, +бэкфилл
+    provider_payment_id) → лид 'converted' → «спасибо» В КАНАЛ лида через outbox (доставит бот) →
+    аудит. Идемпотентно по status. row: (id, lead_id, status, tenant_id). Используется обеими
+    ветками матча вебхука (by_payment / by_order_id, #9) — единый источник логики оплаты."""
+    if row["status"] == "paid":
+        return row  # повторный вебхук / двойной матч — no-op
+    # Вебхук без сессии → centralized-хук app.tenant_id не поставил. orders не под RLS, тенант берём
+    # из заказа (== тенант лида) и ставим ЯВНО — иначе RLS на leads/outbox отверг бы конвертацию.
+    await c.execute("select set_config('app.tenant_id', $1, true)", str(row["tenant_id"]))
+    upd = await c.fetchrow(
+        """
+        update orders
+        set status = 'paid', paid_at = coalesce(paid_at, now()),
+            provider_payment_id = coalesce(provider_payment_id, $2)
+        where id = $1
+        returning id, lead_id, product_id, amount, currency
+        """,
+        row["id"], payment_id,
+    )
+    lead = None
+    if upd["lead_id"] is not None:
+        lead = await c.fetchrow(
+            "update leads set status = 'converted' where id = $1 "
+            "returning messenger, tg_user_id, vk_user_id, max_chat_id",
+            upd["lead_id"],
+        )
+        if lead is not None:
+            # #31: «спасибо» в КАНАЛ лида (vk/max-покупатель тоже получит). messenger в outbox →
+            # канальный дренаж воркера; для vk/max tg_user_id=NULL, адрес резолвит воркер из leads.
+            m = lead["messenger"] or "tg"
+            addr = {"tg": lead["tg_user_id"], "vk": lead["vk_user_id"],
+                    "max": lead["max_chat_id"]}.get(m)
+            if addr is not None:
+                await c.execute(
+                    "insert into outbox (lead_id, tg_user_id, messenger, kind, text, status, "
+                    "                    created_by, tenant_id) "
+                    "values ($1, $2, $3, 'text', $4, 'queued', 'yookassa-webhook', "
+                    "        (select tenant_id from leads where id = $1))",
+                    upd["lead_id"], (lead["tg_user_id"] if m == "tg" else None), m,
+                    config.ORDER_PAID_MESSAGE,
+                )
+    await _insert_audit(
+        c, actor="yookassa-webhook", action="order_paid",
+        detail={"order_id": str(upd["id"]), "payment_id": payment_id,
+                "amount": str(upd["amount"]), "lead_converted": lead is not None},
+    )
+    return upd
 
-    В ОДНОЙ транзакции: orders.status='paid' (+paid_at) → лид в 'converted' (смысл 1B:
-    онлайн-оплата сама двигает воронку) → лиду «спасибо» через outbox (его доставит БОТ —
-    панель в Telegram не пишет, инвариант сохраняется) → аудит. Гранты panel_rw на каждый
-    шаг уже есть (update orders/leads.status, insert outbox, insert admin_audit)."""
+
+async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
+    """Отметить ЗАКАЗ оплаченным по id платежа ЮKassa (вебхук, ОСНОВНОЙ матч по provider_payment_id).
+    Идемпотентно; None — заказа с таким provider_payment_id нет (→ вызывающий пробует фолбэк #9)."""
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
@@ -2644,41 +2700,23 @@ async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
             )
             if row is None:
                 return None
-            if row["status"] == "paid":
-                return row  # повторный вебхук — no-op
-            # Вебхук без сессии → centralized-хук app.tenant_id не поставил. orders не под RLS,
-            # тенант берём из заказа (== тенант лида) и ставим ЯВНО — иначе RLS на leads/outbox
-            # отверг бы конвертацию (0 строк) и вставку «спасибо». tenant_id заказа NOT NULL (Wave 3d).
-            await c.execute("select set_config('app.tenant_id', $1, true)", str(row["tenant_id"]))
-            upd = await c.fetchrow(
-                """
-                update orders
-                set status = 'paid', paid_at = coalesce(paid_at, now())
-                where id = $1
-                returning id, lead_id, product_id, amount, currency
-                """,
-                row["id"],
+            return await _apply_order_paid(c, row, payment_id)
+
+
+async def mark_order_paid_by_order_id(order_id, payment_id: str) -> asyncpg.Record | None:
+    """#9 ФОЛБЭК вебхука: заказ НЕ сматчился по provider_payment_id (id платежа не успел записаться
+    в orders при создании), но в metadata платежа есть order_id. Платёж УЖЕ верифицирован
+    вызывающим через API ЮKassa кредами магазина — здесь применяем результат и БЭКФИЛЛИМ
+    provider_payment_id. None — заказа с таким id нет. Идемпотентно (по status)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "select id, lead_id, status, tenant_id from orders where id = $1 for update",
+                order_id,
             )
-            lead = None
-            if upd["lead_id"] is not None:
-                lead = await c.fetchrow(
-                    "update leads set status = 'converted' where id = $1 returning tg_user_id",
-                    upd["lead_id"],
-                )
-                if lead is not None and lead["tg_user_id"] is not None:
-                    await c.execute(
-                        "insert into outbox (lead_id, tg_user_id, kind, text, status, "
-                        "                    created_by, tenant_id) "
-                        "values ($1, $2, 'text', $3, 'queued', 'yookassa-webhook', "
-                        "        (select tenant_id from leads where id = $1))",
-                        upd["lead_id"], lead["tg_user_id"], config.ORDER_PAID_MESSAGE,
-                    )
-            await _insert_audit(
-                c, actor="yookassa-webhook", action="order_paid",
-                detail={"order_id": str(upd["id"]), "payment_id": payment_id,
-                        "amount": str(upd["amount"]), "lead_converted": lead is not None},
-            )
-            return upd
+            if row is None:
+                return None
+            return await _apply_order_paid(c, row, payment_id)
 
 
 async def order_exists_for_payment(payment_id: str) -> bool:
@@ -2699,21 +2737,40 @@ async def get_order_tenant_for_payment(payment_id: str) -> str | None:
     return str(v) if v else None
 
 
+async def get_order_tenant_by_id(order_id: str) -> str | None:
+    """#9 фолбэк: tenant_id заказа по ЕГО id (из metadata.order_id платежа), либо None. Защищён от
+    кривого/не-uuid order_id (вернёт None, не бросит). orders НЕ под RLS — читаем без app.tenant_id.
+    Платёж всё равно верифицируется вызывающим через API — это лишь поиск НАШЕГО заказа."""
+    async with pool.acquire() as c:
+        try:
+            v = await c.fetchval("select tenant_id from orders where id = $1", order_id)
+        except Exception:  # noqa: BLE001 — невалидный uuid и т.п.: не наш заказ
+            return None
+    return str(v) if v else None
+
+
 async def create_invoice_order_with_audit(
     lead_id, product_id: int, amount, currency: str,
     *, actor: str, ip: str | None, user_agent: str | None,
 ) -> asyncpg.Record | None:
-    """Pending-заказ для «счёта из диалога» (оператор выставляет лиду счёт). None — лид
-    не найден / без tg_user_id (счёт некому доставить). Возвращает (id, tg_user_id).
-    Платёж создаёт вызывающий (app.py, create_shop_payment) ПОСЛЕ записи заказа —
-    Idempotence-Key = id заказа; затем set_order_payment_panel + outbox-сообщение."""
+    """Pending-заказ для «счёта из диалога» (оператор выставляет лиду счёт). None — лид не найден /
+    нет адреса в КАНАЛЕ лида (счёт некому доставить). Возвращает (id, messenger, addr).
+    #31: канал-агностично — vk/max-лиду тоже можно выставить счёт. Платёж создаёт вызывающий
+    (app.py, create_shop_payment) ПОСЛЕ; затем set_order_payment_panel + outbox-сообщение."""
     async with pool.acquire() as c:
         async with c.transaction():
             lead = await c.fetchrow(
-                "select tg_user_id from leads where id = $1 for update", lead_id
+                "select messenger, tg_user_id, vk_user_id, max_chat_id "
+                "from leads where id = $1 for update",
+                lead_id,
             )
-            if lead is None or lead["tg_user_id"] is None:
+            if lead is None:
                 return None
+            m = lead["messenger"] or "tg"
+            addr = {"tg": lead["tg_user_id"], "vk": lead["vk_user_id"],
+                    "max": lead["max_chat_id"]}.get(m)
+            if addr is None:
+                return None  # нет адреса в канале лида
             row = await c.fetchrow(
                 """
                 insert into orders (lead_id, product_id, amount, currency, status, source,
@@ -2728,11 +2785,11 @@ async def create_invoice_order_with_audit(
                 c, actor=actor, action="order_invoice_create", ip=ip, user_agent=user_agent,
                 lead_id=lead_id,
                 detail={"order_id": str(row["id"]), "product_id": product_id,
-                        "amount": str(amount)},
+                        "amount": str(amount), "messenger": m},
             )
             return await c.fetchrow(
-                "select id, $1::bigint as tg_user_id from orders where id = $2",
-                lead["tg_user_id"], row["id"],
+                "select id, $1::text as messenger, $2::bigint as addr from orders where id = $3",
+                m, addr, row["id"],
             )
 
 
@@ -2746,14 +2803,15 @@ async def set_order_payment_panel(order_id, payment_id: str, payment_url: str) -
         )
 
 
-async def enqueue_invoice_message(lead_id, tg_user_id: int, text: str, *, actor: str) -> None:
-    """Положить лиду сообщение-счёт в outbox (ссылку на оплату доставит БОТ)."""
+async def enqueue_invoice_message(lead_id, messenger: str, addr: int, text: str, *, actor: str) -> None:
+    """Положить лиду сообщение-счёт в outbox (ссылку на оплату доставит БОТ). #31: канал-агностично —
+    messenger в outbox → канальный дренаж воркера; для vk/max tg_user_id=NULL (адрес резолвит воркер)."""
     async with pool.acquire() as c:
         await c.execute(
-            "insert into outbox (lead_id, tg_user_id, kind, text, status, created_by, tenant_id) "
-            "values ($1, $2, 'text', $3, 'queued', $4, "
+            "insert into outbox (lead_id, tg_user_id, messenger, kind, text, status, created_by, tenant_id) "
+            "values ($1, $2, $3, 'text', $4, 'queued', $5, "
             "        (select tenant_id from leads where id = $1))",
-            lead_id, tg_user_id, text, actor,
+            lead_id, (addr if messenger == "tg" else None), messenger, text, actor,
         )
 
 

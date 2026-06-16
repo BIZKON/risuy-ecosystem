@@ -1446,7 +1446,7 @@ async def lead_invoice(
     await db.set_order_payment_panel(order["id"], payment_id, pay_url)
     price_str = _fmt_price(product["price"], "RUB")
     await db.enqueue_invoice_message(
-        lead_id, order["tg_user_id"],
+        lead_id, order["messenger"], order["addr"],
         f"Счёт на оплату 🌷\n{product['name']} — {price_str}\n\n"
         f"Оплатить по ссылке (действует около часа):\n{pay_url}",
         actor=session.actor,
@@ -3179,6 +3179,16 @@ async def yookassa_webhook(request: Request):
     processed_ok = True
     try:
         order_tenant = await db.get_order_tenant_for_payment(payment_id)
+        fallback_order_id = None
+        if order_tenant is None:
+            # #9 ФОЛБЭК: заказ мог не успеть записать provider_payment_id (гонка create_payment ↔
+            # ранний вебхук) → матчим по metadata.order_id из ТЕЛА вебхука. Это лишь ХИНТ найти НАШ
+            # заказ; сам платёж ниже всё равно верифицируется через API ЮKassa кредами магазина
+            # (доверие — по API, не по телу; см. #23). Без фолбэка оплаченный заказ завис бы в pending.
+            meta_hint = obj.get("metadata") or {}
+            if meta_hint.get("kind") == "order" and meta_hint.get("order_id"):
+                fallback_order_id = meta_hint["order_id"]
+                order_tenant = await db.get_order_tenant_by_id(fallback_order_id)
         if order_tenant is not None:
             # Ветка ЗАКАЗА (Школы ИЛИ клиента, Слой C). Верифицируем ТЕМ магазином, что СОЗДАЛ
             # платёж: пробуем кассу тенанта из vault, затем магазин Школы из env. Платёж живёт
@@ -3201,7 +3211,11 @@ async def yookassa_webhook(request: Request):
                 except yookassa.YooKassaError:
                     pass  # не подтвердился ни тенант-, ни школа-кредами → заказ останется pending
             if payment is not None and payment.get("status") == "succeeded" and payment.get("paid"):
-                await db.mark_order_paid_by_payment(payment_id)
+                # #9: матч по id платежа (норма) ИЛИ по metadata.order_id (фолбэк, +бэкфилл payment_id).
+                if fallback_order_id is not None:
+                    await db.mark_order_paid_by_order_id(fallback_order_id, payment_id)
+                else:
+                    await db.mark_order_paid_by_payment(payment_id)
         elif config.YOOKASSA_ENABLED:
             # Магазин платформы: топап кошелька (Wave 2a) ИЛИ счёт подписки (legacy).
             payment = await yookassa.get_payment(payment_id)
