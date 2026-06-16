@@ -65,6 +65,8 @@ _CHANNEL_USER_COL = {"tg": "tg_user_id", "max": "max_user_id", "vk": "vk_user_id
 # Колонка АДРЕСА ОТВЕТА (куда слать исходящее) по каналу. Для tg/vk совпадает с идентичностью
 # (peer_id == user_id в личке VK); для MAX — отдельный max_chat_id (recipient.chat_id ≠ user_id
 # в личке, персистится при входящем). C3: исходящая доставка адресуется этой колонкой.
+# ⚠️ ЗЕРКАЛО в admin-panel/db.py::_BROADCAST_REPLY_COL (панель — отдельный процесс, импорт невозможен).
+# Расходится → панель материализует/предпросматривает не тот адрес. Меняешь карту — синхронно там.
 _CHANNEL_REPLY_COL = {"tg": "tg_user_id", "max": "max_chat_id", "vk": "vk_user_id"}
 
 

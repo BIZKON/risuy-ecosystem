@@ -32,12 +32,16 @@ class YooKassaError(Exception):
 
 
 def amount_str(value) -> str:
-    """Decimal/число → строка ЮKassa «2900.00» (ровно 2 знака)."""
+    """Decimal/число → строка ЮKassa «2900.00» (ровно 2 знака).
+    ⚠️ Идентичен admin-panel/yookassa.py::amount_str и родственен shared/money.py::micro_to_amount_str
+    (та же 2-знаковая сериализация, но из micro-int). Меняешь формат — синхронно во всех трёх."""
     return f"{Decimal(value).quantize(Decimal('0.01'))}"
 
 
 def _receipt(phone: str | None, description: str, amount) -> dict | None:
     """Чек 54-ФЗ (опционально). None — чек не прикладываем (выключен/нет телефона).
+    ⚠️ Структура ЗЕРКАЛИТСЯ в admin-panel/yookassa.py::_shop_receipt (+ _service_receipt/_recurrent_receipt).
+    Дрейф vat_code/полей → фискальный магазин отвергнет платёж. Меняешь — синхронно во всех билдерах чека.
 
     Одна позиция-услуга на полную сумму. vat_code — из env (дефолт 1 = без НДС,
     типично для УСН/самозанятых). payment_subject/mode — услуга с полной оплатой.
