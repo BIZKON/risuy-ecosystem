@@ -2693,6 +2693,12 @@ async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
     Идемпотентно; None — заказа с таким provider_payment_id нет (→ вызывающий пробует фолбэк #9)."""
     async with pool.acquire() as c:
         async with c.transaction():
+            # B7/RLS: сперва узнаём тенанта через SECURITY DEFINER (обход RLS), ставим app.tenant_id,
+            # затем RLS-скоупленный SELECT FOR UPDATE найдёт заказ. До enable RLS — поведение прежнее.
+            tenant = await c.fetchval("select order_tenant_for_payment($1)", payment_id)
+            if tenant is None:
+                return None
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant))
             row = await c.fetchrow(
                 "select id, lead_id, status, tenant_id from orders "
                 "where provider_payment_id = $1 for update",
@@ -2710,6 +2716,11 @@ async def mark_order_paid_by_order_id(order_id, payment_id: str) -> asyncpg.Reco
     provider_payment_id. None — заказа с таким id нет. Идемпотентно (по status)."""
     async with pool.acquire() as c:
         async with c.transaction():
+            # B7/RLS: тенант через SECURITY DEFINER (обход RLS) → app.tenant_id → RLS-скоупленный select.
+            tenant = await c.fetchval("select order_tenant_by_id($1)", order_id)
+            if tenant is None:
+                return None
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant))
             row = await c.fetchrow(
                 "select id, lead_id, status, tenant_id from orders where id = $1 for update",
                 order_id,
@@ -2719,31 +2730,32 @@ async def mark_order_paid_by_order_id(order_id, payment_id: str) -> asyncpg.Reco
             return await _apply_order_paid(c, row, payment_id)
 
 
+# B7/RLS: discovery-чтения orders ВЕБХУКОМ (сессионно-без app.tenant_id) идут через SECURITY DEFINER-
+# функции (migrate_rls_discovery_fns.sql) — они исполняются под владельцем orders и обходят RLS, иначе
+# после enable RLS вернули бы 0 строк (заказ не найден → оплата зависла). До enable RLS поведение
+# идентично прямому SELECT. Тенант-скоуп — по уникальному аргументу (payment_id/order_id).
 async def order_exists_for_payment(payment_id: str) -> bool:
     """Есть ли заказ с таким платежом (выбор ветки вебхука: заказ vs счёт подписки)."""
     async with pool.acquire() as c:
-        return bool(await c.fetchval(
-            "select 1 from orders where provider_payment_id = $1", payment_id
-        ))
+        return bool(await c.fetchval("select order_exists_for_payment($1)", payment_id))
 
 
 async def get_order_tenant_for_payment(payment_id: str) -> str | None:
     """tenant_id заказа по id платежа ЮKassa, либо None (платёж не наш / не заказ). Слой C:
     вебхук по нему выбирает, КАКИМИ кредами верифицировать платёж (магазин тенанта vs Школы).
-    orders НЕ под RLS (как в order_exists_for_payment) → читаем без app.tenant_id."""
+    Через SECURITY DEFINER order_tenant_for_payment (обход RLS для sessionless-вебхука)."""
     async with pool.acquire() as c:
-        v = await c.fetchval(
-            "select tenant_id from orders where provider_payment_id = $1", payment_id)
+        v = await c.fetchval("select order_tenant_for_payment($1)", payment_id)
     return str(v) if v else None
 
 
 async def get_order_tenant_by_id(order_id: str) -> str | None:
     """#9 фолбэк: tenant_id заказа по ЕГО id (из metadata.order_id платежа), либо None. Защищён от
-    кривого/не-uuid order_id (вернёт None, не бросит). orders НЕ под RLS — читаем без app.tenant_id.
-    Платёж всё равно верифицируется вызывающим через API — это лишь поиск НАШЕГО заказа."""
+    кривого/не-uuid order_id (вернёт None, не бросит). Через SECURITY DEFINER order_tenant_by_id
+    (обход RLS для sessionless-вебхука). Платёж всё равно верифицируется вызывающим через API."""
     async with pool.acquire() as c:
         try:
-            v = await c.fetchval("select tenant_id from orders where id = $1", order_id)
+            v = await c.fetchval("select order_tenant_by_id($1::uuid)", order_id)
         except Exception:  # noqa: BLE001 — невалидный uuid и т.п.: не наш заказ
             return None
     return str(v) if v else None
