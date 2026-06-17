@@ -9,6 +9,10 @@
 -- → онлайн-оплаты зависнут в pending. СНАЧАЛА risuy_dev + проверка под ролью panel_rw, потом прод.
 -- Идемпотентно (enable повторно безопасен; drop+create policy).
 --
+-- ⚠️ ПРЕДУСЛОВИЕ СХЕМЫ: все 6 таблиц должны иметь колонку tenant_id (её добавляет migrate_tenant_scope.sql,
+-- Wave 0). Ниже стоит guard: при отсутствии колонки — понятный raise (вместо «column tenant_id does not
+-- exist»), вся транзакция откатится. На боевой risuy предусловие выполнено (накатано 2026-06-12).
+--
 -- ПРИМЕНЕНИЕ: bash ~/.claude/scripts/twc-migrate.sh 4171827 81.31.246.136 <db> gen_user /abs/.../db/migrate_rls_orders_kb_broadcasts.sql
 
 do $$
@@ -21,6 +25,13 @@ declare
     ];
 begin
     foreach t in array tables loop
+        -- Guard предусловия: явный понятный raise, если Wave-0 (tenant_id) не накатан на эту БД.
+        if not exists (
+            select 1 from information_schema.columns
+            where table_schema = 'public' and table_name = t and column_name = 'tenant_id'
+        ) then
+            raise exception 'RLS-миграция: на таблице "%" нет колонки tenant_id — сначала накатите migrate_tenant_scope.sql (Wave 0)', t;
+        end if;
         execute format('alter table %I enable row level security', t);
         execute format('drop policy if exists tenant_isolation on %I', t);
         -- nullif(...,'')::uuid: пустой app.tenant_id (asyncpg RESET на release → '') → NULL → 0 строк
@@ -32,7 +43,32 @@ begin
     end loop;
 end $$;
 
--- Контроль: ожидаем relrowsecurity=true и relforcerowsecurity=false на всех шести.
+-- Контроль-ASSERT: на всех шести должно быть rls_on=true И forced=false. raise при отклонении — чтобы
+-- тихий неверный результат (форс случайно включён / RLS не встал) не проехал в прод незамеченным.
+do $$
+declare
+    r record;
+    bad int := 0;
+begin
+    for r in
+        select c.relname, c.relrowsecurity as rls_on, c.relforcerowsecurity as forced
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public'
+          and c.relname in ('orders','broadcasts','broadcast_files','link_tokens','kb_documents','kb_chunks')
+    loop
+        if (not r.rls_on) or r.forced then
+            raise warning 'RLS-инвариант нарушен: % rls_on=% forced=% (ожидалось on=true, forced=false)',
+                r.relname, r.rls_on, r.forced;
+            bad := bad + 1;
+        end if;
+    end loop;
+    if bad > 0 then
+        raise exception 'RLS-миграция: % таблиц с неверным состоянием RLS (см. warning выше) — НЕ ОК', bad;
+    end if;
+    raise notice 'RLS-инвариант OK: все 6 таблиц rls_on=true, forced=false';
+end $$;
+
+-- Диагностика (для глаз оператора; ASSERT выше уже гарантировал инвариант).
 select c.relname, c.relrowsecurity as rls_on, c.relforcerowsecurity as forced
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public'
