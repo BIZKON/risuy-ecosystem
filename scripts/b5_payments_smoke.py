@@ -17,6 +17,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "admin-panel"))
+sys.path.insert(0, ROOT)  # для `from shared import money` (W2-сверка фолбэка #9)
 os.environ.setdefault("DATABASE_URL", "postgresql://x/y")
 os.environ.setdefault("SESSION_SECRET", "x" * 40)
 os.environ.setdefault("ADMIN_USERNAME", "admin")
@@ -118,6 +119,38 @@ async def main() -> None:
         async with db.pool.acquire() as c:
             ob4 = await _outbox_last(c, lead)
         check("сообщение-счёт в outbox с messenger='vk'", ob4 and ob4["messenger"] == "vk" and ob4["tg_user_id"] is None)
+
+        # ── W2: фолбэк #9 связывает ВЕРИФИЦИРОВАННЫЙ платёж с заказом (amount + metadata.order_id) ──
+        print("5. W2: фолбэк #9 сверяет amount + metadata.order_id (defense-in-depth):")
+
+        async def _fresh_order():
+            async with db.pool.acquire() as c:
+                await c.execute("update leads set status='new' where id=$1", lead)
+                return await c.fetchval(
+                    "insert into orders (lead_id, product_id, amount, currency, status, source, created_by, tenant_id) "
+                    "values ($1,$2,100,'RUB','pending','yookassa','smoke',$3) returning id", lead, prod, tid)
+
+        o_ok = await _fresh_order()
+        r_ok = await db.mark_order_paid_by_order_id(
+            o_ok, "pay_w2a", expected_amount="100.00", expected_meta_order_id=str(o_ok))
+        async with db.pool.acquire() as c:
+            st_ok = await c.fetchval("select status from orders where id=$1", o_ok)
+        check("совпадение amount+metadata.order_id → paid", r_ok is not None and st_ok == "paid", st_ok)
+
+        o_bm = await _fresh_order()
+        r_bm = await db.mark_order_paid_by_order_id(
+            o_bm, "pay_w2b", expected_amount="100.00",
+            expected_meta_order_id="00000000-0000-0000-0000-000000000000")
+        async with db.pool.acquire() as c:
+            st_bm = await c.fetchval("select status from orders where id=$1", o_bm)
+        check("чужой metadata.order_id → None, заказ остаётся pending", r_bm is None and st_bm == "pending", st_bm)
+
+        o_ba = await _fresh_order()
+        r_ba = await db.mark_order_paid_by_order_id(
+            o_ba, "pay_w2c", expected_amount="999.00", expected_meta_order_id=str(o_ba))
+        async with db.pool.acquire() as c:
+            st_ba = await c.fetchval("select status from orders where id=$1", o_ba)
+        check("несовпадение суммы платёж≠заказ → None, заказ остаётся pending", r_ba is None and st_ba == "pending", st_ba)
 
         print()
         if FAILS:

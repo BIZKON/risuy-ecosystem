@@ -2709,11 +2709,26 @@ async def mark_order_paid_by_payment(payment_id: str) -> asyncpg.Record | None:
             return await _apply_order_paid(c, row, payment_id)
 
 
-async def mark_order_paid_by_order_id(order_id, payment_id: str) -> asyncpg.Record | None:
+async def mark_order_paid_by_order_id(
+    order_id,
+    payment_id: str,
+    *,
+    expected_amount=None,
+    expected_meta_order_id: str | None = None,
+) -> asyncpg.Record | None:
     """#9 ФОЛБЭК вебхука: заказ НЕ сматчился по provider_payment_id (id платежа не успел записаться
     в orders при создании), но в metadata платежа есть order_id. Платёж УЖЕ верифицирован
     вызывающим через API ЮKassa кредами магазина — здесь применяем результат и БЭКФИЛЛИМ
-    provider_payment_id. None — заказа с таким id нет. Идемпотентно (по status)."""
+    provider_payment_id. None — заказа с таким id нет. Идемпотентно (по status).
+
+    W2 (аудит, defense-in-depth): order_id фолбэка пришёл из ТЕЛА вебхука (недоверенный хинт). Перед
+    пометкой 'paid' СВЯЗЫВАЕМ верифицированный по API платёж с найденным заказом:
+      • expected_meta_order_id — metadata.order_id САМОГО платежа (из API-ответа) — должен совпасть с id
+        заказа (легитимный платёж создаётся с metadata.order_id=order.id во всех 3 точках create_payment);
+      • expected_amount — amount.value платежа — должен совпасть с orders.amount (сумма позиции).
+    Иначе это не наш матч (чужой/несоответствующий succeeded-платёж того же магазина + произвольный
+    order_id в теле) → None, заказ НЕ помечается оплаченным. Сверка применяется только если значение
+    передано (None → пропуск; обратная совместимость со старым вызовом)."""
     async with pool.acquire() as c:
         async with c.transaction():
             # B7/RLS: тенант через SECURITY DEFINER (обход RLS) → app.tenant_id → RLS-скоупленный select.
@@ -2722,11 +2737,26 @@ async def mark_order_paid_by_order_id(order_id, payment_id: str) -> asyncpg.Reco
                 return None
             await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant))
             row = await c.fetchrow(
-                "select id, lead_id, status, tenant_id from orders where id = $1 for update",
+                "select id, lead_id, status, tenant_id, amount from orders where id = $1 for update",
                 order_id,
             )
             if row is None:
                 return None
+            # W2: верифицированный платёж должен ссылаться ИМЕННО на этот заказ и на его сумму.
+            if expected_meta_order_id is not None and str(expected_meta_order_id) != str(row["id"]):
+                logging.getLogger(__name__).warning(
+                    "Фолбэк #9: metadata.order_id платежа %s (%s) ≠ заказу %s — НЕ помечаем paid",
+                    payment_id, expected_meta_order_id, row["id"],
+                )
+                return None
+            if expected_amount is not None:
+                from shared import money
+                if money.rub_to_micro(expected_amount) != money.rub_to_micro(row["amount"]):
+                    logging.getLogger(__name__).warning(
+                        "Фолбэк #9: сумма платежа %s (%s) ≠ сумме заказа %s (%s) — НЕ помечаем paid",
+                        payment_id, expected_amount, row["id"], row["amount"],
+                    )
+                    return None
             return await _apply_order_paid(c, row, payment_id)
 
 

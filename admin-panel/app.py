@@ -3213,7 +3213,15 @@ async def yookassa_webhook(request: Request):
             if payment is not None and payment.get("status") == "succeeded" and payment.get("paid"):
                 # #9: матч по id платежа (норма) ИЛИ по metadata.order_id (фолбэк, +бэкфилл payment_id).
                 if fallback_order_id is not None:
-                    await db.mark_order_paid_by_order_id(fallback_order_id, payment_id)
+                    # W2: связываем ВЕРИФИЦИРОВАННЫЙ по API платёж с заказом (его metadata.order_id и
+                    # amount должны совпасть с найденным заказом) — иначе чужой succeeded-платёж того же
+                    # магазина + произвольный order_id в теле НЕ пометит несоответствующий заказ paid.
+                    pmeta = payment.get("metadata") or {}
+                    await db.mark_order_paid_by_order_id(
+                        fallback_order_id, payment_id,
+                        expected_amount=(payment.get("amount") or {}).get("value"),
+                        expected_meta_order_id=pmeta.get("order_id"),
+                    )
                 else:
                     await db.mark_order_paid_by_payment(payment_id)
         elif config.YOOKASSA_ENABLED:
