@@ -28,6 +28,7 @@ import metering_worker
 import multiplex
 import nurture
 import retention
+import richfmt
 import triggers
 import worker
 from handlers import router
@@ -277,6 +278,9 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
     # тенанта (per-IP дедуп от переэмита). На фолбэк-тексте маркеров нет → no-op.
     answer, esc = escalation.parse_escalation(answer)
     answer, _trig = triggers.parse_trigger_markers(answer)
+    # Веб-виджет показывает {reply} как plain (textContent) и markdown НЕ рендерит → сырые **/`/#
+    # смотрятся «сломанно». Срезаем разметку в чистый текст (TG-путь не трогаем — там rich-рендер).
+    answer = richfmt.to_plain(answer)
     if esc is not None and cfg.get("tid"):
         ip = _client_ip(request)
         # _esc_allow_web помечает окно ОПТИМИСТИЧНО (атомарно → анти-гонка двойной карточки при

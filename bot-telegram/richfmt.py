@@ -119,3 +119,48 @@ def to_html(text: str) -> str:
         return _convert(text)
     except Exception:  # noqa: BLE001 — конвертер не должен ронять отправку (фолбэк-на-plain ниже)
         return _esc(text)
+
+
+def _to_plain(text: str) -> str:
+    # 1) Код: фенсы ```lang\nтело``` → тело; инлайн `код` → код (бэктики/язык убираем).
+    text = re.sub(r"```[^\n`]*\n?(.*?)```", lambda m: m.group(1).rstrip("\n"), text, flags=re.DOTALL)
+    text = re.sub(r"`([^`\n]+)`", r"\1", text)
+    # 2) Построчно: цитаты '>' / заголовки '#' → текст; маркеры списка -*+ → «• »; --- → разделитель.
+    out: list[str] = []
+    for line in text.split("\n"):
+        mq = re.match(r"^\s{0,3}>\s?(.*)$", line)
+        if mq is not None:
+            out.append(mq.group(1)); continue
+        mh = re.match(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if mh is not None:
+            out.append(mh.group(1)); continue
+        ml = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
+        if ml is not None:
+            out.append(f"{ml.group(1)}• {ml.group(2)}"); continue
+        if re.match(r"^\s{0,3}([-*_])\1{2,}\s*$", line):
+            out.append("──────────"); continue
+        out.append(line)
+    text = "\n".join(out)
+    # 3) Инлайн: ссылку [текст](url) → «текст (url)» (url НЕ теряем — в демо это платёжные ссылки);
+    #    жирный/курсив/зачёрк/спойлер → чистый текст (те же паттерны, что to_html, но без тегов).
+    text = re.sub(r"\[([^\]\n]+)\]\(([^)\s]+)\)", lambda m: f"{m.group(1)} ({m.group(2)})", text)
+    text = re.sub(r"\*\*(\S.*?\S|\S)\*\*", r"\1", text)
+    text = re.sub(r"__(\S.*?\S|\S)__", r"\1", text)
+    text = re.sub(r"~~(\S.*?\S|\S)~~", r"\1", text)
+    text = re.sub(r"\|\|(\S.*?\S|\S)\|\|", r"\1", text)
+    text = re.sub(r"(?<![\w*])\*(\S.*?\S|\S)\*(?![\w*])", r"\1", text)
+    text = re.sub(r"(?<![\w_])_(\S.*?\S|\S)_(?![\w_])", r"\1", text)
+    return text
+
+
+def to_plain(text: str) -> str:
+    """markdown-текст → ЧИСТЫЙ plain (БЕЗ разметки). Для веб-чата сайта: виджет показывает текст
+    как есть (textContent) и markdown НЕ рендерит → сырые ** / ` / # смотрятся «сломанно». Срезаем
+    те же конструкции, что to_html превращает в теги, оставляя читаемый текст (у ссылок СОХРАНЯЕМ
+    url). НИКОГДА не бросает: при сбое → исходный текст."""
+    if not text:
+        return ""
+    try:
+        return _to_plain(text)
+    except Exception:  # noqa: BLE001 — не роняем веб-ответ из-за форматирования
+        return text
