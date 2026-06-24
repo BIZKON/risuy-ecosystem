@@ -500,8 +500,26 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 
 /* ---------- 14. Печать (юр-доки для юриста) ---------- */
 @media print{
-  .top,.foot,.back{display:none !important}
+  .top,.foot,.back,.tg-float{display:none !important}
   body{background:#fff; font-size:11pt}
   .legal{padding:0}
   a{color:#000}
+}
+
+/* ---------- 15. Плавающая кнопка Telegram (всегда на экране, прямой контакт) ---------- */
+.tg-float{
+  position:fixed; right:22px; bottom:22px; z-index:1000;
+  display:inline-flex; align-items:center; gap:.5rem;
+  padding:.7rem .95rem; border-radius:999px;
+  background:#229ED9; color:#fff; font-weight:600; font-size:var(--fs-s);
+  box-shadow:0 8px 24px rgba(34,158,217,.4);
+  transition:transform .15s ease, box-shadow .15s ease;
+}
+.tg-float:hover{ transform:translateY(-2px); box-shadow:0 12px 30px rgba(34,158,217,.5); color:#fff; text-decoration:none; }
+.tg-float svg{ width:24px; height:24px; flex:0 0 auto; }
+.tg-float__label{ white-space:nowrap; }
+@media (prefers-reduced-motion:reduce){ .tg-float{transition:none} .tg-float:hover{transform:none} }
+@media (max-width:760px){
+  .tg-float{ right:16px; bottom:16px; padding:.8rem; }   /* на мобиле — компактный кружок (только иконка) */
+  .tg-float__label{ display:none; }
 }
