@@ -1291,7 +1291,7 @@ async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
     ровно ai_enabled/ai_system_prompt/ai_model демо-тенанта по слагу."""
     async with pool.acquire() as c:
         rows = await c.fetch(
-            "select s.key, s.value from tenant_settings s "
+            "select t.id as tid, s.key, s.value from tenant_settings s "
             "join tenants t on t.id = s.tenant_id "
             "where t.slug = $1 and s.key = any($2::text[])",
             slug, ["ai_enabled", "ai_system_prompt", "ai_model", "ai_fallback_text"],
@@ -1302,6 +1302,7 @@ async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
     if not (kv.get("ai_enabled") or "").strip():
         return None
     return {
+        "tid": rows[0]["tid"],          # для веб-эскалации горячего лида (адрес — escalation.resolve)
         "system_prompt": kv.get("ai_system_prompt") or "",
         "model": (kv.get("ai_model") or "").strip(),
         "fallback": kv.get("ai_fallback_text") or "",

@@ -23,10 +23,12 @@ from aiohttp import web
 import ai
 import config
 import db
+import escalation
 import metering_worker
 import multiplex
 import nurture
 import retention
+import triggers
 import worker
 from handlers import router
 from messaging import LoggingMiddleware
@@ -181,6 +183,45 @@ def _rl_allow_chat(ip: str | None) -> bool:
     return True
 
 
+# Дедуп веб-эскалации: одна карточка горячего лида с IP за окно. Веб-чат stateless (нет лид-записи
+# для claim-дедупа, как в TG), а Лия может переэмитить [[ESCALATE]] на следующих ходах того же
+# диалога → без этого менеджер получил бы дубли. Окно щедрое: один посетитель = один сигнал.
+_ESC_WEB_WINDOW = 1800.0     # 30 мин
+_esc_web_sent: dict[str, float] = {}
+
+
+def _esc_allow_web(ip: str | None) -> bool:
+    """True (и фиксирует отметку), если веб-эскалацию с этого IP можно отправить сейчас."""
+    if not ip:
+        return True  # IP не определён (редко за прокси) — не дедупим, но и не блокируем сигнал
+    now = time.monotonic()
+    if now - _esc_web_sent.get(ip, 0.0) < _ESC_WEB_WINDOW:
+        return False
+    _esc_web_sent[ip] = now
+    if len(_esc_web_sent) > 10000:  # гигиена памяти (как у rate-limit'ов выше)
+        for k in list(_esc_web_sent.keys()):
+            if now - _esc_web_sent[k] >= _ESC_WEB_WINDOW:
+                _esc_web_sent.pop(k, None)
+    return True
+
+
+_esc_web_tasks: set = set()  # ссылки на фоновые таски веб-эскалации (иначе GC съест до отправки)
+
+
+async def _escalate_web_bg(tid, esc: dict, ip: str | None) -> None:
+    """Фоновая доставка карточки горячего веб-лида — НЕ на пути ответа посетителю (карточка идёт
+    в TG через РФ-прокси с безлимитным 429-ретраем; ответ сайту её ждать не должен). Таймаут
+    бортирует залипший ретрай. Неуспех доставки → ОТКАТ дедуп-окна: у веб-лида нет claim/release,
+    единственный ретрай — следующая эмиссия [[ESCALATE]] того же диалога, и её нельзя глушить."""
+    ok = False
+    try:
+        ok = await asyncio.wait_for(escalation.escalate_web(tid, esc), timeout=12.0)
+    except Exception:  # noqa: BLE001 — таймаут/отмена/сеть: фон не валим
+        logger.warning("веб-эскалация: фоновая доставка не удалась/таймаут", exc_info=True)
+    if not ok and ip:
+        _esc_web_sent.pop(ip, None)  # доставки не было → освобождаем окно под ретрай
+
+
 def _cors(resp: web.StreamResponse) -> web.StreamResponse:
     """CORS только для сайта (другие origin'ы в браузере не пустит) + no-store."""
     resp.headers["Access-Control-Allow-Origin"] = _DEMO_CHAT_ORIGIN
@@ -230,6 +271,21 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
     except Exception:  # noqa: BLE001 — сеть/шлюз: не роняем, мягкий ответ
         logger.warning("demo-chat: ask_gateway упал", exc_info=True)
         answer = "Извините, не получилось ответить. Попробуйте ещё раз или напишите нам в Telegram."
+    # Веб-чат идёт МИМО ai.ask_ai (он зовёт ask_gateway напрямую), а служебные маркеры вырезает
+    # именно ask_ai → делаем это ЗДЕСЬ: посетитель сайта НИКОГДА не должен увидеть сырой
+    # [[ESCALATE]]/[[TRIGGER:N]]. При маркере эскалации — карточка горячего лида в TG-группу
+    # тенанта (per-IP дедуп от переэмита). На фолбэк-тексте маркеров нет → no-op.
+    answer, esc = escalation.parse_escalation(answer)
+    answer, _trig = triggers.parse_trigger_markers(answer)
+    if esc is not None and cfg.get("tid"):
+        ip = _client_ip(request)
+        # _esc_allow_web помечает окно ОПТИМИСТИЧНО (атомарно → анти-гонка двойной карточки при
+        # параллельных запросах одного IP). Доставку шлём ФОНОМ (ответ посетителю не ждёт TG);
+        # если доставка не удалась — _escalate_web_bg откатит окно, чтобы лид не потерялся.
+        if _esc_allow_web(ip):
+            t = asyncio.create_task(_escalate_web_bg(cfg["tid"], esc, ip))
+            _esc_web_tasks.add(t)
+            t.add_done_callback(_esc_web_tasks.discard)
     return _cors(web.json_response({"reply": answer}))
 
 

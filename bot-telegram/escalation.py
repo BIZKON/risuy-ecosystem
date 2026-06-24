@@ -179,3 +179,35 @@ async def escalate(bot, tg_user_id: int, payload: dict, *,
             raise
     except Exception:  # noqa: BLE001
         logger.warning("Эскалация менеджерам не удалась (%s=%s)", messenger, tg_user_id, exc_info=True)
+
+
+async def escalate_web(tid, payload: dict, *, raw: str | None = None) -> bool:
+    """Эскалация горячего лида из ВЕБ-ЧАТА сайта (анонимный посетитель, без лид-записи в БД).
+
+    Отличия от escalate(): (1) адрес берём по ЯВНОМУ tid (в веб-запросе contextvar tenant_id НЕ
+    выставлен — нет middleware мультиплекса); (2) нет claim/дедупа по лиду (лида нет — дедуп per-IP
+    делает вызывающий, bot._esc_allow_web); (3) нет разговорного фолбэк-бота (веб-контекст) —
+    шлём ТОЛЬКО единым нотификатором. Контакт — из payload (что собрала Лия: телефон/@username/
+    почта). Не бросает: ответ посетителю не должен падать из-за эскалации. True — карточка ушла."""
+    try:
+        target = await resolve_escalation_target(tid)
+        if target is None:
+            return False  # адрес эскалации у тенанта не задан → карточку не шлём
+        chat_id, topic_id = target
+        import messaging  # ленивый импорт (как в escalate): pure-хелперы тестируемы без aiogram
+        import notifier
+        send_bot = notifier.get_notifier_bot()
+        if send_bot is None:
+            logger.warning("Веб-эскалация: нотификатор не настроен (NOTIFIER_BOT_TOKEN) — слать нечем")
+            return False
+        # tg_user_id=0 не используется: client_link задан явно (нет tg://-ссылки на анон-веб-лида).
+        card = format_card(
+            payload, tg_user_id=0, lead_id=None, panel_base=None, raw=raw,
+            client_link=("", "контакт лида — в полях карточки выше (если оставил)"),
+        )
+        text = "🌐 Лид с ВЕБ-ЧАТА сайта (info.pro-agent-ai.ru)\n" + card
+        await messaging.raw_send_text(send_bot, chat_id, text, message_thread_id=topic_id, rich=False)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("Веб-эскалация не удалась (tid=%s)", tid, exc_info=True)
+        return False
