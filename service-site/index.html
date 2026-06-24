@@ -70,6 +70,75 @@
     </div>
   </section>
 
+  <!-- ============ ВЕБ-ЧАТ ДЕМО ============ -->
+  <section class="section section--soft" id="demo-chat">
+    <div class="wrap">
+      <div class="section__head reveal">
+        <p class="kicker">Живое демо</p>
+        <h2>Попробуйте Лию прямо здесь</h2>
+        <p class="about">Это тот же ИИ-агент, что будет работать у вас. Спросите что угодно — или расскажите про ваш бизнес, и Лия покажет, как агент поможет именно вам.</p>
+      </div>
+      <div class="chat reveal" id="liaChat">
+        <div class="chat__head">
+          <span class="chat__dot" aria-hidden="true"></span>
+          <span>Лия · ИИ-агент продаж — онлайн</span>
+        </div>
+        <div class="chat__log" id="chatLog" aria-live="polite"></div>
+        <form class="chat__form" id="chatForm" autocomplete="off">
+          <input class="chat__input" id="chatInput" type="text" placeholder="Напишите сообщение…" maxlength="2000" aria-label="Сообщение для Лии">
+          <button class="btn btn--primary chat__send" id="chatSend" type="submit">Отправить</button>
+        </form>
+        <p class="chat__note">Демо: Лия отвечает ИИ-моделью в реальном времени. Не вводите личные данные.</p>
+      </div>
+    </div>
+  </section>
+  <script>
+  (function(){
+    var ENDPOINT = "https://bizkon-risuy-ecosystem-16de.twc1.net/api/demo-chat";
+    var GREETING = "Здравствуйте! Я Лия — ИИ-агент продаж «ИИ-Агент Про». Спросите что угодно или расскажите про ваш бизнес — покажу, как агент поможет именно вам.";
+    var log = document.getElementById('chatLog');
+    var form = document.getElementById('chatForm');
+    var input = document.getElementById('chatInput');
+    var send = document.getElementById('chatSend');
+    if(!log || !form || !input){ return; }
+    var messages = [{role:'assistant', content:GREETING}];
+    function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+    function bubble(role, text, extra){
+      var el = document.createElement('div');
+      el.className = 'chat__msg chat__msg--' + (role==='user'?'out':'in') + (extra?(' '+extra):'');
+      el.innerHTML = esc(text).replace(/\n/g,'<br>')
+        .replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener">$1<\/a>');
+      log.appendChild(el); log.scrollTop = log.scrollHeight; return el;
+    }
+    bubble('assistant', GREETING);
+    var busy = false;
+    form.addEventListener('submit', function(e){
+      e.preventDefault();
+      if(busy){ return; }
+      var text = (input.value||'').trim();
+      if(!text){ return; }
+      input.value='';
+      messages.push({role:'user', content:text});
+      bubble('user', text);
+      busy = true; send.disabled = true; input.disabled = true;
+      var typing = bubble('assistant', 'Лия печатает…', 'chat__msg--typing');
+      fetch(ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({messages: messages}) })
+        .then(function(r){ return r.json().catch(function(){ return {}; }); })
+        .then(function(data){
+          typing.remove();
+          var reply = (data && data.reply) ? data.reply
+            : (data && data.error==='rate_limited') ? 'Слишком много сообщений подряд — подождите минуту 🙏'
+            : 'Не получилось ответить. Попробуйте ещё раз или напишите нам в Telegram.';
+          messages.push({role:'assistant', content:reply});
+          bubble('assistant', reply);
+        })
+        .catch(function(){ typing.remove(); bubble('assistant', 'Связь прервалась. Попробуйте ещё раз.'); })
+        .then(function(){ busy=false; send.disabled=false; input.disabled=false; input.focus(); });
+    });
+  })();
+  </script>
+
   <!-- ============ ВОЗМОЖНОСТИ ============ -->
   <section class="section" id="vozmozhnosti">
     <div class="wrap">

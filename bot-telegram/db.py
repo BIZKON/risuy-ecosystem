@@ -1285,6 +1285,25 @@ async def get_tenant_ai_overrides(tid) -> dict:
     }
 
 
+async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
+    """Конфиг ИИ демо-тенанта для ВЕБ-чата на сайте (зеркало Telegram-демо): system_prompt + model
+    (gateway-бэкенд). None — демо-тенанта нет или Лия выключена. Бот=owner, RLS обходит; читаем
+    ровно ai_enabled/ai_system_prompt/ai_model демо-тенанта по слагу."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select s.key, s.value from tenant_settings s "
+            "join tenants t on t.id = s.tenant_id "
+            "where t.slug = $1 and s.key = any($2::text[])",
+            slug, ["ai_enabled", "ai_system_prompt", "ai_model"],
+        )
+    if not rows:
+        return None
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    if not (kv.get("ai_enabled") or "").strip():
+        return None
+    return {"system_prompt": kv.get("ai_system_prompt") or "", "model": (kv.get("ai_model") or "").strip()}
+
+
 # ── A3 Слой A: per-tenant адрес эскалации (карточка горячего лида в свою ТГ-группу) ──
 async def get_tenant_escalation(tid) -> dict:
     """Куда тенант шлёт карточку эскалации (из tenant_settings, пишет панель «Мой ИИ-сотрудник»).

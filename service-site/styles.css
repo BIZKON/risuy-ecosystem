@@ -523,3 +523,25 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
   .tg-float{ right:16px; bottom:16px; padding:.8rem; }   /* на мобиле — компактный кружок (только иконка) */
   .tg-float__label{ display:none; }
 }
+
+/* ---------- 16. Веб-чат демо «Лии» ---------- */
+.chat{ max-width:640px; margin-inline:auto; background:#fff; border:1px solid var(--line);
+  border-radius:16px; overflow:hidden; box-shadow:var(--shadow-s); display:flex; flex-direction:column }
+.chat__head{ display:flex; align-items:center; gap:.5rem; padding:.8rem 1.1rem;
+  border-block-end:1px solid var(--line); font-weight:600; font-size:var(--fs-s) }
+.chat__dot{ inline-size:8px; block-size:8px; border-radius:50%; background:#27ae60; flex:0 0 auto }
+.chat__log{ padding:1rem 1.1rem; display:flex; flex-direction:column; gap:.55rem;
+  block-size:380px; overflow-y:auto; background:#f6f8fa; scroll-behavior:smooth }
+.chat__msg{ max-inline-size:82%; padding:.6rem .85rem; border-radius:14px; line-height:1.45;
+  font-size:var(--fs-s); white-space:pre-wrap; overflow-wrap:anywhere }
+.chat__msg--in{ align-self:flex-start; background:#fff; border:1px solid var(--line); border-end-start-radius:4px }
+.chat__msg--out{ align-self:flex-end; background:var(--primary); color:#fff; border-end-end-radius:4px }
+.chat__msg--out a{ color:#fff; text-decoration:underline }
+.chat__msg--typing{ color:var(--muted); font-style:italic }
+.chat__form{ display:flex; gap:.5rem; padding:.8rem 1.1rem; border-block-start:1px solid var(--line) }
+.chat__input{ flex:1 1 auto; padding:.65rem .9rem; border:1px solid var(--line); border-radius:10px;
+  font:inherit; font-size:var(--fs-s); color:var(--ink) }
+.chat__input:focus{ outline:none; border-color:var(--primary) }
+.chat__send{ flex:0 0 auto }
+.chat__note{ margin:0; padding:0 1.1rem .9rem; font-size:.78rem; color:var(--muted); text-align:center }
+@media (max-width:760px){ .chat__log{ block-size:320px } .chat__msg{ max-inline-size:88% } }

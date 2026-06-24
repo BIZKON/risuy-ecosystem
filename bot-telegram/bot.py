@@ -20,6 +20,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand
 from aiohttp import web
 
+import ai
 import config
 import db
 import metering_worker
@@ -149,11 +150,95 @@ async def _health(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
+# ── Веб-чат демо «Лии» на сайте: POST /api/demo-chat ──────────────────────────
+# Зеркало Telegram-демо на info.pro-agent-ai.ru: тот же промпт/модель демо-тенанта через
+# ai.ask_gateway (stateless, контекст в messages[]). Публичный, без сессии. Защита от слива
+# баланса: CORS только для сайта, per-IP rate-limit, кап длины истории/сообщения. Метеринг НЕ
+# списываем (демо, цены модели нет — иначе спам ERROR; ответ важнее учёта).
+_DEMO_CHAT_ORIGIN = "https://info.pro-agent-ai.ru"
+_CHAT_RL_WINDOW = 60.0       # окно rate-limit, сек
+_CHAT_RL_MAX = 20            # макс. сообщений с одного IP за окно
+_CHAT_MAX_MESSAGES = 24      # кап длины присланной истории
+_CHAT_MAX_LEN = 2000         # кап длины одного сообщения
+_chat_rl_hits: dict[str, list[float]] = {}
+
+
+def _rl_allow_chat(ip: str | None) -> bool:
+    """True, если запрос чата с этого IP в пределах лимита окна (single-instance, in-memory)."""
+    if not ip:
+        return True
+    now = time.monotonic()
+    hits = [t for t in _chat_rl_hits.get(ip, ()) if now - t < _CHAT_RL_WINDOW]
+    if len(hits) >= _CHAT_RL_MAX:
+        _chat_rl_hits[ip] = hits
+        return False
+    hits.append(now)
+    _chat_rl_hits[ip] = hits
+    if len(_chat_rl_hits) > 10000:
+        for k in list(_chat_rl_hits.keys()):
+            if all(now - t >= _CHAT_RL_WINDOW for t in _chat_rl_hits[k]):
+                _chat_rl_hits.pop(k, None)
+    return True
+
+
+def _cors(resp: web.StreamResponse) -> web.StreamResponse:
+    """CORS только для сайта (другие origin'ы в браузере не пустит) + no-store."""
+    resp.headers["Access-Control-Allow-Origin"] = _DEMO_CHAT_ORIGIN
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+async def _demo_chat(request: web.Request) -> web.StreamResponse:
+    """POST /api/demo-chat: тело {messages:[{role,content}...]} (последнее — текущий вопрос user).
+    Возвращает {reply}. Любая ошибка → мягкий JSON (не 5xx-утечка). OPTIONS → preflight."""
+    if request.method == "OPTIONS":
+        return _cors(web.Response(status=204))
+    if not _rl_allow_chat(_client_ip(request)):
+        return _cors(web.json_response({"error": "rate_limited"}, status=429))
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return _cors(web.json_response({"error": "bad_json"}, status=400))
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(msgs, list) or not msgs:
+        return _cors(web.json_response({"error": "no_messages"}, status=400))
+    norm: list[dict] = []
+    for m in msgs[-_CHAT_MAX_MESSAGES:]:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            norm.append({"role": role, "content": content.strip()[:_CHAT_MAX_LEN]})
+    if not norm or norm[-1]["role"] != "user":
+        return _cors(web.json_response({"error": "last_not_user"}, status=400))
+    text, history = norm[-1]["content"], norm[:-1]
+    try:
+        cfg = await db.get_demo_chat_cfg()
+    except Exception:  # noqa: BLE001
+        cfg = None
+    if cfg is None:
+        return _cors(web.json_response({"error": "demo_off"}, status=503))
+    try:
+        answer, _meta = await ai.ask_gateway(
+            text, model=cfg["model"], system_prompt=cfg["system_prompt"], history=history,
+        )
+    except Exception:  # noqa: BLE001 — сеть/шлюз: не роняем, мягкий ответ
+        logger.warning("demo-chat: ask_gateway упал", exc_info=True)
+        answer = "Извините, не получилось ответить. Попробуйте ещё раз или напишите нам в Telegram."
+    return _cors(web.json_response({"reply": answer}))
+
+
 async def _start_health() -> web.AppRunner:
     app = web.Application()
     app.router.add_get("/", _health)
     app.router.add_get("/health", _health)
     app.router.add_get("/r/{token}", _redirect)  # публичный трекинг-редирект (§6.2)
+    app.router.add_post("/api/demo-chat", _demo_chat)     # веб-чат демо-Лии для сайта
+    app.router.add_options("/api/demo-chat", _demo_chat)  # CORS preflight
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.PORT)
