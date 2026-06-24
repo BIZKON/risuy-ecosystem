@@ -1,5 +1,6 @@
 """Слой доступа к Postgres через asyncpg. Простой пул + функции по шагам воронки."""
 import contextvars
+import json
 import logging
 import uuid
 
@@ -181,6 +182,108 @@ async def mark_followup_sent(col: str, tg_user_id: int) -> None:
          "where tg_user_id = $1 and tenant_id = $2")
     async with pool.acquire() as c:
         await c.execute(q, tg_user_id, tenant_id())
+
+
+# ── Item B: tenant-aware дожим (мульти-тенант, отдельно от School-пути выше) ──────
+# School-дожим (get_due_followups/mark_followup_sent) НЕ трогаем: его якорь — guide_sent_at
+# (выдача лид-магнита), тексты/задержки захардкожены. Здесь — per-tenant дожим: конфиг в
+# tenant_settings, якорь — ВРЕМЯ ПОСЛЕДНЕГО ВХОДЯЩЕГО лида (молчит → касание; ответил → серия
+# перезапускается, т.к. касание «протухает» относительно нового входящего). Без DDL: время
+# последнего входящего считаем из messages, факт отправки храним в тех же follow_up_1..3_at.
+async def get_tenant_nurture(tid) -> dict:
+    """Конфиг дожима тенанта из tenant_settings. Возвращает {"enabled": bool, "steps": [...]},
+    steps = [{"delay_seconds": int, "text": str}, ...] (до 3 — по числу колонок follow_up_1..3_at).
+    Бот=owner, RLS обходит. Сбой/нет строк/выключено/пустые шаги → {"enabled": False, "steps": []}."""
+    out = {"enabled": False, "steps": []}
+    if tid is None:
+        return out
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "select key, value from tenant_settings where tenant_id = $1 and key = any($2::text[])",
+                tid, ["nurture_enabled", "nurture_steps"])
+    except Exception:  # noqa: BLE001 — дожиг не должен падать из-за БД
+        logging.getLogger(__name__).warning("Не прочитал конфиг дожима тенанта %s", tid, exc_info=True)
+        return out
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    if not (kv.get("nurture_enabled") or "").strip():
+        return out
+    try:
+        raw = json.loads(kv.get("nurture_steps") or "[]")
+    except Exception:  # noqa: BLE001 — битый JSON → дожим выключен (не угадываем)
+        return out
+    steps = []
+    for s in (raw if isinstance(raw, list) else [])[:3]:
+        if not isinstance(s, dict):
+            continue
+        try:
+            d = int(s.get("delay_seconds") or 0)
+        except (TypeError, ValueError):
+            continue
+        t = (s.get("text") or "").strip()
+        if d > 0 and t:
+            steps.append({"delay_seconds": d, "text": t})
+    out["enabled"] = bool(steps)
+    out["steps"] = steps
+    return out
+
+
+async def get_due_tenant_followups(
+    tid, col: str, delay_seconds: int, prev_col: str | None = None,
+) -> list[int]:
+    """tg_user_id лидов тенанта tid, кому пора касание col дожима (только TG; vk/max — следующий
+    инкремент). last_in = max(created_at) входящих лида (молчит → дожим; ответил → касание col
+    «протухает» относит. нового входящего → серия перезапускается).
+
+    КАСАНИЯ — ЦЕПОЧКА (защита от залпа всех шагов в один тик и от обратного порядка при нелогичных
+    задержках, ревью): шаг 1 (prev_col=None) якорится на last_in; шаг N>1 якорится на ВРЕМЕНИ
+    ПРЕДЫДУЩЕГО касания (prev_col) — кумулятивная пауza delay ПОСЛЕ него, и предыдущее касание
+    обязано быть сделано ДЛЯ ТЕКУЩЕЙ активности (prev_col >= last_in). Так за тик уходит максимум
+    одно касание лиду (только что проставленный prev_col + delay > now → следующий шаг ждёт тик).
+
+    Стоп: отписка / ручная пауза / эскалация (передан менеджеру) / конверсия."""
+    assert col in _FOLLOWUP_COLS
+    assert prev_col is None or prev_col in _FOLLOWUP_COLS
+    if prev_col is None:
+        anchor_gate = "x.last_in + make_interval(secs => $1) <= now()"
+    else:
+        anchor_gate = (
+            f"l.{prev_col} is not null and l.{prev_col} >= x.last_in "
+            f"and l.{prev_col} + make_interval(secs => $1) <= now()"
+        )
+    q = f"""
+        select l.tg_user_id
+        from leads l
+        join lateral (
+            select max(m.created_at) as last_in
+            from messages m
+            where m.lead_id = l.id and m.direction = 'in'
+        ) x on true
+        where l.tenant_id = $2
+          and l.messenger = 'tg'
+          and l.tg_user_id is not null
+          and l.unsubscribed_at is null
+          and l.bot_paused = false
+          and l.escalated_at is null
+          and l.status <> 'converted'
+          and x.last_in is not null
+          and (l.{col} is null or l.{col} < x.last_in)
+          and {anchor_gate}
+        limit 100
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch(q, float(delay_seconds), tid)
+    return [r["tg_user_id"] for r in rows]
+
+
+async def mark_tenant_followup_sent(tid, col: str, tg_user_id: int) -> None:
+    """Помечаем касание дожима отправленным (status → nurturing, кроме уже converted)."""
+    assert col in _FOLLOWUP_COLS
+    q = (f"update leads set {col} = now(), "
+         "status = case when status = 'converted' then status else 'nurturing' end "
+         "where tg_user_id = $1 and tenant_id = $2 and messenger = 'tg'")
+    async with pool.acquire() as c:
+        await c.execute(q, tg_user_id, tid)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

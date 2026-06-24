@@ -63,14 +63,17 @@ def _is_unsub(text: str | None) -> bool:
 # VK/MAX-боты живут ТОЛЬКО в этом процессе (long-poll-таски). worker.py (тот же процесс,
 # см. bot.py) берёт их отсюда для ИСХОДЯЩЕЙ доставки (ответ оператора / рассылка), чтобы НЕ
 # открывать второе подключение к API канала. Заполняются в run() (алиасятся как локали реконсайла).
+_running_tg: dict = {}    # tenant_id -> {"task", "bot": Bot}    (Telegram — для исходящей/дожима)
 _running_vk: dict = {}    # tenant_id -> {"task", "bot": VKBot}
 _running_max: dict = {}   # tenant_id -> {"task", "bot": MAXBot}
 
 
 def get_channel_bot(tenant_id, messenger: str):
-    """Живой канальный бот тенанта для исходящей доставки (VKBot/MAXBot) или None, если канал
-    не поднят (не настроен / только что рестартнули). Воркер при None оставит строку в очереди."""
-    reg = _running_vk if messenger == "vk" else _running_max if messenger == "max" else None
+    """Живой канальный бот тенанта для исходящей доставки (Bot/VKBot/MAXBot) или None, если канал
+    не поднят (не настроен / только что рестартнули / дефолт-тенант Школы — она вне мультиплекса).
+    Воркер/дожиг при None оставляет строку/касание на следующий тик."""
+    reg = (_running_tg if messenger == "tg" else _running_vk if messenger == "vk"
+           else _running_max if messenger == "max" else None)
     if reg is None:
         return None
     h = reg.get(tenant_id)
@@ -295,10 +298,11 @@ async def run(interval: int | None = None) -> None:
     гасит тенант-ботов. Запускается доп. таской в bot.py рядом с воронкой Школы."""
     interval = interval or _RELOAD_INTERVAL
     logger.info("Мультиплекс тенант-ботов запущен (сверка каждые %s c)", interval)
-    running: dict = {}      # tenant_id -> {"task": Task, "bot": Bot}    (Telegram)
-    # VK/MAX-реестры — МОДУЛЬНЫЕ (доступны worker.get_channel_bot для исходящей доставки C3).
+    # ВСЕ реестры — МОДУЛЬНЫЕ (доступны get_channel_bot для исходящей доставки C3 + дожима item B).
+    running = _running_tg       # tenant_id -> {"task": Task, "bot": Bot}    (Telegram)
     running_vk = _running_vk    # tenant_id -> {"task": Task, "bot": VKBot}  (Слой C: ВКонтакте)
     running_max = _running_max  # tenant_id -> {"task": Task, "bot": MAXBot} (Слой C: MAX)
+    running.clear()
     running_vk.clear()
     running_max.clear()
     try:
