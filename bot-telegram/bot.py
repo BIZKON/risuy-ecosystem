@@ -281,6 +281,22 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
     # Веб-виджет показывает {reply} как plain (textContent) и markdown НЕ рендерит → сырые **/`/#
     # смотрятся «сломанно». Срезаем разметку в чистый текст (TG-путь не трогаем — там rich-рендер).
     answer = richfmt.to_plain(answer)
+    # Персистенция веб-чата как лида demo-sandbox (раздел «Демо-монитор» в панели): upsert лида по
+    # session_id виджета + лог входящего и ответа Лии под тенантом демо. Best-effort — ответ
+    # посетителю не должен падать из-за записи; messenger='web' (tg_user_id в messages = NULL).
+    sid = body.get("session_id") if isinstance(body, dict) else None
+    if isinstance(sid, str) and 8 <= len(sid) <= 80 and cfg.get("tid"):
+        _tok = db.current_tenant_id.set(cfg["tid"])
+        try:
+            await db.upsert_start(sid, "web", messenger="web")
+            _lid = await db.get_lead_id(sid, messenger="web")
+            await db.log_message(lead_id=_lid, tg_user_id=0, messenger="web", direction="in", text=text)
+            await db.log_message(lead_id=_lid, tg_user_id=0, messenger="web", direction="out",
+                                 text=answer, source="liya")
+        except Exception:  # noqa: BLE001
+            logger.warning("demo-chat: персистенция веб-чата не удалась", exc_info=True)
+        finally:
+            db.current_tenant_id.reset(_tok)
     if esc is not None and cfg.get("tid"):
         ip = _client_ip(request)
         # _esc_allow_web помечает окно ОПТИМИСТИЧНО (атомарно → анти-гонка двойной карточки при

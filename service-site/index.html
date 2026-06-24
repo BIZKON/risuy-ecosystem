@@ -101,6 +101,14 @@
     var input = document.getElementById('chatInput');
     var send = document.getElementById('chatSend');
     if(!log || !form || !input){ return; }
+    // Стабильный id веб-сессии (localStorage): переписка с Лией группируется в один лид
+    // для раздела «Демо-монитор» в панели. Без него анонимный визит не сохранится.
+    var SID;
+    function newSid(){ return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10); }
+    try {
+      SID = localStorage.getItem('x10_demo_sid');
+      if(!SID){ SID = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : newSid(); localStorage.setItem('x10_demo_sid', SID); }
+    } catch(e){ SID = newSid(); }
     var messages = [{role:'assistant', content:GREETING}];
     function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
     function bubble(role, text, extra){
@@ -123,7 +131,7 @@
       busy = true; send.disabled = true; input.disabled = true;
       var typing = bubble('assistant', 'Лия печатает…', 'chat__msg--typing');
       fetch(ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({messages: messages}) })
+        body: JSON.stringify({messages: messages, session_id: SID}) })
         .then(function(r){ return r.json().catch(function(){ return {}; }); })
         .then(function(data){
           typing.remove();

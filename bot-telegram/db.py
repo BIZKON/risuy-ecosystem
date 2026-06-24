@@ -61,7 +61,7 @@ async def close() -> None:
 # Колонка идентичности лида в зависимости от мессенджера. messenger — из НАШЕГО белого списка
 # (драйверы каналов), не из пользовательского ввода → безопасная f-string-интерполяция в SQL.
 # Telegram-путь не меняется (messenger='tg' → tg_user_id, как было).
-_CHANNEL_USER_COL = {"tg": "tg_user_id", "max": "max_user_id", "vk": "vk_user_id"}
+_CHANNEL_USER_COL = {"tg": "tg_user_id", "max": "max_user_id", "vk": "vk_user_id", "web": "web_session_id"}
 
 # Колонка АДРЕСА ОТВЕТА (куда слать исходящее) по каналу. Для tg/vk совпадает с идентичностью
 # (peer_id == user_id в личке VK); для MAX — отдельный max_chat_id (recipient.chat_id ≠ user_id
