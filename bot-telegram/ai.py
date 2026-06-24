@@ -23,7 +23,7 @@ from shared.money import ceil_mul
 logger = logging.getLogger(__name__)
 
 _ENDPOINT = "https://api.timeweb.cloud/api/v1/cloud-ai/agents/{agent_id}/call"
-_TIMEOUT = aiohttp.ClientTimeout(total=30)
+_TIMEOUT = aiohttp.ClientTimeout(total=60)  # reasoning-модели (DeepSeek v4) иногда думают >30с → не рубим
 _FALLBACK = (
     "Ой, сейчас не получается ответить 🌷\n"
     "Напиши, пожалуйста, менеджеру: lesovschool@yandex.ru"

@@ -224,7 +224,8 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
         return _cors(web.json_response({"error": "demo_off"}, status=503))
     try:
         answer, _meta = await ai.ask_gateway(
-            text, model=cfg["model"], system_prompt=cfg["system_prompt"], history=history,
+            text, model=cfg["model"], system_prompt=cfg["system_prompt"],
+            fallback=cfg.get("fallback"), history=history,
         )
     except Exception:  # noqa: BLE001 — сеть/шлюз: не роняем, мягкий ответ
         logger.warning("demo-chat: ask_gateway упал", exc_info=True)
