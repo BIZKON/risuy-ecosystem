@@ -192,17 +192,20 @@ async def ask_agent_openai(
 
 # ── Бэкенд «gateway»: Timeweb AI Gateway (OpenAI-совместимый, прямой вызов модели) ──
 _GATEWAY_DEFAULT_BASE = "https://api.timeweb.ai/v1"
-_DEFAULT_MODEL = "deepseek-v4-pro"
+_DEFAULT_MODEL = "deepseek/deepseek-v4-pro"  # ID шлюза с префиксом провайдера (голый → 404)
 
 
 async def ask_gateway(
     text: str, *, base_url: str | None = None, model: str | None = None,
     system_prompt: str | None = None, fallback: str | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, dict | None]:
     """Спрашивает модель через Timeweb AI Gateway — OpenAI-совместимый /chat/completions.
-    Однооборотно: system (если задан) + текущее сообщение пользователя; контекст диалога
-    НЕ сохраняется (в отличие от cloud-ai агента). Ключ — config.AI_GATEWAY_TOKEN (env,
-    секрет). На любой сбой — мягкий фолбэк, чтобы пользователь не остался без ответа.
+    Многооборотно: system (если задан) + история диалога + текущее сообщение. Gateway
+    stateless (нет серверного parent-контекста, как у cloud-ai агента), поэтому контекст
+    несём в messages[] историей — тем же _build_chat_messages, что и cloud_ai-OpenAI (иначе
+    модель видит каждое сообщение как первое и здоровается заново). Ключ — config.AI_GATEWAY_TOKEN
+    (env, секрет). На любой сбой — мягкий фолбэк, чтобы пользователь не остался без ответа.
 
     Возвращает (ответ, meta|None): meta = {model, usage, request_id} для метеринга
     (gateway, в отличие от cloud-ai, отдаёт usage в каждом ответе — ТЗ §5.2);
@@ -220,11 +223,7 @@ async def ask_gateway(
         "authorization": f"Bearer {config.AI_GATEWAY_TOKEN}",
         "content-type": "application/json",
     }
-    messages: list[dict] = []
-    sp = (system_prompt or "").strip()
-    if sp:
-        messages.append({"role": "system", "content": sp})
-    messages.append({"role": "user", "content": text})
+    messages = _build_chat_messages(system_prompt, history, text)
     payload = {"model": eff_model, "messages": messages, "stream": False}
 
     try:
@@ -391,12 +390,13 @@ async def _ask_ai_backend(
     вернуть лишь нативный /call-фолбэк (он сохранится в FSM, но OpenAI-путь его игнорит).
 
     history — последние ходы диалога [{"role","content"}] (готовит db.get_ai_history);
-    нужны cloud_ai-OpenAI вместо серверного parent_message_id. gateway однооборотен —
-    history не использует."""
+    нужны и cloud_ai-OpenAI, и gateway (оба stateless: контекст несём в messages[], а не
+    серверным parent_message_id)."""
     if cfg.get("backend") == "gateway":
         answer, meta = await ask_gateway(
             text, base_url=cfg.get("gateway_base_url"), model=cfg.get("model"),
             system_prompt=cfg.get("system_prompt"), fallback=cfg.get("fallback"),
+            history=history,
         )
         if meta:
             # Fire-and-forget: ответ лиду не ждёт списания. Таска наследует
