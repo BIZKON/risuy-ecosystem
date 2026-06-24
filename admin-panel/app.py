@@ -919,9 +919,15 @@ async def _render_dialogs(
     reply_err: str | None = None,
     invoiced: bool = False,
     invoice_err: str | None = None,
+    template: str = "dialogs.html",
+    active: str = "dialogs",
+    chat_from: str = "dialog",
+    list_base: str = "/dialogs",
 ):
     """Единый рендер раздела «Диалоги»: список слева + (опц.) выбранный чат справа.
-    rec=None → правая панель пустая (приглашение выбрать диалог)."""
+    rec=None → правая панель пустая (приглашение выбрать диалог).
+    template/active/chat_from/list_base — параметризация для раздела «Демо-монитор» (тот же
+    рендер, но свой шаблон/нав/возврат-PRG/база-URL; дефолты = поведение /dialogs без изменений)."""
     filters, raw = _parse_filters(request, session)
     rows = await db.list_dialogs(filters, limit=config.PER_PAGE, offset=0)
     dialogs = [_present_dialog_row(r) for r in rows]
@@ -933,7 +939,8 @@ async def _render_dialogs(
         "selected_id": selected_id,
         "csrf_token": session.csrf_token,
         "session": session,
-        "active": "dialogs",
+        "active": active,
+        "list_base": list_base,
         "nav_dialogs_badge": unanswered,
         "statuses": config.STATUSES,
         "status_labels": config.STATUS_LABELS,
@@ -953,12 +960,14 @@ async def _render_dialogs(
             "msg_max": config.MSG_MAX_LEN,
             "accept_attr": _reply_accept_attr(),
             "max_file_mb": config.MAX_PRODUCT_FILE_MB,
-            "chat_from": "dialog",   # композер вернёт PRG на /dialogs/{id}
+            "chat_from": chat_from,   # композер вернёт PRG (dialog→/dialogs, demo→/demo-monitor)
         })
         # «Выставить счёт» (1B): селектор оферов с ценой — только когда онлайн-оплата
         # реально работоспособна (ключи магазина школы у панели + тумблер включён).
         invoice_products = []
-        if config.SHOP_PAYMENTS_CONFIGURED and await db.get_online_payments_enabled():
+        # В «Демо-мониторе» счёт не выставляем (chat_from='demo'): invoice-POST не скоупится на
+        # demo и PRG увёл бы из раздела (ревью). Пусто → форма в _chat.html скрыта.
+        if chat_from != "demo" and config.SHOP_PAYMENTS_CONFIGURED and await db.get_online_payments_enabled():
             invoice_products = [
                 {"id": p["id"], "name": p["name"],
                  "label": f"{p['name']} — {_fmt_price(p['price'], p['currency'])}"}
@@ -971,7 +980,7 @@ async def _render_dialogs(
             "dialog_staff": await _resolve_dialog_staff(lead),
             "staff_flash": staff_flash,
         })
-    return templates.TemplateResponse(request, "dialogs.html", ctx)
+    return templates.TemplateResponse(request, template, ctx)
 
 
 # ---- /dialogs — список диалогов (правая панель пустая) -------------------- #
@@ -1007,6 +1016,52 @@ async def dialogs_detail(
     )
 
 
+# ---- /demo-monitor — раздел владельца: лиды демо-бота из САЙТА и TG в одном месте -------- #
+# «Диалоги», но жёстко scoped на demo-sandbox (независимо от активного тенанта) и только для
+# платформы (is_platform). Веб-лиды (messenger='web') — просмотр (can_reply=False → композер
+# скрыт); TG-лидам отвечаем через общий /leads/{id}/reply с from='demo' (тот же scope demo).
+_DEMO_SLUG = "demo-sandbox"
+_DEMO_RENDER = {"template": "demo_monitor.html", "active": "demo_monitor",
+                "chat_from": "demo", "list_base": "/demo-monitor"}
+
+
+async def _scope_demo(session: auth.Session):
+    """Форсим RLS-scope на demo-sandbox для раздела «Демо-монитор». Только платформа."""
+    _require_admin(session)
+    tid = await db.get_tenant_id_by_slug(_DEMO_SLUG)
+    if not tid:
+        raise StarletteHTTPException(status_code=404, detail="Демо-тенант не найден")
+    db.set_active_tenant(tid)
+    return tid
+
+
+@app.get("/demo-monitor", response_class=HTMLResponse)
+async def demo_monitor_index(request: Request, session: auth.Session = Depends(require_session)):
+    await _scope_demo(session)
+    return await _render_dialogs(request, session, selected_id=None, **_DEMO_RENDER)
+
+
+@app.get("/demo-monitor/{lead_id}", response_class=HTMLResponse)
+async def demo_monitor_detail(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    replied: int = 0,
+    err: str | None = None,
+):
+    await _scope_demo(session)
+    rec = await db.get_lead(lead_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+    await db.audit(actor=session.actor, action="lead_view", lead_id=lead_id,
+                   ip=_ip(request), user_agent=_ua(request))
+    thread = await _load_thread_audited(request, session, lead_id)
+    return await _render_dialogs(
+        request, session, selected_id=lead_id, rec=rec, thread=thread,
+        replied=bool(replied), reply_err=err, **_DEMO_RENDER,
+    )
+
+
 # ---- /dialogs/{id}/persona — сменить «ИИ-сотрудника» этого диалога --------- #
 @app.post("/dialogs/{lead_id}/persona")
 async def dialog_set_persona(
@@ -1035,7 +1090,8 @@ async def dialog_set_persona(
     await db.set_lead_persona(
         lead_id, persona, actor=session.actor, ip=_ip(request), user_agent=_ua(request)
     )
-    base = "/dialogs" if from_ == "dialog" else "/leads"
+    base = ("/demo-monitor" if from_ == "demo"
+            else "/dialogs" if from_ == "dialog" else "/leads")
     return RedirectResponse(url=f"{base}/{lead_id}?staff=1#thread", status_code=303)
 
 
@@ -1043,7 +1099,8 @@ def _chat_return(lead_id, from_: str, *, replied: bool = False,
                  paused: bool = False, err: str | None = None) -> RedirectResponse:
     """PRG-редирект после действия в чате. from_ ∈ {dialog, card} — allow-list,
     жёстко зашитые базовые пути (НЕ open-redirect: значение не подставляется в URL)."""
-    base = "/dialogs" if from_ == "dialog" else "/leads"
+    base = ("/demo-monitor" if from_ == "demo"
+            else "/dialogs" if from_ == "dialog" else "/leads")
     params = {}
     if replied:
         params["replied"] = "1"
@@ -1327,6 +1384,12 @@ async def lead_reply(
     from_: str = Form("card", alias="from"),
 ):
     await _enforce_csrf(request, session, csrf_token)
+
+    # «Демо-монитор»: ответ демо-лиду из платформенного раздела → форсим RLS-scope на demo-sandbox
+    # (иначе лид не найдётся под активным тенантом оператора). _scope_demo = fail-closed:
+    # require_admin + 404 если демо-тенанта нет (НЕ проваливаемся под тенант оператора) + scope.
+    if from_ == "demo":
+        await _scope_demo(session)
 
     # Длину капим ПЕРВЫМ действием, до БД (§3.13/§5.11). plain-текст, без parse_mode.
     text = (text or "").strip()[: config.MSG_MAX_LEN]

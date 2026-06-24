@@ -49,6 +49,14 @@ def set_active_tenant(tenant_id) -> None:
     _active_tenant.set(str(tenant_id) if tenant_id else None)
 
 
+async def get_tenant_id_by_slug(slug: str):
+    """tenant_id по slug (раздел «Демо-монитор» резолвит demo-sandbox). tenants — реестр, не
+    RLS-scoped (платформа листает всех в «Клиентах») → находит независимо от активного тенанта.
+    None — нет такого тенанта."""
+    async with pool.acquire() as c:
+        return await c.fetchval("select id from tenants where slug = $1", slug)
+
+
 async def _apply_tenant_guc(conn: asyncpg.Connection) -> None:
     """pool setup: ставит app.tenant_id из contextvar на каждый чек-аут соединения.
     На release asyncpg делает RESET ALL → GUC очищается, утечки тенанта между запросами

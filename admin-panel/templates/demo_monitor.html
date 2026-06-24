@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% from "_macros.html" import messenger_badge, avatar, flash %}
+
+{% block title %}Демо-монитор{% endblock %}
+{% block body_class %}page-dialogs{% endblock %}
+{% block main_class %}main--flush{% endblock %}
+
+{# thread.js (авто-рефреш ленты) + reply.js (композер) — только когда справа открыт чат. #}
+{% block head_extra %}{% if lead %}<script src="/static/thread.js?v={{ asset_version }}" defer></script>
+<script src="/static/reply.js?v={{ asset_version }}" defer></script>{% endif %}{% endblock %}
+
+{% block content %}
+<div class="dialogs">
+
+  {# ── Левая колонка: лиды демо-бота (сайт + Telegram) ── #}
+  <aside class="dlist" aria-label="Лиды демо-бота">
+    <div class="dlist__head">
+      <p class="dlist__title" style="font-weight:700;padding:.45rem .2rem .1rem">Демо-монитор</p>
+      <p class="card__note" style="margin:.1rem .2rem .55rem">Лиды демо-бота «ИИ-Агент Про» — с сайта и из Telegram. Веб-чат — просмотр; в Telegram можно ответить.</p>
+    </div>
+
+    <div class="dlist__scroll">
+      {% for d in dialogs %}
+      <a class="dcard{% if d.id == selected_id %} is-active{% endif %}" href="{{ list_base }}/{{ d.id }}">
+        <span class="dcard__ava">{{ avatar(d.name, d.source) }}</span>
+        <span class="dcard__body">
+          <span class="dcard__row">
+            <span class="dcard__name">{{ d.name|e if d.name else ('Гость сайта' if d.messenger == 'web' else 'Без имени') }}
+              <span class="dcard__chan">{{ messenger_badge(d.messenger) }}</span></span>
+            <span class="dcard__time">{{ d.time_label }}</span>
+          </span>
+          <span class="dcard__row">
+            <span class="dcard__preview">{{ d.last_preview|e }}</span>
+            {% if d.unread %}<span class="dcard__unread" title="Без ответа">{{ d.unread }}</span>{% endif %}
+          </span>
+        </span>
+      </a>
+      {% else %}
+      <p class="dlist__empty muted">Пока нет диалогов демо. Список заполнится, когда кто-то напишет демо-боту на сайте или в Telegram.</p>
+      {% endfor %}
+    </div>
+  </aside>
+
+  {# ── Правая колонка: переписка выбранного диалога ── #}
+  <section class="dchat" aria-label="Переписка">
+    {% if lead %}
+    <header class="dchat__bar">
+      <div class="dchat__id">
+        {{ avatar(lead.name, lead.source) }}
+        <div class="dchat__who">
+          <span class="dchat__name">{{ lead.name|e if lead.name else ('Гость сайта' if lead.messenger == 'web' else 'Без имени') }}</span>
+          <span class="dchat__meta">
+            {{ messenger_badge(lead.messenger) }}
+            {% if lead.unsubscribed_at %}<span class="badge badge--unsub" title="Клиент отписался">Отписан</span>{% endif %}
+          </span>
+        </div>
+      </div>
+    </header>
+
+    {% if not lead.can_reply %}
+    <div class="dchat__staff">
+      <span class="dchat__staff-now">👁 Веб-чат — только просмотр: посетителю сайта нельзя написать в ответ напрямую. «Горячие» веб-лиды приходят карточкой в вашу группу эскалации.</span>
+    </div>
+    {% endif %}
+
+    {% if replied or reply_err %}
+    <div class="dchat__flash">
+      {% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
+      {% if reply_err %}{{ flash(reply_err, 'error') }}{% endif %}
+    </div>
+    {% endif %}
+
+    <div class="dchat__surface">
+      {% include "_chat.html" %}
+    </div>
+    {% else %}
+    <div class="dchat__empty">
+      <div class="dchat__empty-card">
+        <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor"
+             stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+        </svg>
+        <p class="dchat__empty-title">Выберите диалог</p>
+        <p class="dchat__empty-text">Слева — лиды демо-бота с сайта (Сайт) и из Telegram. Откройте любой, чтобы увидеть переписку.</p>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

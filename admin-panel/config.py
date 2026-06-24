@@ -255,7 +255,7 @@ SOURCE_LABELS = {
     "max": "MAX",
     "other": "Другое",
 }
-MESSENGER_LABELS = {"tg": "Telegram", "vk": "ВКонтакте", "max": "MAX"}
+MESSENGER_LABELS = {"tg": "Telegram", "vk": "ВКонтакте", "max": "MAX", "web": "Сайт"}
 
 # ── Платежи / заказы (раздел «Платежи», schema_orders.sql) ───────────────────
 # Статусы заказа — синхронны CHECK orders_status_chk. Валюты переиспользуем из
