@@ -28,6 +28,10 @@ async def main() -> None:
     fails: list[str] = []
     async with db.pool.acquire() as c:
         async def drop() -> None:
+            # products.tenant_id — FK БЕЗ on delete cascade → удаляем продукты ПЕРВЫМИ, потом тенанта.
+            await c.execute(
+                "delete from products where tenant_id in "
+                "(select id from tenants where slug = any($1::text[]))", [SLUG_A, SLUG_B])
             await c.execute("delete from tenants where slug = any($1::text[])", [SLUG_A, SLUG_B])
 
         async def mk_tenant(slug):
@@ -44,7 +48,7 @@ async def main() -> None:
         ta, tb = await mk_tenant(SLUG_A), await mk_tenant(SLUG_B)
         try:
             pid_lm = await mk_product(ta, "lead_magnet", "FILEID-A")
-            pid_other = await mk_product(ta, "course", "FILEID-X")
+            pid_other = await mk_product(ta, "tripwire", "FILEID-X")  # валидный не-lead_magnet вид
 
             tok = db.current_tenant_id.set(ta)
             try:
