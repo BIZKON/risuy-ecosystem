@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import messenger_badge, avatar, flash %}
+{% from "_macros.html" import messenger_badge, avatar, flash, bot_toggle, bot_mode_badge %}
 
 {% block title %}Демо-монитор{% endblock %}
 {% block body_class %}page-dialogs{% endblock %}
@@ -51,10 +51,18 @@
           <span class="dchat__name">{{ lead.name|e if lead.name else ('Гость сайта' if lead.messenger == 'web' else 'Без имени') }}</span>
           <span class="dchat__meta">
             {{ messenger_badge(lead.messenger) }}
+            {% if lead.can_reply %}{{ bot_mode_badge(lead) }}{% endif %}
             {% if lead.unsubscribed_at %}<span class="badge badge--unsub" title="Клиент отписался">Отписан</span>{% endif %}
           </span>
         </div>
       </div>
+      {# Ручной режим — только для отвечаемых (TG) демо-лидов: у веб-чата пауза не действует
+         (бэкенд _demo_chat отвечает всегда, минуя проверку bot_paused). from='demo' → _scope_demo. #}
+      {% if lead.can_reply %}
+      <div class="dchat__actions">
+        {{ bot_toggle(lead, csrf_token, 'demo') }}
+      </div>
+      {% endif %}
     </header>
 
     {% if not lead.can_reply %}
@@ -63,9 +71,10 @@
     </div>
     {% endif %}
 
-    {% if replied or reply_err %}
+    {% if replied or paused_flash or reply_err %}
     <div class="dchat__flash">
       {% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
+      {% if paused_flash %}{{ flash('Режим бота переключён.', 'ok') }}{% endif %}
       {% if reply_err %}{{ flash(reply_err, 'error') }}{% endif %}
     </div>
     {% endif %}

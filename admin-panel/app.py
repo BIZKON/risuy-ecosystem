@@ -1047,6 +1047,7 @@ async def demo_monitor_detail(
     lead_id: uuid.UUID,
     session: auth.Session = Depends(require_session),
     replied: int = 0,
+    paused: int = 0,
     err: str | None = None,
 ):
     await _scope_demo(session)
@@ -1058,7 +1059,7 @@ async def demo_monitor_detail(
     thread = await _load_thread_audited(request, session, lead_id)
     return await _render_dialogs(
         request, session, selected_id=lead_id, rec=rec, thread=thread,
-        replied=bool(replied), reply_err=err, **_DEMO_RENDER,
+        replied=bool(replied), paused_flash=bool(paused), reply_err=err, **_DEMO_RENDER,
     )
 
 
@@ -1361,6 +1362,11 @@ async def lead_bot_resume(
 async def _set_bot_paused(request, lead_id, session, csrf_token, *, paused: bool,
                           from_: str = "card"):
     await _enforce_csrf(request, session, csrf_token)
+    # «Демо-монитор»: ручной режим демо-лида из платформенного раздела → форсим RLS-scope на
+    # demo-sandbox (как в lead_reply), иначе UPDATE под активным тенантом оператора не найдёт
+    # демо-лид → 404. _scope_demo = fail-closed (require_admin + 404 если демо-тенанта нет).
+    if from_ == "demo":
+        await _scope_demo(session)
     # UPDATE одной колонки leads.bot_paused в транзакции с аудитом (bot_paused|bot_resumed).
     # Telegram панель НЕ трогает: на паузе бот сам перестаёт авто-отвечать (его проверки).
     row = await db.set_bot_paused_with_audit(
