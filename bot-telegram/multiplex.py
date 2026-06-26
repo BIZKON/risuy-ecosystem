@@ -127,7 +127,7 @@ async def t_consent(cb: CallbackQuery) -> None:
         await cb.answer("Вы уже получили материал 🎉", show_alert=True)
         return
     await cb.answer()
-    await db.set_consent(cb.from_user.id, True)
+    await db.set_consent(cb.from_user.id, True, consent_text=cfg.get("consent_text") or None, channel="tg")
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001

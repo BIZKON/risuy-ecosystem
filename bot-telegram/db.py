@@ -1,5 +1,6 @@
 """Слой доступа к Postgres через asyncpg. Простой пул + функции по шагам воронки."""
 import contextvars
+import hashlib
 import json
 import logging
 import uuid
@@ -106,12 +107,28 @@ async def upsert_start(tg_user_id: int, source: str, *, messenger: str = "tg") -
         )
 
 
-async def set_consent(tg_user_id: int, value: bool) -> None:
+async def set_consent(tg_user_id: int, value: bool, *, consent_text: str | None = None,
+                      doc_version: int = 1, channel: str = "tg") -> None:
+    """Ставит leads.consent И пишет событие в реестр согласий consent_events (152-ФЗ ст. 9 —
+    доказательство кто/когда/на какую редакцию текста). Одной транзакцией (атомарно): флаг и
+    запись реестра не расходятся. consent_text → text_hash (на какую редакцию дано согласие).
+    Событие 'granted' пишется только при выдаче (value=True); отзыв ('revoked') — отдельным путём
+    (кнопка «Отозвать согласие»). tenant-scoped (бот=owner, фильтрует tenant_id явно)."""
+    text_hash = (hashlib.sha256(consent_text.encode("utf-8")).hexdigest()
+                 if consent_text else None)
     async with pool.acquire() as c:
-        await c.execute(
-            "update leads set consent = $2 where tg_user_id = $1 and tenant_id = $3",
-            tg_user_id, value, tenant_id(),
-        )
+        async with c.transaction():
+            lead_id = await c.fetchval(
+                "update leads set consent = $2 where tg_user_id = $1 and tenant_id = $3 returning id",
+                tg_user_id, value, tenant_id(),
+            )
+            if value and lead_id is not None:
+                await c.execute(
+                    "insert into consent_events "
+                    "(tenant_id, lead_id, doc_type, doc_version, text_hash, action, channel) "
+                    "values ($1, $2, 'consent', $3, $4, 'granted', $5)",
+                    tenant_id(), lead_id, doc_version, text_hash, channel,
+                )
 
 
 async def set_name(tg_user_id: int, name: str) -> None:
