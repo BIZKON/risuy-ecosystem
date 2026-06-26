@@ -3786,6 +3786,34 @@ async def renew_subscription(tenant_id, subscription_id, yk_payment_id: str,
             return True
 
 
+# Дефолты сида воронки нового тенанта (плейсхолдеры). Реквизиты согласия (operator_*) и сам
+# лид-магнит (url/file_id) тенант заполняет сам в разделе «Лид-магнит». funnel_enabled НЕ сеем →
+# воронка стартует ВЫКЛЮЧЕННОЙ, пока тенант не настроит и не включит (анти-«полупустая воронка»).
+_FUNNEL_SEED_DEFAULTS = {
+    "welcome_text": "Здравствуйте! 🌷 Помогу забрать ваш подарок — это займёт минуту.",
+    "data_purpose": "отправить материалы и быть на связи по вашему запросу",
+    "leadmagnet_kind": "link",
+    "leadmagnet_caption": "Готово! 🎉 Лови свой подарок:",
+}
+
+
+async def seed_default_funnel(tenant_id) -> None:
+    """Засев дефолт-шаблона воронки выдачи лид-магнита новому тенанту (при активации подписки).
+
+    Идемпотентно и НЕ деструктивно (on conflict do nothing) — на ренью/повторе НЕ перетирает уже
+    настроенное тенантом. Под set_config('app.tenant_id') (RLS). funnel_enabled не ставим."""
+    if not tenant_id:
+        return
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            for key, value in _FUNNEL_SEED_DEFAULTS.items():
+                await c.execute(
+                    "insert into tenant_settings (tenant_id, key, value) values ($1, $2, $3) "
+                    "on conflict (tenant_id, key) do nothing",
+                    tenant_id, key, value)
+
+
 async def activate_subscription_from_payment(
     tenant_id, plan_code: str, yk_payment_id: str, amount_microrub: int, period_days: int,
     *, payment_method_id: str | None = None, receipt_email: str | None = None,
@@ -3845,7 +3873,14 @@ async def activate_subscription_from_payment(
                 c, actor="yookassa-webhook", action="subscription_activated",
                 detail={"tenant_id": str(tenant_id), "plan": plan_code,
                         "payment_id": yk_payment_id, "credited_microrub": inc})
-            return True
+    # Активация прошла (первый раз) → засев дефолт-шаблона воронки выдачи лид-магнита новому тенанту.
+    # ВНЕ транзакции активации и best-effort: сбой сида НЕ должен откатывать оплату/кредиты.
+    try:
+        await seed_default_funnel(tenant_id)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "seed_default_funnel: сбой сида воронки tid=%s", tenant_id, exc_info=True)
+    return True
 
 
 async def list_platform_payments(tenant_id, *, limit: int = 30) -> list[asyncpg.Record]:
