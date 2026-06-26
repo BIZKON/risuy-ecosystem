@@ -3274,6 +3274,61 @@ async def set_tenant_escalation_config(
             )
 
 
+# ── Конструктор воронки выдачи лид-магнита (tenant_settings, RLS). Раздел панели «Лид-магнит». ──
+async def get_funnel_config_panel(tenant_id) -> dict:
+    """Сырые значения ключей конструктора воронки для предзаполнения формы панели.
+    Под set_config('app.tenant_id') (RLS). Возвращает {key: value} по всем FUNNEL_KEYS
+    (отсутствующие — пустая строка), чтобы шаблон не падал на missing-ключах."""
+    from shared.leadmagnet import FUNNEL_KEYS
+    out = {k: "" for k in FUNNEL_KEYS}
+    if not tenant_id:
+        return out
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            rows = await c.fetch(
+                "select key, value from tenant_settings where tenant_id = $1 and key = any($2::text[])",
+                tenant_id, FUNNEL_KEYS,
+            )
+    for r in rows:
+        out[r["key"]] = r["value"] or ""
+    return out
+
+
+async def set_funnel_config(
+    tenant_id, fields: dict, *, actor: str, ip: str | None, user_agent: str | None,
+) -> list[str]:
+    """Сохранить конфиг воронки (upsert ключей FUNNEL_KEYS) + аудит ОДНОЙ транзакцией под RLS.
+
+    Валидирует через общий shared/leadmagnet.validate_funnel_fields. При ошибках НИЧЕГО не пишет
+    и возвращает список человекочитаемых ошибок. Пустой список = успех. Текст согласия НЕ хранится
+    как свободный ввод — в боте он генерится из структурных полей (operator_*) тем же модулем."""
+    from shared.leadmagnet import FUNNEL_KEYS, validate_funnel_fields
+    if not tenant_id:
+        raise ValueError("set_funnel_config: tenant_id обязателен")
+    errs = validate_funnel_fields(fields)
+    if errs:
+        return errs
+    pairs = [(k, str(fields.get(k) or "").strip()) for k in FUNNEL_KEYS]
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            for key, value in pairs:
+                await c.execute(
+                    "insert into tenant_settings (tenant_id, key, value) values ($1, $2, $3) "
+                    "on conflict (tenant_id, key) do update "
+                    "set value = excluded.value, updated_at = now()",
+                    tenant_id, key, value,
+                )
+            await _insert_audit(
+                c, actor=actor, action="tenant_funnel_set", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id),
+                        "funnel_enabled": bool(str(fields.get("funnel_enabled") or "").strip()),
+                        "leadmagnet_kind": (fields.get("leadmagnet_kind") or None)},
+            )
+    return []
+
+
 # ── Слой B: CRUD триггеров клиента (tenant_triggers, RLS). Раздел панели «Триггеры». ──
 _TRIGGER_SELECT = ("id, type, action, stopwords, intent_desc, msg_count, "
                    "notify_chat_id, notify_topic_id, reply_text, enabled, position")
