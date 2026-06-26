@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Smoke: канонический генератор согласия 152-ФЗ + валидация полей конструктора лид-магнита.
+Чистый (без БД/сети) — гоняется на .venv-smoke без секретов.
+Запуск:  ./.venv-smoke/bin/python scripts/consent_text_smoke.py
+"""
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)  # пакет shared (как в b5_payments_smoke и др.)
+
+from shared.leadmagnet import build_consent_text, validate_funnel_fields, FUNNEL_FIELDS  # noqa: E402
+
+
+def main() -> None:
+    fails: list[str] = []
+
+    # 1) Генерация подставляет реквизиты и содержит отзыв + упоминание политики
+    t = build_consent_text("ИП Петров П.П.", "770000000000", "hello@petrov.ru",
+                           data_purpose=None, privacy_url="https://petrov.ru/privacy")
+    for must in ("ИП Петров П.П.", "770000000000", "hello@petrov.ru"):
+        if must not in t:
+            fails.append(f"в согласии нет '{must}'")
+    if "отозв" not in t.lower() and "отзыв" not in t.lower():
+        fails.append("в согласии нет упоминания отзыва согласия")
+    if "политик" not in t.lower():
+        fails.append("при наличии privacy_url нет упоминания политики")
+
+    # phone_step=False → телефон в перечне данных не упоминается
+    t2 = build_consent_text("ИП", "7700000000", "a@b.ru", phone_step=False)
+    if "телефон" in t2.lower():
+        fails.append("phone_step=False, а телефон в данных всё равно есть")
+
+    # 2) Пустой набор при включённой воронке → ошибки про оператора и лид-магнит
+    errs = validate_funnel_fields({"funnel_enabled": "1"})
+    if not any("оператор" in e.lower() for e in errs):
+        fails.append(f"нет ошибки про оператора: {errs}")
+    if not any("лид-магнит" in e.lower() for e in errs):
+        fails.append(f"нет ошибки про лид-магнит: {errs}")
+
+    # 3) Корректный link-набор → без ошибок
+    ok = validate_funnel_fields({
+        "funnel_enabled": "1", "operator_name": "ИП Петров", "operator_inn": "770000000000",
+        "operator_email": "a@b.ru", "leadmagnet_kind": "link", "leadmagnet_url": "https://x.ru/g.pdf"})
+    if ok:
+        fails.append(f"корректный набор дал ошибки: {ok}")
+
+    # 4) Кривые ИНН / email / url ловятся
+    bad = validate_funnel_fields({
+        "funnel_enabled": "1", "operator_name": "ИП", "operator_inn": "abc",
+        "operator_email": "not-an-email", "leadmagnet_kind": "link", "leadmagnet_url": "ftp://x"})
+    if not any("инн" in e.lower() for e in bad):
+        fails.append(f"кривой ИНН не пойман: {bad}")
+    if not any(("mail" in e.lower()) or ("почт" in e.lower()) for e in bad):
+        fails.append(f"кривой email не пойман: {bad}")
+    if not any(("ссылк" in e.lower()) or ("url" in e.lower()) for e in bad):
+        fails.append(f"кривой url не пойман: {bad}")
+
+    # 5) Выключенная воронка → без обязательных ошибок
+    off = validate_funnel_fields({"funnel_enabled": ""})
+    if off:
+        fails.append(f"выключенная воронка дала ошибки: {off}")
+
+    # 6) FUNNEL_FIELDS — непустой контракт с ключевыми полями
+    keys = {f["key"] for f in FUNNEL_FIELDS}
+    for need in ("funnel_enabled", "operator_name", "operator_inn", "operator_email", "leadmagnet_kind"):
+        if need not in keys:
+            fails.append(f"FUNNEL_FIELDS не содержит ключ {need}")
+
+    if fails:
+        print("\n".join("❌ " + f for f in fails))
+        raise SystemExit(1)
+    print("🟢 consent_text_smoke зелёный")
+
+
+if __name__ == "__main__":
+    main()
