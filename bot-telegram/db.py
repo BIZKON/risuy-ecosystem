@@ -1388,6 +1388,69 @@ async def get_tenant_ai_overrides(tid) -> dict:
     }
 
 
+async def get_funnel_config(tid) -> dict:
+    """Пер-тенант настройки воронки выдачи лид-магнита из tenant_settings (конструктор).
+
+    Собирает готовый конфиг с фолбэками; consent_text генерится из СТРУКТУРНЫХ полей через
+    общий 152-ФЗ-шаблон shared/leadmagnet (единый источник истины формулировки). enabled=False,
+    если у тенанта нет ключа funnel_enabled (Школа/непровиженный) → бот идёт прежним путём.
+    Сбой БД → enabled=False (диалог не роняем). Импорт shared — ленивый (как get_tenant_shop_creds)."""
+    keys = [
+        "funnel_enabled", "welcome_text",
+        "operator_name", "operator_inn", "operator_email", "data_purpose",
+        "privacy_url", "company_name", "phone_step_enabled",
+        "gate_enabled", "gate_channel_id", "gate_channel_url",
+        "leadmagnet_kind", "leadmagnet_url", "leadmagnet_file_id", "leadmagnet_caption",
+        "video_note_file_id",
+    ]
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "select key, value from tenant_settings "
+                "where tenant_id = $1 and key = any($2::text[])",
+                tid, keys,
+            )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Не удалось прочитать настройки воронки тенанта %s", tid, exc_info=True)
+        rows = []
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+
+    def s(k: str) -> str:
+        return (kv.get(k) or "").strip()
+
+    phone_step = bool(s("phone_step_enabled"))
+    consent_text = ""
+    if s("operator_name") and s("operator_inn") and s("operator_email"):
+        from shared.leadmagnet import build_consent_text
+        consent_text = build_consent_text(
+            s("operator_name"), s("operator_inn"), s("operator_email"),
+            data_purpose=s("data_purpose") or None,
+            privacy_url=s("privacy_url") or None,
+            phone_step=phone_step,
+        )
+    return {
+        "enabled": bool(s("funnel_enabled")),
+        "welcome_text": kv.get("welcome_text") or "",
+        "consent_text": consent_text,
+        "privacy_url": s("privacy_url") or None,
+        "company_name": s("company_name") or s("operator_name"),
+        "phone_step": phone_step,
+        "gate": {
+            "enabled": bool(s("gate_enabled")),
+            "channel_id": s("gate_channel_id") or None,
+            "channel_url": s("gate_channel_url") or None,
+        },
+        "leadmagnet": {
+            "kind": s("leadmagnet_kind") or None,
+            "url": s("leadmagnet_url") or None,
+            "file_id": s("leadmagnet_file_id") or None,
+            "caption": kv.get("leadmagnet_caption") or "",
+        },
+        "video_note_file_id": s("video_note_file_id") or None,
+    }
+
+
 async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
     """Конфиг ИИ демо-тенанта для ВЕБ-чата на сайте (зеркало Telegram-демо): system_prompt + model
     (gateway-бэкенд). None — демо-тенанта нет или Лия выключена. Бот=owner, RLS обходит; читаем
