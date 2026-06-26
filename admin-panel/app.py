@@ -4635,6 +4635,8 @@ def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: boo
             "tenant_name": session.active_tenant_name,
             "values": values,
             "consent_preview": preview,
+            "leadmagnet_has_file": bool(str(values.get("leadmagnet_product_id") or "").strip()),
+            "max_file_mb": config.MAX_PRODUCT_FILE_MB,
             "errors": list(errors),
             "saved": saved,
             "support_url": _safe_support_url(config.SUPPORT_URL),
@@ -4667,12 +4669,30 @@ async def lead_magnet_save(
         return _render_lead_magnet(
             request, session, values=empty,
             errors=["Кабинет ещё не привязан к клиенту — обратитесь в поддержку."])
-    # Все поля конструктора из формы (чекбоксы шлют '1' при включении, иначе отсутствуют → '').
+    # Все поля конструктора из формы (чекбоксы шлют '1' при включении, иначе отсутствуют → '';
+    # leadmagnet_product_id — скрытое поле, несёт текущее значение, переопределяется при загрузке).
     fields = {k: str(form.get(k) or "").strip() for k in leadmagnet.FUNNEL_KEYS}
     # Серверные капы на свободный текст (анти-распухание БД; клиентский maxlength — не гарантия).
     fields["welcome_text"] = fields["welcome_text"][:1500]
     fields["data_purpose"] = fields["data_purpose"][:300]
     fields["leadmagnet_caption"] = fields["leadmagnet_caption"][:500]
+    # Загрузка файла-материала: создаём tenant-продукт lead_magnet (бот-воркёр зальёт в Telegram и
+    # проставит file_tg_id), его id → leadmagnet_product_id. Переиспользуем плумбинг «Продуктов».
+    upload = form.get("leadmagnet_file")
+    if upload is not None and getattr(upload, "filename", ""):
+        file_meta, file_err = await _read_product_file(request, upload)
+        if file_err:
+            return _render_lead_magnet(
+                request, session, values=fields,
+                errors=[f"Файл не подошёл (проверьте тип: PDF/изображение/документ, и размер ≤ "
+                        f"{config.MAX_PRODUCT_FILE_MB} МБ). Код: {file_err}"])
+        pid = await db.create_product_with_audit(
+            name="Лид-магнит", kind="lead_magnet", price=None, currency="RUB",
+            caption=(fields.get("leadmagnet_caption") or None), link=None, file_meta=file_meta,
+            status="active", tenant_id=tid, actor=session.actor,
+            ip=_ip(request), user_agent=_ua(request))
+        fields["leadmagnet_product_id"] = str(pid)
+        fields["leadmagnet_kind"] = "file"  # загрузили файл → тип «Файл»
     errs = await db.set_funnel_config(
         tid, fields, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     if errs:

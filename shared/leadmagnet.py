@@ -95,7 +95,10 @@ FUNNEL_FIELDS: list[dict] = [
 
     {"key": "leadmagnet_kind", "label": "Тип лид-магнита", "kind": "select", "options": ["link", "file"], "required": False},
     {"key": "leadmagnet_url", "label": "Ссылка на лид-магнит", "kind": "url", "required": "leadmagnet:link"},
-    {"key": "leadmagnet_file_id", "label": "Файл лид-магнита", "kind": "tg_file", "required": "leadmagnet:file"},
+    # leadmagnet_product_id ставит обработчик загрузки файла (создаёт tenant-продукт lead_magnet);
+    # leadmagnet_file_id — продвинутый ручной путь (сырой tg file_id). Для kind=file достаточно любого.
+    {"key": "leadmagnet_product_id", "label": "Файл-материал (продукт)", "kind": "hidden", "required": False},
+    {"key": "leadmagnet_file_id", "label": "Файл лид-магнита (tg file_id, продвинуто)", "kind": "tg_file", "required": False},
     {"key": "leadmagnet_caption", "label": "Подпись к выдаче", "kind": "longtext", "required": False},
 
     {"key": "video_note_file_id", "label": "Видео-кружок перед выдачей (опц.)", "kind": "tg_file", "required": False},
@@ -138,8 +141,9 @@ def validate_funnel_fields(d: dict) -> list[str]:
         elif not _is_http_url(d.get("leadmagnet_url")):
             errs.append("Ссылка на лид-магнит должна начинаться с http:// или https://.")
     elif kind == "file":
-        if not _truthy(d.get("leadmagnet_file_id")):
-            errs.append("Загрузите файл лид-магнита.")
+        # Файл настроен, если загружен (product_id) ИЛИ задан сырой tg file_id (продвинуто).
+        if not _truthy(d.get("leadmagnet_product_id")) and not _truthy(d.get("leadmagnet_file_id")):
+            errs.append("Загрузите файл лид-магнита (или укажите tg file_id).")
 
     # Гейт-канал (если включён)
     if _truthy(d.get("gate_enabled")):

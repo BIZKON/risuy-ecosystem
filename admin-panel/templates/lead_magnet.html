@@ -25,7 +25,7 @@
 </section>
 {% else %}
 
-<form method="post" action="/lead-magnet" autocomplete="off">
+<form method="post" action="/lead-magnet" enctype="multipart/form-data" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
   {# ── 1. Воронка ── #}
@@ -132,10 +132,16 @@
              placeholder="https://example.ru/guide.pdf" maxlength="500">
     </label>
     <label class="field">
-      <span class="field__label">Файл лид-магнита <span class="field__hint">для типа «Файл» — Telegram file_id (загрузка файлом — скоро)</span></span>
-      <input class="field__input" type="text" name="leadmagnet_file_id" value="{{ values.leadmagnet_file_id|e }}"
-             placeholder="BQACAg...">
+      <span class="field__label">Файл лид-магнита <span class="field__hint">для типа «Файл» — PDF/документ/изображение до {{ max_file_mb }} МБ</span></span>
+      <input class="field__input" type="file" name="leadmagnet_file">
     </label>
+    <input type="hidden" name="leadmagnet_product_id" value="{{ values.leadmagnet_product_id|e }}">
+    {% if leadmagnet_has_file %}<p class="hint hint--block">✅ Файл загружен — он будет выдан после согласия. Чтобы заменить, выберите новый файл выше.</p>{% endif %}
+    <details class="hint hint--block">
+      <summary>Продвинуто: указать Telegram file_id вручную (вместо загрузки)</summary>
+      <input class="field__input" type="text" name="leadmagnet_file_id" value="{{ values.leadmagnet_file_id|e }}"
+             placeholder="BQACAg..." style="margin-top:8px">
+    </details>
     <label class="field">
       <span class="field__label">Подпись к выдаче <span class="field__hint">необязательно</span></span>
       <textarea class="field__input field__textarea" name="leadmagnet_caption" maxlength="500" rows="2"

@@ -1410,8 +1410,8 @@ async def get_funnel_config(tid) -> dict:
         "operator_name", "operator_inn", "operator_email", "data_purpose",
         "privacy_url", "company_name", "phone_step_enabled",
         "gate_enabled", "gate_channel_id", "gate_channel_url",
-        "leadmagnet_kind", "leadmagnet_url", "leadmagnet_file_id", "leadmagnet_caption",
-        "video_note_file_id",
+        "leadmagnet_kind", "leadmagnet_url", "leadmagnet_file_id", "leadmagnet_product_id",
+        "leadmagnet_caption", "video_note_file_id",
     ]
     try:
         async with pool.acquire() as c:
@@ -1455,10 +1455,27 @@ async def get_funnel_config(tid) -> dict:
             "kind": s("leadmagnet_kind") or None,
             "url": s("leadmagnet_url") or None,
             "file_id": s("leadmagnet_file_id") or None,
+            "product_id": s("leadmagnet_product_id") or None,
             "caption": kv.get("leadmagnet_caption") or "",
         },
         "video_note_file_id": s("video_note_file_id") or None,
     }
+
+
+async def get_funnel_product(product_id: int) -> dict | None:
+    """Продукт-материал тенант-воронки по id (tenant-scoped, kind='lead_magnet') — для выдачи файла.
+    file_tg_id готов → шлём по нему; ещё нет (бот-воркёр не залил байты) → file_tg_id=None (вызвавший
+    мягко попросит подождать). None — продукта нет / не наш тенант / не lead_magnet."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select file_tg_id, file_mime, link from products "
+            "where id = $1 and tenant_id = $2 and kind = 'lead_magnet'",
+            product_id, tenant_id(),
+        )
+    if row is None:
+        return None
+    return {"file_tg_id": row["file_tg_id"], "file_mime": row["file_mime"],
+            "link": (row["link"] or "").strip() or None}
 
 
 async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:

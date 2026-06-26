@@ -44,6 +44,7 @@ PHONE_HINT = "Нажмите кнопку «📱 Поделиться номер
 ASK_SUBSCRIBE = "Остался один шаг 🙂 Подпишитесь на канал и нажмите «Я подписался» — и я сразу пришлю материал."
 NOT_SUBSCRIBED_ALERT = "Пока не вижу подписки. Подпишитесь на канал и нажмите ещё раз 🌷"
 NOT_CONFIGURED = "Спасибо! Материал скоро будет — мы на связи. 🌷"
+FILE_PREPARING = "Спасибо! Файл готовится — пришлю буквально через минуту, загляните чуть позже 🌷"
 
 
 # ── ЧИСТЫЕ хелперы (без aiogram/messaging — тестируемы в .venv-smoke) ──────────
@@ -69,16 +70,18 @@ def next_after_phone(cfg: dict) -> str:
 
 
 def deliver_plan(cfg: dict) -> dict:
-    """Что выдаём на финале (без сети). configured=False → лид-магнит не настроен (мягкий ответ)."""
+    """Что выдаём на финале (без сети). configured=False → лид-магнит не настроен (мягкий ответ).
+    Для kind=file материал — загруженный продукт (product_id) ИЛИ сырой tg file_id."""
     lm = cfg.get("leadmagnet") or {}
     kind = lm.get("kind")
     caption = (lm.get("caption") or "").strip() or DEFAULT_CAPTION
     url = (lm.get("url") or "").strip() or None
     file_id = (lm.get("file_id") or "").strip() or None
-    configured = bool((kind == "link" and url) or (kind == "file" and file_id))
+    product_id = str(lm.get("product_id") or "").strip() or None
+    configured = bool((kind == "link" and url) or (kind == "file" and (file_id or product_id)))
     return {"has_video": bool((cfg.get("video_note_file_id") or "").strip()),
             "kind": kind, "caption": caption, "url": url, "file_id": file_id,
-            "configured": configured}
+            "product_id": product_id, "configured": configured}
 
 
 # ── Клавиатуры (aiogram — ленивый импорт) ─────────────────────────────────────
@@ -194,14 +197,38 @@ async def deliver(bot, user_id: int, cfg: dict) -> None:
     if not plan["configured"]:
         await messaging.send_text(bot, user_id, NOT_CONFIGURED, source="funnel")
         return  # лид-магнит не настроен → НЕ помечаем guide_sent
-    if plan["kind"] == "file" and plan["file_id"]:
-        try:
-            await messaging.send_by_kind(bot, user_id, "document", file_id=plan["file_id"],
-                                         caption=plan["caption"], source="funnel")
-            await db.mark_guide_sent(user_id)  # помечаем ТОЛЬКО после успешной отправки файла
-            return
-        except Exception as e:  # noqa: BLE001 — сбой файла → фолбэк на ссылку/текст
-            logger.warning("funnel: файл-лид-магнит не выдан (%s) — фолбэк", e)
+    if plan["kind"] == "file":
+        # 1) Загруженный файл-материал = tenant-продукт lead_magnet (приоритет; file_tg_id ставит воркёр).
+        if plan["product_id"]:
+            try:
+                prod = await db.get_funnel_product(int(plan["product_id"]))
+            except (TypeError, ValueError):
+                prod = None
+            if prod is not None:
+                if prod.get("file_tg_id"):
+                    kind = messaging.kind_for_mime(prod.get("file_mime"))
+                    await messaging.send_by_kind(bot, user_id, kind, file_id=prod["file_tg_id"],
+                                                 caption=plan["caption"], source="funnel")
+                    await db.mark_guide_sent(user_id)
+                    return
+                if prod.get("link"):
+                    await messaging.send_text(bot, user_id, f"{plan['caption']}\n\n{prod['link']}",
+                                              source="funnel", reply_markup=_guide_kb(prod["link"]))
+                    await db.mark_guide_sent(user_id)
+                    return
+                # продукт есть, но файл ещё заливается (file_tg_id не готов) → мягко, НЕ помечаем (повторный проход выдаст)
+                await messaging.send_text(bot, user_id, FILE_PREPARING, source="funnel")
+                return
+            # prod is None (удалён/не наш тенант) → пробуем сырой file_id ниже
+        # 2) Сырой tg file_id (продвинутый путь).
+        if plan["file_id"]:
+            try:
+                await messaging.send_by_kind(bot, user_id, "document", file_id=plan["file_id"],
+                                             caption=plan["caption"], source="funnel")
+                await db.mark_guide_sent(user_id)  # помечаем ТОЛЬКО после успешной отправки
+                return
+            except Exception as e:  # noqa: BLE001 — сбой файла → фолбэк на ссылку/текст
+                logger.warning("funnel: файл-лид-магнит (file_id) не выдан (%s) — фолбэк", e)
     if plan["url"]:
         await messaging.send_text(bot, user_id, f"{plan['caption']}\n\n{plan['url']}",
                                   source="funnel", reply_markup=_guide_kb(plan["url"]))

@@ -59,11 +59,16 @@ def main() -> None:
     if not (pf["configured"] and pf["kind"] == "file" and pf["has_video"] and pf["caption"] == "Лови"):
         fails.append(f"deliver_plan file: {pf}")
 
+    # deliver_plan: файл загружен как продукт (product_id) → configured
+    pp = funnel.deliver_plan({"leadmagnet": {"kind": "file", "product_id": "42"}})
+    if not (pp["configured"] and pp["product_id"] == "42"):
+        fails.append(f"file с product_id должен быть configured: {pp}")
+
     # deliver_plan: незаполненный лид-магнит → configured=False
     if funnel.deliver_plan({"leadmagnet": {"kind": "link", "url": ""}})["configured"]:
         fails.append("link без url не должен быть configured")
-    if funnel.deliver_plan({"leadmagnet": {"kind": "file", "file_id": ""}})["configured"]:
-        fails.append("file без file_id не должен быть configured")
+    if funnel.deliver_plan({"leadmagnet": {"kind": "file", "file_id": "", "product_id": ""}})["configured"]:
+        fails.append("file без file_id и product_id не должен быть configured")
     if funnel.deliver_plan({})["configured"]:
         fails.append("пустой cfg не должен быть configured")
 
