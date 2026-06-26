@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Лид-магнит{% endblock %}
+{% block body_class %}page-my-agent{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Конструктор выдачи лид-магнита</h1>
+  <p class="page-head__hint">Настройте, как ваш бот встречает клиента, берёт согласие на обработку данных и выдаёт лид-магнит. Применяется сразу, без перезапуска.</p>
+</div>
+
+{% if saved %}{{ flash('Настройки воронки сохранены.', 'ok') }}{% endif %}
+{% for e in errors %}{{ flash(e, 'error') }}{% endfor %}
+
+{% if not has_tenant %}
+<section class="card" aria-label="Кабинет не привязан">
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">Этот раздел настраивает воронку выдачи лид-магнита вашего кабинета. Сейчас к вашей учётной записи кабинет не привязан — напишите в поддержку, поможем.</p>
+  {% if support_url %}
+  <div class="acct-actions">
+    <a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a>
+  </div>
+  {% endif %}
+</section>
+{% else %}
+
+<form method="post" action="/lead-magnet" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  {# ── 1. Воронка ── #}
+  <section class="card" aria-label="Воронка">
+    <h2 class="card__title">Воронка</h2>
+    <p class="card__note">Когда воронка включена, бот{% if tenant_name %} кабинета «{{ tenant_name|e }}»{% endif %} на команду /start ведёт клиента по шагам: приветствие → согласие → выдача лид-магнита.</p>
+
+    <label class="field field--check">
+      <input type="checkbox" name="funnel_enabled" value="1"{% if values.funnel_enabled %} checked{% endif %}>
+      <span class="field__label">Включить воронку выдачи лид-магнита</span>
+    </label>
+    <p class="hint hint--block">Пока выключена — бот просто отвечает как ИИ-сотрудник, без воронки. Включайте после заполнения реквизитов и лид-магнита ниже.</p>
+
+    <label class="field">
+      <span class="field__label">Приветствие на /start <span class="field__hint">первое сообщение клиенту</span></span>
+      <textarea class="field__input field__textarea" name="welcome_text" maxlength="1500" rows="3"
+                placeholder="Например: Здравствуйте! 🌷 Помогу забрать ваш подарок — это займёт минуту.">{{ values.welcome_text }}</textarea>
+    </label>
+  </section>
+
+  {# ── 2. Согласие 152-ФЗ (структурные поля → авто-текст) ── #}
+  <section class="card" aria-label="Согласие на обработку данных">
+    <h2 class="card__title">Согласие на обработку данных (152-ФЗ)</h2>
+    <p class="card__note">Текст согласия формируется автоматически из этих полей — так он остаётся юридически корректным. Заполните реквизиты вашего юр.лица/ИП.</p>
+
+    <label class="field">
+      <span class="field__label">Оператор данных <span class="field__hint">юр.лицо или ИП</span></span>
+      <input class="field__input" type="text" name="operator_name" value="{{ values.operator_name|e }}"
+             placeholder="ООО «Ромашка» / ИП Петров П. П." maxlength="200">
+    </label>
+    <label class="field">
+      <span class="field__label">ИНН оператора</span>
+      <input class="field__input" type="text" name="operator_inn" inputmode="numeric"
+             value="{{ values.operator_inn|e }}" placeholder="7700000000" maxlength="12">
+    </label>
+    <label class="field">
+      <span class="field__label">E-mail для отзыва согласия</span>
+      <input class="field__input" type="email" name="operator_email" value="{{ values.operator_email|e }}"
+             placeholder="info@example.ru" maxlength="200">
+    </label>
+    <label class="field">
+      <span class="field__label">Цель обработки <span class="field__hint">необязательно — по умолчанию «отправить материалы и быть на связи»</span></span>
+      <input class="field__input" type="text" name="data_purpose" value="{{ values.data_purpose|e }}"
+             placeholder="отправить материалы и быть на связи по вашему запросу" maxlength="300">
+    </label>
+    <label class="field">
+      <span class="field__label">Ссылка на политику обработки данных <span class="field__hint">необязательно</span></span>
+      <input class="field__input" type="url" name="privacy_url" value="{{ values.privacy_url|e }}"
+             placeholder="https://example.ru/privacy" maxlength="500">
+    </label>
+    <label class="field">
+      <span class="field__label">Название в платёжных описаниях <span class="field__hint">необязательно — по умолчанию = оператор</span></span>
+      <input class="field__input" type="text" name="company_name" value="{{ values.company_name|e }}"
+             placeholder="Ромашка" maxlength="200">
+    </label>
+
+    <div class="field">
+      <span class="field__label">Так клиент увидит текст согласия:</span>
+      {% if consent_preview %}
+      <textarea class="field__input field__textarea" rows="9" readonly>{{ consent_preview }}</textarea>
+      {% else %}
+      <p class="hint hint--block">Заполните оператора, ИНН и e-mail — здесь появится готовый текст согласия. Сохраните, чтобы обновить предпросмотр.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {# ── 3. Подписка на канал (опц.) ── #}
+  <section class="card" aria-label="Подписка на канал">
+    <h2 class="card__title">Подписка на канал <span class="field__hint">опционально</span></h2>
+    <p class="card__note">Если включить — перед выдачей бот попросит клиента подписаться на ваш канал. ⚠️ Бот должен быть администратором этого канала, иначе не сможет проверить подписку.</p>
+
+    <label class="field field--check">
+      <input type="checkbox" name="gate_enabled" value="1"{% if values.gate_enabled %} checked{% endif %}>
+      <span class="field__label">Требовать подписку на канал перед выдачей</span>
+    </label>
+    <label class="field">
+      <span class="field__label">ID канала-гейта <span class="field__hint">вида -1001234567890</span></span>
+      <input class="field__input" type="text" name="gate_channel_id" inputmode="numeric"
+             value="{{ values.gate_channel_id|e }}" placeholder="-1001234567890" maxlength="32">
+    </label>
+    <label class="field">
+      <span class="field__label">Ссылка на канал</span>
+      <input class="field__input" type="url" name="gate_channel_url" value="{{ values.gate_channel_url|e }}"
+             placeholder="https://t.me/your_channel" maxlength="300">
+    </label>
+  </section>
+
+  {# ── 4. Лид-магнит ── #}
+  <section class="card" aria-label="Лид-магнит">
+    <h2 class="card__title">Лид-магнит</h2>
+    <p class="card__note">Что бот выдаёт клиенту после согласия.</p>
+
+    <label class="field">
+      <span class="field__label">Тип лид-магнита</span>
+      <select class="field__input" name="leadmagnet_kind">
+        <option value="">— выберите —</option>
+        <option value="link"{% if values.leadmagnet_kind == 'link' %} selected{% endif %}>Ссылка</option>
+        <option value="file"{% if values.leadmagnet_kind == 'file' %} selected{% endif %}>Файл</option>
+      </select>
+    </label>
+    <label class="field">
+      <span class="field__label">Ссылка на лид-магнит <span class="field__hint">для типа «Ссылка»</span></span>
+      <input class="field__input" type="url" name="leadmagnet_url" value="{{ values.leadmagnet_url|e }}"
+             placeholder="https://example.ru/guide.pdf" maxlength="500">
+    </label>
+    <label class="field">
+      <span class="field__label">Файл лид-магнита <span class="field__hint">для типа «Файл» — Telegram file_id (загрузка файлом — скоро)</span></span>
+      <input class="field__input" type="text" name="leadmagnet_file_id" value="{{ values.leadmagnet_file_id|e }}"
+             placeholder="BQACAg...">
+    </label>
+    <label class="field">
+      <span class="field__label">Подпись к выдаче <span class="field__hint">необязательно</span></span>
+      <textarea class="field__input field__textarea" name="leadmagnet_caption" maxlength="500" rows="2"
+                placeholder="Готово! 🎉 Лови свой подарок:">{{ values.leadmagnet_caption }}</textarea>
+    </label>
+  </section>
+
+  {# ── 5. Дополнительно ── #}
+  <section class="card" aria-label="Дополнительно">
+    <h2 class="card__title">Дополнительно</h2>
+
+    <label class="field field--check">
+      <input type="checkbox" name="phone_step_enabled" value="1"{% if values.phone_step_enabled %} checked{% endif %}>
+      <span class="field__label">Спрашивать номер телефона перед выдачей</span>
+    </label>
+    <label class="field">
+      <span class="field__label">Видео-кружок перед выдачей <span class="field__hint">необязательно — Telegram file_id</span></span>
+      <input class="field__input" type="text" name="video_note_file_id" value="{{ values.video_note_file_id|e }}"
+             placeholder="DQACAg...">
+    </label>
+  </section>
+
+  <div class="form-actions"><button class="btn btn--primary" type="submit">Сохранить</button></div>
+</form>
+
+{% if support_url %}
+<section class="card" aria-label="Поддержка">
+  <div class="card__title">Нужна помощь с настройкой?</div>
+  <p class="card__note">Поможем собрать воронку и проверим, что бот корректно выдаёт лид-магнит.</p>
+  <div class="acct-actions">
+    <a class="btn btn--secondary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a>
+  </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -46,7 +46,7 @@ import security
 import timeweb_ai
 import yookassa
 
-from shared import money, vault
+from shared import leadmagnet, money, vault
 
 
 # --------------------------------------------------------------------------- #
@@ -4607,6 +4607,78 @@ async def my_agent_escalation(
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/my-agent?saved=escalation", status_code=303)
+
+
+# =========================================================================== #
+# Раздел «Лид-магнит» (/lead-magnet) — конструктор воронки выдачи в tenant_settings.
+# Скоуп — активный тенант сессии (клиент настраивает свой; платформа — за активного клиента,
+# как /channels). Текст согласия 152-ФЗ генерится из структурных полей (shared/leadmagnet),
+# свободный ввод текста согласия не предусмотрен. Бот читает get_funnel_config в мультиплексе.
+# =========================================================================== #
+def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: bool = False):
+    preview = ""
+    if values.get("operator_name") and values.get("operator_inn") and values.get("operator_email"):
+        preview = leadmagnet.build_consent_text(
+            values["operator_name"], values["operator_inn"], values["operator_email"],
+            data_purpose=values.get("data_purpose") or None,
+            privacy_url=values.get("privacy_url") or None,
+            phone_step=bool(str(values.get("phone_step_enabled") or "").strip()),
+        )
+    return templates.TemplateResponse(
+        request,
+        "lead_magnet.html",
+        {
+            "active": "lead_magnet",
+            "session": session,
+            "csrf_token": session.csrf_token,
+            "has_tenant": bool(session.active_tenant_id),
+            "tenant_name": session.active_tenant_name,
+            "values": values,
+            "consent_preview": preview,
+            "errors": list(errors),
+            "saved": saved,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+        },
+    )
+
+
+@app.get("/lead-magnet", response_class=HTMLResponse)
+async def lead_magnet_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+):
+    tid = session.active_tenant_id
+    values = (await db.get_funnel_config_panel(tid) if tid
+              else {k: "" for k in leadmagnet.FUNNEL_KEYS})
+    return _render_lead_magnet(request, session, values=values, saved=bool(saved))
+
+
+@app.post("/lead-magnet")
+async def lead_magnet_save(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+):
+    form = await request.form()
+    await _enforce_csrf(request, session, str(form.get("csrf_token") or ""))
+    tid = session.active_tenant_id
+    if not tid:
+        empty = {k: "" for k in leadmagnet.FUNNEL_KEYS}
+        return _render_lead_magnet(
+            request, session, values=empty,
+            errors=["Кабинет ещё не привязан к клиенту — обратитесь в поддержку."])
+    # Все поля конструктора из формы (чекбоксы шлют '1' при включении, иначе отсутствуют → '').
+    fields = {k: str(form.get(k) or "").strip() for k in leadmagnet.FUNNEL_KEYS}
+    # Серверные капы на свободный текст (анти-распухание БД; клиентский maxlength — не гарантия).
+    fields["welcome_text"] = fields["welcome_text"][:1500]
+    fields["data_purpose"] = fields["data_purpose"][:300]
+    fields["leadmagnet_caption"] = fields["leadmagnet_caption"][:500]
+    errs = await db.set_funnel_config(
+        tid, fields, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    if errs:
+        # Не PRG: возвращаем форму с ошибками и введёнными значениями (не теряем ввод).
+        return _render_lead_magnet(request, session, values=fields, errors=errs)
+    return RedirectResponse(url="/lead-magnet?saved=1", status_code=303)
 
 
 # =========================================================================== #
