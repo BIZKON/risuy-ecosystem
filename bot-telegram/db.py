@@ -139,6 +139,16 @@ async def set_subscribed(tg_user_id: int, value: bool) -> None:
         )
 
 
+async def get_lead_status(tg_user_id: int) -> str | None:
+    """Текущий status лида (tenant-scoped) — для гейта повторного прохода тенант-воронки
+    (лид уже 'guide_sent' не гоняем по шагам заново). None — лида нет."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select status from leads where tg_user_id = $1 and tenant_id = $2",
+            tg_user_id, tenant_id(),
+        )
+
+
 async def mark_guide_sent(tg_user_id: int) -> None:
     """Фиксируем выдачу гайда один раз (guide_sent_at не перетираем при повторе)."""
     async with pool.acquire() as c:

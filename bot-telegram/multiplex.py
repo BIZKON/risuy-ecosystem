@@ -38,6 +38,7 @@ import ai
 import config
 import db
 import escalation
+import funnel
 import messaging
 import selling
 import texts
@@ -86,15 +87,89 @@ tenant_router = Router()
 
 @tenant_router.message(Command("start", ignore_case=True))
 async def t_start(message: Message) -> None:
-    """Создаёт лид тенанта (для контекста/метеринга) и шлёт приветствие.
-    Воронка (согласие/телефон/гейт) — следующая подволна; v1 сразу к диалогу."""
+    """Тенант-бот /start. Если у тенанта включена воронка выдачи лид-магнита (конструктор в
+    панели, funnel_enabled) — ведём её: приветствие+согласие → телефон/гейт → выдача. Иначе v1:
+    приветствие + свободный диалог Лии. Перехват оператора (пауза) — бот молчит."""
+    if await db.is_bot_paused(message.from_user.id):
+        return
     try:
         await db.upsert_start(tg_user_id=message.from_user.id, source="other")
     except Exception:  # noqa: BLE001 — лид не критичен для ответа
         logger.warning("multiplex: не создал лид тенанта", exc_info=True)
+    cfg = await db.get_funnel_config(db.tenant_id())
+    if cfg["enabled"]:
+        name = (message.from_user.full_name or "").strip()[:100]
+        if name:
+            try:
+                await db.set_name(message.from_user.id, name)
+            except Exception:  # noqa: BLE001 — имя не критично
+                logger.warning("multiplex: не записал имя лида", exc_info=True)
+        await funnel.start(message, cfg)
+        return
     await messaging.send_text(
         message.bot, message.from_user.id, _TENANT_GREETING, source="funnel"
     )
+
+
+@tenant_router.callback_query(F.data == "consent_yes")
+async def t_consent(cb: CallbackQuery) -> None:
+    """Согласие 152-ФЗ в тенант-воронке → set_consent → следующий шаг (телефон/гейт/выдача).
+    DB-state-driven (без FSM). На паузе оператора — молчим; воронка выключена — no-op; лид уже
+    получил материал (guide_sent) — не гоняем по шагам заново (повтор старой кнопки из истории)."""
+    if await db.is_bot_paused(cb.from_user.id):
+        await cb.answer()
+        return
+    cfg = await db.get_funnel_config(db.tenant_id())
+    if not cfg["enabled"]:
+        await cb.answer()
+        return
+    if await db.get_lead_status(cb.from_user.id) == "guide_sent":
+        await cb.answer("Вы уже получили материал 🎉", show_alert=True)
+        return
+    await cb.answer()
+    await db.set_consent(cb.from_user.id, True)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await funnel.after_consent(cb.bot, cb.from_user.id, cfg)
+
+
+@tenant_router.message(F.contact)
+async def t_contact(message: Message) -> None:
+    """Телефон (кнопка «Поделиться номером») в тенант-воронке → set_phone → гейт/выдача."""
+    if await db.is_bot_paused(message.from_user.id):
+        return
+    cfg = await db.get_funnel_config(db.tenant_id())
+    if not cfg["enabled"]:
+        return
+    phone = message.contact.phone_number
+    if not phone:  # контакт без номера (редкий, но валидный апдейт) → не падаем
+        return
+    await db.set_phone(message.from_user.id, phone, funnel.phone_hash(phone))
+    await funnel.after_phone(message.bot, message.from_user.id, cfg)
+
+
+@tenant_router.callback_query(F.data == "check_sub")
+async def t_check_sub(cb: CallbackQuery) -> None:
+    """Проверка подписки на канал тенанта (гейт). Подписан → выдача; иначе alert. Fail-closed."""
+    if await db.is_bot_paused(cb.from_user.id):
+        await cb.answer()
+        return
+    cfg = await db.get_funnel_config(db.tenant_id())
+    if not cfg["enabled"] or not (cfg.get("gate") or {}).get("enabled"):
+        await cb.answer()
+        return
+    if await funnel.is_subscribed(cb.bot, cfg["gate"]["channel_id"], cb.from_user.id):
+        await cb.answer(funnel.PHONE_OK)
+        await db.set_subscribed(cb.from_user.id, True)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        await funnel.deliver(cb.bot, cb.from_user.id, cfg)
+    else:
+        await cb.answer(funnel.NOT_SUBSCRIBED_ALERT, show_alert=True)
 
 
 @tenant_router.message(F.text)
