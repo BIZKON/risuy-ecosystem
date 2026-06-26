@@ -293,13 +293,22 @@ _DIALOG_SELECT = """
         limit 1
     ) lm on true
     left join lateral (
+        -- «Непрочитанное» = входящие НОВЕЕ момента, когда оператор в последний раз
+        -- ОТВЕТИЛ (исходящее) ЛИБО ОТКРЫЛ диалог (аудит lead_view/thread_view). Открытие
+        -- карточки пишет admin_audit ДО рендера списка → бейдж гаснет в том же ответе.
+        -- Важно для веб-лидов демо: ответить им нельзя (композер скрыт), и раньше бейдж
+        -- залипал навсегда — теперь снимается просмотром.
         select count(*) as unread
         from messages m
         where m.lead_id = l.id and m.direction = 'in'
-          and m.created_at > coalesce(
-              (select max(mo.created_at) from messages mo
-               where mo.lead_id = l.id and mo.direction = 'out'),
-              'epoch'::timestamptz)
+          and m.created_at > greatest(
+              coalesce((select max(mo.created_at) from messages mo
+                        where mo.lead_id = l.id and mo.direction = 'out'),
+                       'epoch'::timestamptz),
+              coalesce((select max(a.at) from admin_audit a
+                        where a.lead_id = l.id
+                          and a.action in ('lead_view', 'thread_view')),
+                       'epoch'::timestamptz))
     ) u on true
 """
 
@@ -320,17 +329,23 @@ async def list_dialogs(
 
 
 async def count_unanswered_dialogs() -> int:
-    """Сколько лидов с непрочитанным входящим (последнее сообщение — от клиента,
-    оператор ещё не ответил). Бейдж раздела «Диалоги» в сайдбаре."""
+    """Сколько лидов с НЕПРОЧИТАННЫМ входящим: есть входящее новее момента, когда
+    оператор в последний раз ответил (исходящее) ЛИБО открыл диалог (аудит просмотра).
+    Бейдж раздела «Диалоги» в сайдбаре. Снимается ответом ИЛИ открытием карточки
+    (паритет с per-row бейджем в _DIALOG_SELECT — см. там комментарий)."""
     q = """
         select count(*) from leads l
         where exists (
             select 1 from messages m
             where m.lead_id = l.id and m.direction = 'in'
-              and m.created_at > coalesce(
-                  (select max(mo.created_at) from messages mo
-                   where mo.lead_id = l.id and mo.direction = 'out'),
-                  'epoch'::timestamptz)
+              and m.created_at > greatest(
+                  coalesce((select max(mo.created_at) from messages mo
+                            where mo.lead_id = l.id and mo.direction = 'out'),
+                           'epoch'::timestamptz),
+                  coalesce((select max(a.at) from admin_audit a
+                            where a.lead_id = l.id
+                              and a.action in ('lead_view', 'thread_view')),
+                           'epoch'::timestamptz))
         )
     """
     async with pool.acquire() as c:
