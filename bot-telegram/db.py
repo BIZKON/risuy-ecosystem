@@ -1085,10 +1085,17 @@ async def bump_product_upload_attempt(product_id: int, error: str) -> None:
 async def set_product_file_id(product_id: int, tg_file_id: str) -> None:
     """Проставить products.file_tg_id и ОБНУЛИТЬ file (bytea) — однократность заливки
     и гигиена места, симметрично set_broadcast_file_id. Пишет БОТ (owner-роль).
-    upload_error чистим (заливка удалась)."""
+    upload_error чистим (заливка удалась).
+
+    Исключение: для kind='lead_magnet' байты (file) НЕ обнуляем — они нужны для
+    файл-выдачи на VK/MAX (там TG file_id не подходит, только прямые байты).
+    Частичный индекс заливки опирается на file_tg_id is null, поэтому после простановки
+    file_tg_id продукт из очереди уходит даже с сохранёнными байтами (не перезаливается)."""
     async with pool.acquire() as c:
         await c.execute(
-            "update products set file_tg_id = $2, file = null, upload_error = null where id = $1",
+            "update products set file_tg_id = $2, upload_error = null, "
+            "  file = case when kind = 'lead_magnet' then file else null end "
+            "where id = $1",
             product_id, tg_file_id,
         )
 
@@ -1539,17 +1546,21 @@ async def get_funnel_config(tid) -> dict:
 
 async def get_funnel_product(product_id: int) -> dict | None:
     """Продукт-материал тенант-воронки по id (tenant-scoped, kind='lead_magnet') — для выдачи файла.
-    file_tg_id готов → шлём по нему; ещё нет (бот-воркёр не залил байты) → file_tg_id=None (вызвавший
-    мягко попросит подождать). None — продукта нет / не наш тенант / не lead_magnet."""
+    file_tg_id готов → шлём по нему (TG-адаптер); ещё нет (бот-воркёр не залил байты) →
+    file_tg_id=None (вызвавший мягко попросит подождать).
+    file_bytes — байты файла для прямой выдачи на VK/MAX (file_tg_id там не подходит);
+    для lead_magnet байты сохраняются после TG-заливки (set_product_file_id не обнуляет их).
+    None — продукта нет / не наш тенант / не lead_magnet."""
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select file_tg_id, file_mime, link from products "
+            "select file_tg_id, file_mime, file_name, file, link from products "
             "where id = $1 and tenant_id = $2 and kind = 'lead_magnet'",
             product_id, tenant_id(),
         )
     if row is None:
         return None
     return {"file_tg_id": row["file_tg_id"], "file_mime": row["file_mime"],
+            "file_name": row["file_name"], "file_bytes": row["file"],
             "link": (row["link"] or "").strip() or None}
 
 
