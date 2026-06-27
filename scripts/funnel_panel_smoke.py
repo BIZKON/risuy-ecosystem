@@ -51,6 +51,21 @@ async def main() -> None:
                 if got.get(k) != v:
                     fails.append(f"round-trip {k}: ожидал {v!r}, получил {got.get(k)!r}")
 
+            # 1a) round-trip новых полей VK/MAX-гейта
+            vk_cfg = dict(VALID, vk_gate_group_id="123456789", max_gate_chat_id="-100987654321")
+            errs_vk = await db.set_funnel_config(tid, vk_cfg, actor="smoke", ip=None, user_agent=None)
+            if errs_vk:
+                fails.append(f"vk/max-поля дали ошибки при сохранении: {errs_vk}")
+            got_vk = await db.get_funnel_config_panel(tid)
+            if got_vk.get("vk_gate_group_id") != "123456789":
+                fails.append(
+                    f"round-trip vk_gate_group_id: ожидал '123456789', получил {got_vk.get('vk_gate_group_id')!r}"
+                )
+            if got_vk.get("max_gate_chat_id") != "-100987654321":
+                fails.append(
+                    f"round-trip max_gate_chat_id: ожидал '-100987654321', получил {got_vk.get('max_gate_chat_id')!r}"
+                )
+
             # 2) невалидный набор (кривой ИНН + нет лид-магнита) → ошибки и НИЧЕГО не перезаписано
             bad = {"funnel_enabled": "1", "operator_name": "X", "operator_inn": "abc",
                    "operator_email": "info@romashka.ru", "leadmagnet_kind": ""}
