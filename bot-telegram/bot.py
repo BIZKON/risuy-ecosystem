@@ -255,7 +255,7 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
         return _cors(web.json_response({
             "error": "consent_required",
             "reply": "Чтобы продолжить, отметьте согласие на обработку персональных данных 🙏",
-        }))
+        }, status=403))
     msgs = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(msgs, list) or not msgs:
         return _cors(web.json_response({"error": "no_messages"}, status=400))
