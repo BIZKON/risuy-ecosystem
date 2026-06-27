@@ -10,7 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)  # пакет shared (как в b5_payments_smoke и др.)
 
 from shared.leadmagnet import (  # noqa: E402
-    build_consent_text, build_privacy_policy, validate_funnel_fields, FUNNEL_FIELDS)
+    build_consent_text, build_privacy_policy, legal_doc_url, validate_funnel_fields, FUNNEL_FIELDS)
 
 
 def main() -> None:
@@ -84,6 +84,15 @@ def main() -> None:
     pp2 = build_privacy_policy("ООО Тест", "7700000000", "a@b.ru")
     if "ООО Тест" not in pp2 or "152-ФЗ" not in pp2:
         fails.append("Политика без опц. реквизитов не собралась")
+
+    # 8) legal_doc_url — единый сборщик публичной ссылки (панель показывает её тенанту)
+    if legal_doc_url("https://bot.example.ru/", "romashka", "privacy") != "https://bot.example.ru/legal/romashka/privacy":
+        fails.append("legal_doc_url: не собрал privacy-URL / не срезал хвостовой слеш базы")
+    if legal_doc_url("https://bot.example.ru", "romashka", "consent") != "https://bot.example.ru/legal/romashka/consent":
+        fails.append("legal_doc_url: не собрал consent-URL")
+    for empty_args in (("", "romashka", "privacy"), ("https://b", "", "privacy"), ("https://b", "romashka", "terms")):
+        if legal_doc_url(*empty_args) != "":
+            fails.append(f"legal_doc_url должен вернуть пусто на {empty_args} (без битых ссылок тенанту)")
 
     if fails:
         print("\n".join("❌ " + f for f in fails))

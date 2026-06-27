@@ -75,6 +75,19 @@ async def main() -> None:
             got2 = await db.get_funnel_config_panel(tid)
             if got2.get("operator_inn") != VALID["operator_inn"]:
                 fails.append("невалидная запись перетёрла данные (должна быть атомарно отклонена)")
+
+            # 3) get_tenant_legal_urls — ключи privacy/consent; ссылка (если бот опубликовал base) ведёт
+            #    на /legal/{slug}/{doc}. app_settings не трогаем (глобальный) — проверяем форму URL.
+            urls = await db.get_tenant_legal_urls(tid)
+            if set(urls) != {"privacy", "consent"}:
+                fails.append(f"get_tenant_legal_urls: ожидал ключи privacy/consent, получил {set(urls)}")
+            if urls.get("privacy") and not urls["privacy"].endswith(f"/legal/{SLUG}/privacy"):
+                fails.append(f"privacy-URL не ведёт на /legal/{SLUG}/privacy: {urls['privacy']!r}")
+            if urls.get("consent") and not urls["consent"].endswith(f"/legal/{SLUG}/consent"):
+                fails.append(f"consent-URL не ведёт на /legal/{SLUG}/consent: {urls['consent']!r}")
+            none_urls = await db.get_tenant_legal_urls(None)
+            if none_urls != {"privacy": "", "consent": ""}:
+                fails.append(f"get_tenant_legal_urls(None) должен быть пустым, получил {none_urls}")
         finally:
             await drop()
 

@@ -3295,6 +3295,26 @@ async def get_funnel_config_panel(tenant_id) -> dict:
     return out
 
 
+async def get_tenant_legal_urls(tenant_id) -> dict:
+    """Публичные ссылки на юр-страницы тенанта ({'privacy','consent'}) для показа в панели.
+
+    Собирает {bot_public_base_url}/legal/{slug}/{doc} — ТЕ ЖЕ URL, что отдаёт бот (_legal_page) и
+    строит get_funnel_config. Пусто, если бот ещё не опубликовал публичный base (app_settings) или у
+    тенанта нет slug → панель не рисует кнопку, тенант не получает битую ссылку. Read-only;
+    tenants/app_settings — глобальные реестры (не tenant-scoped RLS)."""
+    from shared.leadmagnet import legal_doc_url
+    out = {"privacy": "", "consent": ""}
+    if not tenant_id:
+        return out
+    async with pool.acquire() as c:
+        slug = await c.fetchval("select slug from tenants where id = $1", tenant_id)
+        base = await c.fetchval(
+            "select value from app_settings where key = $1", config.RUNTIME_PUBLIC_BASE_KEY)
+    out["privacy"] = legal_doc_url(base, slug, "privacy")
+    out["consent"] = legal_doc_url(base, slug, "consent")
+    return out
+
+
 async def set_funnel_config(
     tenant_id, fields: dict, *, actor: str, ip: str | None, user_agent: str | None,
 ) -> list[str]:

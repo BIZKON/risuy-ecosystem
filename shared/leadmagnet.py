@@ -150,6 +150,20 @@ def build_privacy_policy(
     ])
 
 
+def legal_doc_url(base: str | None, slug: str | None, doc: str = "privacy") -> str:
+    """Публичный URL юр-страницы тенанта, которую отдаёт бот: {base}/legal/{slug}/{doc}.
+
+    ЕДИНЫЙ источник сборки ссылки: панель показывает её тенанту, бот строит ту же в get_funnel_config.
+    Возвращает пусто, если не задан публичный base бота или slug тенанта, либо doc вне
+    ('privacy','consent') — тогда панель просто не рисует кнопку (никаких битых ссылок тенанту).
+    """
+    b = (base or "").strip().rstrip("/")
+    s = (slug or "").strip().strip("/")
+    if not b or not s or doc not in ("privacy", "consent"):
+        return ""
+    return f"{b}/legal/{s}/{doc}"
+
+
 # ── Схема полей конструктора (контракт формы панели + валидации) ──────────────
 # kind: bool | text | longtext | email | url | inn | tg_file | select | channel_id
 # required: True (всегда при funnel_enabled) | "leadmagnet:link" / "leadmagnet:file" / "gate"

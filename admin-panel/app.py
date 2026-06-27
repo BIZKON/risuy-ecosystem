@@ -4642,14 +4642,26 @@ async def my_agent_escalation(
 # как /channels). Текст согласия 152-ФЗ генерится из структурных полей (shared/leadmagnet),
 # свободный ввод текста согласия не предусмотрен. Бот читает get_funnel_config в мультиплексе.
 # =========================================================================== #
-def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: bool = False):
+def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: bool = False,
+                        legal_urls: dict | None = None):
+    # Из тех же реквизитов, что и согласие, собираем предпросмотр Политики — тенант видит оба
+    # документа прямо в панели, ничего «скрытого». Гейт един: оператор+ИНН+email заполнены.
     preview = ""
+    policy = ""
     if values.get("operator_name") and values.get("operator_inn") and values.get("operator_email"):
+        phone_step = bool(str(values.get("phone_step_enabled") or "").strip())
         preview = leadmagnet.build_consent_text(
             values["operator_name"], values["operator_inn"], values["operator_email"],
             data_purpose=values.get("data_purpose") or None,
             privacy_url=values.get("privacy_url") or None,
-            phone_step=bool(str(values.get("phone_step_enabled") or "").strip()),
+            phone_step=phone_step,
+        )
+        policy = leadmagnet.build_privacy_policy(
+            values["operator_name"], values["operator_inn"], values["operator_email"],
+            operator_ogrn=values.get("operator_ogrn") or None,
+            operator_address=values.get("operator_address") or None,
+            data_purpose=values.get("data_purpose") or None,
+            phone_step=phone_step,
         )
     return templates.TemplateResponse(
         request,
@@ -4662,6 +4674,8 @@ def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: boo
             "tenant_name": session.active_tenant_name,
             "values": values,
             "consent_preview": preview,
+            "policy_preview": policy,
+            "legal_urls": legal_urls or {},
             "leadmagnet_has_file": bool(str(values.get("leadmagnet_product_id") or "").strip()),
             "max_file_mb": config.MAX_PRODUCT_FILE_MB,
             "errors": list(errors),
@@ -4680,7 +4694,8 @@ async def lead_magnet_page(
     tid = session.active_tenant_id
     values = (await db.get_funnel_config_panel(tid) if tid
               else {k: "" for k in leadmagnet.FUNNEL_KEYS})
-    return _render_lead_magnet(request, session, values=values, saved=bool(saved))
+    legal_urls = await db.get_tenant_legal_urls(tid)
+    return _render_lead_magnet(request, session, values=values, saved=bool(saved), legal_urls=legal_urls)
 
 
 @app.post("/lead-magnet")
@@ -4696,6 +4711,7 @@ async def lead_magnet_save(
         return _render_lead_magnet(
             request, session, values=empty,
             errors=["Кабинет ещё не привязан к клиенту — обратитесь в поддержку."])
+    legal_urls = await db.get_tenant_legal_urls(tid)
     # Все поля конструктора из формы (чекбоксы шлют '1' при включении, иначе отсутствуют → '';
     # leadmagnet_product_id — скрытое поле, несёт текущее значение, переопределяется при загрузке).
     fields = {k: str(form.get(k) or "").strip() for k in leadmagnet.FUNNEL_KEYS}
@@ -4710,7 +4726,7 @@ async def lead_magnet_save(
         file_meta, file_err = await _read_product_file(request, upload)
         if file_err:
             return _render_lead_magnet(
-                request, session, values=fields,
+                request, session, values=fields, legal_urls=legal_urls,
                 errors=[f"Файл не подошёл (проверьте тип: PDF/изображение/документ, и размер ≤ "
                         f"{config.MAX_PRODUCT_FILE_MB} МБ). Код: {file_err}"])
         pid = await db.create_product_with_audit(
@@ -4724,7 +4740,7 @@ async def lead_magnet_save(
         tid, fields, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     if errs:
         # Не PRG: возвращаем форму с ошибками и введёнными значениями (не теряем ввод).
-        return _render_lead_magnet(request, session, values=fields, errors=errs)
+        return _render_lead_magnet(request, session, values=fields, errors=errs, legal_urls=legal_urls)
     return RedirectResponse(url="/lead-magnet?saved=1", status_code=303)
 
 
