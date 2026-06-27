@@ -46,7 +46,7 @@ import security
 import timeweb_ai
 import yookassa
 
-from shared import leadmagnet, money, vault
+from shared import leadmagnet, money, nurture, vault
 
 
 # --------------------------------------------------------------------------- #
@@ -4742,6 +4742,113 @@ async def lead_magnet_save(
         # Не PRG: возвращаем форму с ошибками и введёнными значениями (не теряем ввод).
         return _render_lead_magnet(request, session, values=fields, errors=errs, legal_urls=legal_urls)
     return RedirectResponse(url="/lead-magnet?saved=1", status_code=303)
+
+
+# =========================================================================== #
+# Раздел «Дожим» (/nurture) — серия касаний тенанта (nurture_enabled + nurture_steps в tenant_settings).
+# Те же шаги уходят по ВСЕМ поднятым каналам тенанта (TG/VK/MAX); движок — bot-telegram/nurture.
+# Скоуп — активный тенант сессии (клиент сам; платформа — за активного клиента, как «Лид-магнит»).
+# Контракт шагов и валидация — единый shared.nurture (тот же парсер у бота). Задержку в форме вводят
+# в удобных единицах (минуты/часы/дни) → секунды; обратно для предзаполнения — крупнейшая «чистая» единица.
+# =========================================================================== #
+_NURTURE_UNITS = {"minutes": 60, "hours": 3600, "days": 86400}
+
+
+def _nurture_unit_to_seconds(value: str, unit: str):
+    """Значение+единица формы → секунды (int) или None (поле пустое/не число). Квантуем до ЦЕЛЫХ МИНУТ
+    (движок тикает раз в минуту; гарантирует кратность 60 → точный обратный конвертер). ≤0 → 0 (валидатор
+    отбракует «больше нуля»); 0<секунд<60 → валидатор отбракует «минимум 1 минута»."""
+    v = (value or "").strip().replace(",", ".")
+    if not v:
+        return None
+    try:
+        n = float(v)
+    except ValueError:
+        return None
+    secs = int(round(n * _NURTURE_UNITS.get(unit, 3600) / 60)) * 60  # квант до минуты
+    return secs if secs > 0 else 0
+
+
+def _nurture_seconds_to_unit(secs: int) -> tuple[str, str]:
+    """Секунды → (значение, единица) для предзаполнения: крупнейшая «чистая» единица (дни/часы/минуты).
+    Сохранённые панелью значения всегда кратны 60 → попадают в одну из веток точно; фолбэк (легаси/ручной
+    SQL) округляет к минутам и не показывает '0'."""
+    for unit, mult in (("days", 86400), ("hours", 3600), ("minutes", 60)):
+        if secs and secs % mult == 0:
+            return (str(secs // mult), unit)
+    return ((str(max(1, round(secs / 60))) if secs else ""), "minutes")
+
+
+def _nurture_rows_from_steps(steps: list) -> list[dict]:
+    """Шаги конфига → строки формы (value/unit/text); недостающие — пустые (всего NURTURE_MAX_STEPS)."""
+    rows = []
+    for i in range(nurture.NURTURE_MAX_STEPS):
+        s = steps[i] if i < len(steps) else None
+        if s:
+            val, unit = _nurture_seconds_to_unit(int(s.get("delay_seconds") or 0))
+            rows.append({"value": val, "unit": unit, "text": s.get("text") or ""})
+        else:
+            rows.append({"value": "", "unit": "hours", "text": ""})
+    return rows
+
+
+def _render_nurture(request, session, *, enabled: bool, rows: list, errors=(), saved: bool = False):
+    return templates.TemplateResponse(
+        request,
+        "nurture.html",
+        {
+            "active": "nurture",
+            "session": session,
+            "csrf_token": session.csrf_token,
+            "has_tenant": bool(session.active_tenant_id),
+            "tenant_name": session.active_tenant_name,
+            "enabled": enabled,
+            "rows": rows,
+            "max_text": nurture.NURTURE_TEXT_MAX,
+            "errors": list(errors),
+            "saved": saved,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+        },
+    )
+
+
+@app.get("/nurture", response_class=HTMLResponse)
+async def nurture_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+):
+    tid = session.active_tenant_id
+    cfg = await db.get_tenant_nurture_panel(tid) if tid else {"enabled": False, "steps": []}
+    return _render_nurture(request, session, enabled=cfg["enabled"],
+                           rows=_nurture_rows_from_steps(cfg["steps"]), saved=bool(saved))
+
+
+@app.post("/nurture")
+async def nurture_save(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+):
+    form = await request.form()
+    await _enforce_csrf(request, session, str(form.get("csrf_token") or ""))
+    tid = session.active_tenant_id
+    enabled = bool(str(form.get("nurture_enabled") or "").strip())
+    rows, raw_steps = [], []
+    for i in range(1, nurture.NURTURE_MAX_STEPS + 1):
+        value = str(form.get(f"step_{i}_value") or "").strip()
+        unit = str(form.get(f"step_{i}_unit") or "hours").strip()
+        text = str(form.get(f"step_{i}_text") or "").strip()
+        rows.append({"value": value, "unit": unit if unit in _NURTURE_UNITS else "hours", "text": text})
+        raw_steps.append({"delay_seconds": _nurture_unit_to_seconds(value, unit), "text": text})
+    if not tid:
+        return _render_nurture(request, session, enabled=enabled, rows=rows,
+                               errors=["Кабинет ещё не привязан к клиенту — обратитесь в поддержку."])
+    errs = await db.set_tenant_nurture(
+        tid, enabled, raw_steps, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    if errs:
+        # Не PRG: возвращаем форму с ошибками и введёнными значениями (не теряем ввод).
+        return _render_nurture(request, session, enabled=enabled, rows=rows, errors=errs)
+    return RedirectResponse(url="/nurture?saved=1", status_code=303)
 
 
 # =========================================================================== #

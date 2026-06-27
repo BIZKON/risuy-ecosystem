@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Дожим{% endblock %}
+{% block body_class %}page-my-agent{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Дожим — серия касаний</h1>
+  <p class="page-head__hint">Если клиент написал и замолчал, бот сам напомнит о себе одним–тремя сообщениями. Касания уходят по всем подключённым каналам клиента (Telegram, VK, MAX). Применяется сразу.</p>
+</div>
+
+{% if saved %}{{ flash('Настройки дожима сохранены.', 'ok') }}{% endif %}
+{% for e in errors %}{{ flash(e, 'error') }}{% endfor %}
+
+{% if not has_tenant %}
+<section class="card" aria-label="Кабинет не привязан">
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">Этот раздел настраивает дожим вашего кабинета. Сейчас к вашей учётной записи кабинет не привязан — напишите в поддержку, поможем.</p>
+  {% if support_url %}
+  <div class="acct-actions">
+    <a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a>
+  </div>
+  {% endif %}
+</section>
+{% else %}
+
+<details class="card" style="margin-bottom:16px">
+  <summary class="card__title" style="cursor:pointer; list-style:revert">❓ Как работает дожим — короткая инструкция</summary>
+  <div class="card__note" style="margin-top:10px">
+    <p><b>Когда срабатывает.</b> Отсчёт идёт от <b>последнего сообщения клиента</b>. Если клиент молчит дольше заданной паузы — бот шлёт касание. Как только клиент отвечает — серия сбрасывается и начинается заново от нового сообщения.</p>
+    <p><b>Паузы — по цепочке.</b> 1-е касание — через указанное время после того, как клиент замолчал. 2-е — через свою паузу <i>после 1-го</i>, 3-е — после 2-го. Например: 2 часа → 1 день → 3 дня.</p>
+    <p><b>Каналы.</b> Одни и те же касания уходят по всем подключённым каналам клиента (Telegram, VK, MAX) — отдельно настраивать не нужно.</p>
+    <p><b>Когда НЕ шлём.</b> Клиент ответил, отписался, оператор взял диалог на ручное, лид передан менеджеру или уже стал клиентом — дожим молчит.</p>
+    <p class="hint">Чтобы включить: заполните хотя бы одно касание (пауза + текст), поставьте галочку «Включить дожим» → «Сохранить». Пустые касания просто игнорируются.</p>
+  </div>
+</details>
+
+<form method="post" action="/nurture" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <section class="card" aria-label="Дожим">
+    <h2 class="card__title">Дожим</h2>
+    <p class="card__note">Когда дожим включён, бот{% if tenant_name %} кабинета «{{ tenant_name|e }}»{% endif %} сам напоминает о себе клиентам, которые написали и замолчали.</p>
+    <label class="field field--check">
+      <input type="checkbox" name="nurture_enabled" value="1"{% if enabled %} checked{% endif %}>
+      <span class="field__label">Включить дожим</span>
+    </label>
+    <p class="hint hint--block">Пока выключен — касания не отправляются (настройки сохраняются). Включайте, когда заполните касания ниже.</p>
+  </section>
+
+  {% for r in rows %}
+  <section class="card" aria-label="Касание {{ loop.index }}">
+    <h2 class="card__title">Касание {{ loop.index }}{% if loop.index > 1 %} <span class="field__hint">необязательно</span>{% endif %}</h2>
+    <div class="field">
+      <span class="field__label">Через сколько отправить
+        <span class="field__hint">{% if loop.index == 1 %}после того, как клиент замолчал{% else %}после предыдущего касания{% endif %}</span></span>
+      <div style="display:flex; gap:8px">
+        <input class="field__input" type="number" name="step_{{ loop.index }}_value" min="0" step="1"
+               inputmode="numeric" value="{{ r.value }}" placeholder="напр. 2" style="max-width:120px">
+        <select class="field__input" name="step_{{ loop.index }}_unit" style="max-width:160px">
+          <option value="minutes"{% if r.unit == 'minutes' %} selected{% endif %}>минут</option>
+          <option value="hours"{% if r.unit == 'hours' %} selected{% endif %}>часов</option>
+          <option value="days"{% if r.unit == 'days' %} selected{% endif %}>дней</option>
+        </select>
+      </div>
+    </div>
+    <label class="field">
+      <span class="field__label">Текст сообщения</span>
+      <textarea class="field__input field__textarea" name="step_{{ loop.index }}_text" maxlength="{{ max_text }}" rows="3"
+                placeholder="Например: Остались вопросы? Я рядом — помогу выбрать 🌷">{{ r.text }}</textarea>
+    </label>
+  </section>
+  {% endfor %}
+
+  <div class="form-actions"><button class="btn btn--primary" type="submit">Сохранить</button></div>
+</form>
+
+{% if support_url %}
+<section class="card" aria-label="Поддержка">
+  <div class="card__title">Нужна помощь с дожимом?</div>
+  <p class="card__note">Подскажем хорошие паузы и тексты касаний под вашу нишу.</p>
+  <div class="acct-actions">
+    <a class="btn btn--secondary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a>
+  </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

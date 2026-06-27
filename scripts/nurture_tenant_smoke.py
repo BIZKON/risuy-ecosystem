@@ -12,8 +12,12 @@
 import asyncio
 import json
 import os
+import sys
 
-import db
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)  # пакет shared (get_tenant_nurture → shared.nurture.parse_nurture_steps)
+
+import db  # noqa: E402
 
 DSN = os.environ.get("NURTURE_SMOKE_DSN") or os.environ.get("DATABASE_URL")
 if not DSN or "risuy_dev" not in DSN:

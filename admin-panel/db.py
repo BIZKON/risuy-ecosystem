@@ -3349,6 +3349,56 @@ async def set_funnel_config(
     return []
 
 
+# ── Дожим (nurture): чтение для формы панели + валидирующая запись (контракт shared.nurture) ──
+async def get_tenant_nurture_panel(tid) -> dict:
+    """Конфиг дожима для предзаполнения формы: {"enabled": bool, "steps": [{delay_seconds, text}]}.
+    enabled здесь = состояние ТУМБЛЕРА (nurture_enabled), а не «есть валидные шаги» — чтобы форма
+    показывала реальное положение галки. Шаги — через канонический shared-парсер (как у бота)."""
+    from shared.nurture import parse_nurture_steps
+    out = {"enabled": False, "steps": []}
+    if not tid:
+        return out
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tid))
+            rows = await c.fetch(
+                "select key, value from tenant_settings where tenant_id = $1 and key = any($2::text[])",
+                tid, ["nurture_enabled", "nurture_steps"])
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    out["enabled"] = bool((kv.get("nurture_enabled") or "").strip())
+    out["steps"] = parse_nurture_steps(kv.get("nurture_steps") or "[]")
+    return out
+
+
+async def set_tenant_nurture(
+    tid, enabled: bool, raw_steps: list, *, actor: str, ip: str | None, user_agent: str | None,
+) -> list[str]:
+    """Сохранить конфиг дожима (nurture_enabled + nurture_steps JSON) + аудит ОДНОЙ транзакцией под RLS.
+    Валидирует через shared.nurture.normalize_and_validate; при ошибках НИЧЕГО не пишет и возвращает
+    список человекочитаемых ошибок (пустой = успех). raw_steps — [{delay_seconds:int|None, text:str}]."""
+    from shared.nurture import normalize_and_validate
+    if not tid:
+        raise ValueError("set_tenant_nurture: tenant_id обязателен")
+    clean, errs = normalize_and_validate(enabled, raw_steps)
+    if errs:
+        return errs
+    pairs = (("nurture_enabled", "1" if enabled else ""),
+             ("nurture_steps", json.dumps(clean, ensure_ascii=False)))
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tid))
+            for key, value in pairs:
+                await c.execute(
+                    "insert into tenant_settings (tenant_id, key, value) values ($1, $2, $3) "
+                    "on conflict (tenant_id, key) do update "
+                    "set value = excluded.value, updated_at = now()",
+                    tid, key, value)
+            await _insert_audit(
+                c, actor=actor, action="tenant_nurture_set", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tid), "enabled": enabled, "steps": len(clean)})
+    return []
+
+
 # ── Реестр согласий (consent_events, 152-ФЗ): чтение для карточки лида + CSV-экспорт ──
 async def list_lead_consent_events(lead_id) -> list[asyncpg.Record]:
     """История согласий лида из реестра consent_events (152-ФЗ ст. 9): кто/когда/действие/версия.

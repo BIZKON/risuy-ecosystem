@@ -69,7 +69,7 @@
   'products': 'Продукты', 'broadcasts': 'Рассылки', 'payments': 'Платежи',
   'subscription': 'Подписка', 'usage': 'Расход', 'team': 'Команда',
   'keys': 'Ключи', 'tenants': 'Клиенты', 'account': 'Профиль',
-  'my_agent': 'Мой ИИ-сотрудник', 'triggers': 'Триггеры', 'lead_magnet': 'Лид-магнит',
+  'my_agent': 'Мой ИИ-сотрудник', 'triggers': 'Триггеры', 'lead_magnet': 'Лид-магнит', 'nurture': 'Дожим',
 } %}
 
 <body class="app {% block body_class %}{% endblock %}">
@@ -89,6 +89,7 @@
       {# «Каналы» — ролевой раздел (Слой C): платформе — атрибуция/персоны, клиенту — self-serve подключение #}
       {{ nav_item('channels',     '/channels',   'Каналы',     active) }}
       {{ nav_item('lead_magnet',  '/lead-magnet', 'Лид-магнит', active) }}
+      {{ nav_item('nurture',      '/nurture',    'Дожим',      active) }}
       {%- if session and session.is_platform %}
       {{ nav_item('agents',       '/agents',     'ИИ-агенты',   active) }}
       {{ nav_item('knowledge',    '/knowledge',  'Базы знаний',  active) }}

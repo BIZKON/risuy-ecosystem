@@ -283,22 +283,10 @@ async def get_tenant_nurture(tid) -> dict:
     kv = {r["key"]: (r["value"] or "") for r in rows}
     if not (kv.get("nurture_enabled") or "").strip():
         return out
-    try:
-        raw = json.loads(kv.get("nurture_steps") or "[]")
-    except Exception:  # noqa: BLE001 — битый JSON → дожим выключен (не угадываем)
-        return out
-    steps = []
-    for s in (raw if isinstance(raw, list) else [])[:3]:
-        if not isinstance(s, dict):
-            continue
-        try:
-            d = int(s.get("delay_seconds") or 0)
-        except (TypeError, ValueError):
-            continue
-        t = (s.get("text") or "").strip()
-        if d > 0 and t:
-            steps.append({"delay_seconds": d, "text": t})
-    out["enabled"] = bool(steps)
+    # Парсинг шагов — единый контракт shared.nurture (тот же парсер у панели, чтобы не разъехались).
+    from shared.nurture import parse_nurture_steps
+    steps = parse_nurture_steps(kv.get("nurture_steps") or "[]")
+    out["enabled"] = bool(steps)  # включён, только если есть валидные шаги (как раньше)
     out["steps"] = steps
     return out
 
