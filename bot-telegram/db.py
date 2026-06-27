@@ -1466,6 +1466,7 @@ async def get_funnel_config(tid) -> dict:
         "leadmagnet_kind", "leadmagnet_url", "leadmagnet_file_id", "leadmagnet_product_id",
         "leadmagnet_caption", "video_note_file_id",
     ]
+    slug = None
     try:
         async with pool.acquire() as c:
             rows = await c.fetch(
@@ -1473,6 +1474,7 @@ async def get_funnel_config(tid) -> dict:
                 "where tenant_id = $1 and key = any($2::text[])",
                 tid, keys,
             )
+            slug = await c.fetchval("select slug from tenants where id = $1", tid)
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).warning(
             "Не удалось прочитать настройки воронки тенанта %s", tid, exc_info=True)
@@ -1484,7 +1486,8 @@ async def get_funnel_config(tid) -> dict:
 
     phone_step = bool(s("phone_step_enabled"))
     consent_text = ""
-    if s("operator_name") and s("operator_inn") and s("operator_email"):
+    has_operator = bool(s("operator_name") and s("operator_inn") and s("operator_email"))
+    if has_operator:
         from shared.leadmagnet import build_consent_text
         consent_text = build_consent_text(
             s("operator_name"), s("operator_inn"), s("operator_email"),
@@ -1492,11 +1495,18 @@ async def get_funnel_config(tid) -> dict:
             privacy_url=s("privacy_url") or None,
             phone_step=phone_step,
         )
+    # Ссылка на СГЕНЕРИРОВАННУЮ страницу Политики (если реквизиты заполнены) — кнопка «Политика» ведёт сюда.
+    legal_privacy_url = None
+    if has_operator and slug:
+        _base = (getattr(config, "BOT_PUBLIC_BASE_URL", "") or "").rstrip("/")
+        if _base:
+            legal_privacy_url = f"{_base}/legal/{slug}/privacy"
     return {
         "enabled": bool(s("funnel_enabled")),
         "welcome_text": kv.get("welcome_text") or "",
         "consent_text": consent_text,
         "privacy_url": s("privacy_url") or None,
+        "legal_privacy_url": legal_privacy_url,
         "company_name": s("company_name") or s("operator_name"),
         "phone_step": phone_step,
         "gate": {
@@ -1529,6 +1539,27 @@ async def get_funnel_product(product_id: int) -> dict | None:
         return None
     return {"file_tg_id": row["file_tg_id"], "file_mime": row["file_mime"],
             "link": (row["link"] or "").strip() or None}
+
+
+async def get_legal_doc_data(slug: str) -> dict | None:
+    """Реквизиты оператора тенанта ПО SLUG для публичной юр-страницы (/legal/{slug}/...), без
+    tenant-контекста сессии. Бот=owner, RLS обходит; читаем нужные ключи tenant_settings по слагу.
+    None — тенанта нет ИЛИ обязательные реквизиты (оператор/ИНН/email) не заполнены (документа нет)."""
+    keys = ["operator_name", "operator_inn", "operator_email", "operator_ogrn",
+            "operator_address", "data_purpose", "phone_step_enabled"]
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select s.key, s.value from tenant_settings s join tenants t on t.id = s.tenant_id "
+            "where t.slug = $1 and s.key = any($2::text[])",
+            slug, keys,
+        )
+    if not rows:
+        return None
+    kv = {r["key"]: (r["value"] or "") for r in rows}
+    if not (kv.get("operator_name", "").strip() and kv.get("operator_inn", "").strip()
+            and kv.get("operator_email", "").strip()):
+        return None
+    return kv
 
 
 async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:

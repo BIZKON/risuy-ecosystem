@@ -88,7 +88,8 @@ def deliver_plan(cfg: dict) -> dict:
 def _consent_kb(cfg: dict):
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     rows = [[InlineKeyboardButton(text=CONSENT_BTN, callback_data="consent_yes")]]
-    privacy = (cfg.get("privacy_url") or "").strip()
+    # Внешняя ссылка на политику ИЛИ сгенерированная страница /legal/{slug}/privacy (фолбэк).
+    privacy = (cfg.get("privacy_url") or cfg.get("legal_privacy_url") or "").strip()
     if privacy:
         rows.append([InlineKeyboardButton(text=PRIVACY_BTN, url=privacy)])
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -309,11 +309,67 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
     return _cors(web.json_response({"reply": answer}))
 
 
+def _esc_html(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _legal_html(title: str, body: str) -> str:
+    """Минимальная HTML-обёртка юр-документа: экранируем, plain-текст с \\n → абзацы."""
+    paras = "".join(
+        f"<p>{_esc_html(line)}</p>" if line.strip() else "<div style='height:8px'></div>"
+        for line in body.split("\n"))
+    return (
+        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{_esc_html(title)}</title>"
+        "<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;"
+        "margin:24px auto;padding:0 16px;line-height:1.5;color:#1F2937}h1{font-size:20px;margin:0 0 12px}"
+        "p{margin:5px 0}</style></head><body>"
+        f"<h1>{_esc_html(title)}</h1>{paras}</body></html>"
+    )
+
+
+async def _legal_page(request: web.Request) -> web.StreamResponse:
+    """Публичная юр-страница тенанта: GET /legal/{slug}/{doc_type} (privacy|consent), без авторизации.
+    Генерит документ из реквизитов оператора (tenant_settings по слагу) — единый источник
+    shared/leadmagnet. 404, если тенанта нет или обязательные реквизиты не заполнены."""
+    slug = request.match_info.get("slug", "")
+    doc_type = request.match_info.get("doc_type", "")
+    if doc_type not in ("privacy", "consent"):
+        return web.Response(status=404, text="Документ не найден")
+    try:
+        kv = await db.get_legal_doc_data(slug)
+    except Exception:  # noqa: BLE001
+        logger.warning("legal-page: чтение реквизитов упало slug=%s", slug, exc_info=True)
+        kv = None
+    if kv is None:
+        return web.Response(status=404, text="Документ не найден или реквизиты оператора не заполнены")
+    from shared.leadmagnet import build_consent_text, build_privacy_policy
+    phone = bool((kv.get("phone_step_enabled") or "").strip())
+    if doc_type == "privacy":
+        title = "Политика обработки персональных данных"
+        body = build_privacy_policy(
+            kv["operator_name"], kv["operator_inn"], kv["operator_email"],
+            operator_ogrn=kv.get("operator_ogrn") or None,
+            operator_address=kv.get("operator_address") or None,
+            data_purpose=kv.get("data_purpose") or None, phone_step=phone)
+    else:
+        title = "Согласие на обработку персональных данных"
+        body = build_consent_text(
+            kv["operator_name"], kv["operator_inn"], kv["operator_email"],
+            data_purpose=kv.get("data_purpose") or None, privacy_url=None, phone_step=phone)
+    resp = web.Response(text=_legal_html(title, body), content_type="text/html", charset="utf-8")
+    resp.headers["Cache-Control"] = "public, max-age=600"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
 async def _start_health() -> web.AppRunner:
     app = web.Application()
     app.router.add_get("/", _health)
     app.router.add_get("/health", _health)
     app.router.add_get("/r/{token}", _redirect)  # публичный трекинг-редирект (§6.2)
+    app.router.add_get("/legal/{slug}/{doc_type}", _legal_page)  # публичные юр-страницы тенанта (152-ФЗ)
     app.router.add_post("/api/demo-chat", _demo_chat)     # веб-чат демо-Лии для сайта
     app.router.add_options("/api/demo-chat", _demo_chat)  # CORS preflight
     runner = web.AppRunner(app)
