@@ -4,7 +4,7 @@
 Проверяет:
 1. set_product_file_id для kind='lead_magnet' НЕ обнуляет колонку file (байты).
 2. get_funnel_product возвращает file_bytes (bytes) и file_name в dict.
-3. Обычный продукт (kind='digital') — байты ОБНУЛЯЮТСЯ (регрессия одноразовости).
+3. Обычный продукт (kind='tripwire') — байты ОБНУЛЯЮТСЯ (регрессия одноразовости).
 
 Запуск:
   FUNNEL_SMOKE_DSN="postgresql://gen_user:<pw>@HOST:5432/risuy_dev?sslmode=require" \
@@ -60,7 +60,7 @@ async def main() -> None:
         # ── Кейс 2: обычный продукт — байты должны обнулиться ──
         pid_dig = await c.fetchval(
             "insert into products (tenant_id,name,kind,status,file,file_name,file_mime) "
-            "values ($1,'Цифровой','digital','active',$2,'file.zip','application/zip') "
+            "values ($1,'Трипвайр','tripwire','active',$2,'file.zip','application/zip') "
             "returning id",
             tid,
             FAKE_BYTES,
@@ -98,7 +98,7 @@ async def main() -> None:
             left_dig = await c.fetchval("select file from products where id=$1", pid_dig)
             if left_dig is not None:
                 fails.append(
-                    "байты обычного продукта (digital) НЕ обнулены — нарушена одноразовость заливки"
+                    "байты обычного продукта (tripwire) НЕ обнулены — нарушена одноразовость заливки"
                 )
 
             # Проверка 5: file_tg_id проставлен у lead_magnet
