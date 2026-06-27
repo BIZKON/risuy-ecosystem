@@ -514,6 +514,21 @@ async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, p
             await db.set_unsubscribed(from_id, messenger="vk")
             await vkbot.send(peer_id, texts.UNSUBSCRIBED_OK)
             return
+        # 152-ФЗ: воронка/согласие ДО продаж и Лии. Отзыв обрабатываем в любой момент.
+        if funnel.is_revoke(text):
+            await db.request_erase(from_id, channel="vk", messenger="vk")
+            await vkbot.send(peer_id, texts.REVOKE_OK)
+            return
+        if await db.is_erase_requested(from_id, messenger="vk"):
+            return  # субъект отозвал согласие → молчим
+        fcfg = await db.get_funnel_config(tenant_id)
+        if fcfg["enabled"] and funnel.requisites_filled(fcfg):
+            lead = await db.get_lead_snapshot(from_id, messenger="vk") or {}
+            if (lead.get("status") or "") != "guide_sent":
+                ch = funnel_channels.VkFunnelChannel(vkbot, peer_id, from_id)
+                consent_pressed = bool(payload and payload.get("cmd") == "consent_yes")
+                await funnel.dispatch(ch, fcfg, lead, {"text": text, "consent_pressed": consent_pressed})
+                return
         # Слой C: продажи — по кнопке (payload) или слову-триггеру; независимо от тумблера Лии.
         sell = selling.selling_command(text, payload)
         if sell is not None:

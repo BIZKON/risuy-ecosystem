@@ -63,3 +63,62 @@ class TgFunnelChannel:
     async def deliver_video_note(self, file_id: str) -> None:
         import messaging
         await messaging.send_video_note(self.bot, self.uid, file_id, source="funnel")
+
+
+class VkFunnelChannel:
+    """Адаптер VK: vkbot + peer_id (адрес ответа) + uid (=from_id, идентичность vk_user_id).
+    aiogram/messaging не импортируем — тестируем без них."""
+    messenger = "vk"
+
+    def __init__(self, vkbot, peer_id: int, uid: int):
+        self.bot = vkbot
+        self.peer_id = peer_id
+        self.uid = uid
+
+    async def send_text(self, text: str) -> None:
+        await self.bot.send(self.peer_id, text)
+
+    async def send_consent(self, text: str, privacy_url: str | None) -> None:
+        await self.bot.send_keyboard(
+            self.peer_id, text,
+            [{"label": funnel.CONSENT_BTN, "payload": {"cmd": "consent_yes"}}],
+        )
+        if privacy_url:
+            await self.bot.send_link(self.peer_id, funnel.PRIVACY_BTN, privacy_url, funnel.PRIVACY_BTN)
+
+    async def ask_phone(self, text: str) -> None:
+        await self.bot.send(self.peer_id, text + "\n\nНапишите номер телефона сообщением 🙂")
+
+    async def ask_gate(self, text: str, channel_url: str | None) -> None:
+        msg = text + (f"\n\n{channel_url}" if channel_url else "")
+        await self.bot.send(self.peer_id, msg + "\n\nПодпишитесь и напишите «я подписался».")
+
+    async def check_subscription(self, gate_cfg: dict, uid: int) -> bool:
+        """Проверка членства в VK-сообществе-гейте. Fail-closed: нет group_id → держим гейт."""
+        gid = (gate_cfg or {}).get("vk_gate_group_id")
+        if not gid:
+            return False
+        return await self.bot.is_member(int(gid), uid)
+
+    async def deliver_text(self, text: str) -> None:
+        await self.bot.send(self.peer_id, text)
+
+    async def deliver_url(self, caption: str, url: str) -> None:
+        await self.bot.send(self.peer_id, f"{caption}\n\n{url}")
+
+    async def deliver_file(self, caption: str, product: dict) -> bool:
+        """VK-выдача: байты (file_bytes) → send_document; ссылка → deliver_url. file_tg_id — не используем."""
+        if product.get("file_bytes"):
+            return await self.bot.send_document(
+                self.peer_id,
+                product["file_bytes"],
+                filename=product.get("file_name") or "file",
+                caption=caption,
+            )
+        if product.get("link"):
+            await self.deliver_url(caption, product["link"])
+            return True
+        return False
+
+    async def deliver_video_note(self, file_id: str) -> None:
+        return  # видео-кружок — TG-only, на VK пропуск

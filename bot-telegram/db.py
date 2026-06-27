@@ -215,6 +215,18 @@ async def mark_guide_sent(tg_user_id: int, *, messenger: str = "tg") -> None:
             f"where {col} = $1 and tenant_id = $2", tg_user_id, tenant_id())
 
 
+async def get_lead_snapshot(uid: int, *, messenger: str = "tg") -> dict | None:
+    """Состояние лида для диспетчера воронки (consent/phone/subscribed/status).
+    None — лида нет. messenger — канал идентичности (tg/vk/max). tenant-scoped."""
+    col = _user_col(messenger)
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            f"select consent, phone, subscribed, status from leads "
+            f"where {col} = $1 and tenant_id = $2",
+            uid, tenant_id())
+    return dict(row) if row else None
+
+
 async def get_due_followups(col: str, delay_seconds: int) -> list[int]:
     """tg_user_id лидов, которым пора отправить касание col (ещё не отправляли)."""
     assert col in _FOLLOWUP_COLS
