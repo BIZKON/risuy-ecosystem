@@ -674,6 +674,15 @@ async def _max_callback(maxbot, tenant_id, user_id: int, chat_id: int, payload, 
     try:
         await db.upsert_start(user_id, source="max", messenger="max")
         await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
+        # 152-ФЗ: согласие через callback (кнопка «consent_yes»).
+        if payload and payload.get("cmd") == "consent_yes":
+            fcfg = await db.get_funnel_config(tenant_id)
+            if fcfg["enabled"] and funnel.requisites_filled(fcfg):
+                lead = await db.get_lead_snapshot(user_id, messenger="max") or {}
+                ch = funnel_channels.MaxFunnelChannel(maxbot, chat_id, user_id)
+                await funnel.dispatch(ch, fcfg, lead, {"text": "", "consent_pressed": True})
+            await maxbot.answer_callback(callback_id)
+            return
         sell = selling.selling_command(None, payload)
         if sell is not None and sell[0] == "buy":
             pay_url, product = await _make_pay_url("max", user_id, sell[1], "https://max.ru")
@@ -699,6 +708,20 @@ async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str)
             await db.set_unsubscribed(user_id, messenger="max")
             await maxbot.send(chat_id, texts.UNSUBSCRIBED_OK)
             return
+        # 152-ФЗ: воронка/согласие до продаж и Лии. Отзыв — в любой момент.
+        if funnel.is_revoke(text):
+            await db.request_erase(user_id, channel="max", messenger="max")
+            await maxbot.send(chat_id, texts.REVOKE_OK)
+            return
+        if await db.is_erase_requested(user_id, messenger="max"):
+            return  # субъект отозвал согласие → молчим
+        fcfg = await db.get_funnel_config(tenant_id)
+        if fcfg["enabled"] and funnel.requisites_filled(fcfg):
+            lead = await db.get_lead_snapshot(user_id, messenger="max") or {}
+            if (lead.get("status") or "") != "guide_sent":
+                ch = funnel_channels.MaxFunnelChannel(maxbot, chat_id, user_id)
+                await funnel.dispatch(ch, fcfg, lead, {"text": text, "consent_pressed": False})
+                return
         # Слой C: витрина по слову-триггеру (покупка — кнопкой → message_callback → _max_callback).
         sell = selling.selling_command(text, None)
         if sell is not None and sell[0] == "shop":

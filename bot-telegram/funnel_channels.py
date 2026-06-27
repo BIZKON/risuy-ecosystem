@@ -122,3 +122,64 @@ class VkFunnelChannel:
 
     async def deliver_video_note(self, file_id: str) -> None:
         return  # видео-кружок — TG-only, на VK пропуск
+
+
+class MaxFunnelChannel:
+    """Адаптер MAX: maxbot + chat_id (адрес ответа, ≠ uid в личке) + uid (=user_id, max_user_id).
+    aiogram/messaging не импортируем — тестируем без них."""
+    messenger = "max"
+
+    def __init__(self, maxbot, chat_id: int, uid: int):
+        self.bot = maxbot
+        self.chat_id = chat_id
+        self.uid = uid
+
+    async def send_text(self, text: str) -> None:
+        await self.bot.send(self.chat_id, text)
+
+    async def send_consent(self, text: str, privacy_url: str | None) -> None:
+        await self.bot.send_keyboard(
+            self.chat_id, text,
+            [{"label": funnel.CONSENT_BTN, "payload": {"cmd": "consent_yes"}}],
+        )
+        if privacy_url:
+            await self.bot.send_link(self.chat_id, funnel.PRIVACY_BTN, privacy_url, funnel.PRIVACY_BTN)
+
+    async def ask_phone(self, text: str) -> None:
+        await self.bot.send(self.chat_id, text + "\n\nНапишите номер телефона сообщением 🙂")
+
+    async def ask_gate(self, text: str, channel_url: str | None) -> None:
+        msg = text + (f"\n\n{channel_url}" if channel_url else "")
+        await self.bot.send(self.chat_id, msg + "\n\nПодпишитесь и напишите «я подписался».")
+
+    async def check_subscription(self, gate_cfg: dict, uid: int) -> bool:
+        """Проверка членства в MAX-канале-гейте. Fail-closed: нет chat_id → держим гейт."""
+        cid = (gate_cfg or {}).get("max_gate_chat_id")
+        if not cid:
+            return False
+        return await self.bot.is_channel_member(int(cid), uid)
+
+    async def deliver_text(self, text: str) -> None:
+        await self.bot.send(self.chat_id, text)
+
+    async def deliver_url(self, caption: str, url: str) -> None:
+        await self.bot.send(self.chat_id, f"{caption}\n\n{url}")
+
+    async def deliver_file(self, caption: str, product: dict) -> bool:
+        """MAX-выдача: байты → send_media (image/file по mime); ссылка → deliver_url. file_tg_id — не используем."""
+        if product.get("file_bytes"):
+            mt = "image" if (product.get("file_mime") or "").startswith("image/") else "file"
+            return await self.bot.send_media(
+                self.chat_id,
+                media_type=mt,
+                content=product["file_bytes"],
+                caption=caption,
+                filename=product.get("file_name") or "file",
+            )
+        if product.get("link"):
+            await self.deliver_url(caption, product["link"])
+            return True
+        return False
+
+    async def deliver_video_note(self, file_id: str) -> None:
+        return  # видео-кружок — TG-only, на MAX пропуск
