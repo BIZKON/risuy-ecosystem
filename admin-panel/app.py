@@ -1174,13 +1174,11 @@ async def lead_detail(
 
     thread = await _load_thread_audited(request, session, lead_id)
 
-    return templates.TemplateResponse(
-        request,
-        "lead.html",
-        _lead_context(request, session, rec, revealed=None, saved=bool(saved),
-                      erased=bool(erased), thread=thread, replied=bool(replied),
-                      paused_flash=bool(paused), reply_err=err),
-    )
+    ctx = _lead_context(request, session, rec, revealed=None, saved=bool(saved),
+                        erased=bool(erased), thread=thread, replied=bool(replied),
+                        paused_flash=bool(paused), reply_err=err)
+    ctx["consent_events"] = await db.list_lead_consent_events(lead_id)  # реестр согласий (152-ФЗ)
+    return templates.TemplateResponse(request, "lead.html", ctx)
 
 
 # ---- /leads/{id}/thread — partial-обновление треда (без полной карточки) ---- #
@@ -1577,6 +1575,35 @@ async def export_full(
         media_type="text/csv; charset=utf-8",
         headers=_csv_headers("leads_export_full"),
     )
+
+
+# ---- /consents.csv — POST, выгрузка реестра согласий активного тенанта (152-ФЗ, для РКН) -- #
+@app.post("/consents.csv")
+async def export_consents(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    # Аудит ДО стрима (fail-closed). Сами согласия — операционный реестр (не ПДн-телефоны), но
+    # факт выгрузки фиксируем.
+    await db.audit(actor=session.actor, action="export_consents",
+                   ip=_ip(request), user_agent=_ua(request))
+    return StreamingResponse(
+        _csv_consent_rows(),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_headers("consents"),
+    )
+
+
+async def _csv_consent_rows():
+    header = ["occurred_at", "action", "doc_type", "doc_version", "text_hash", "channel", "lead_id"]
+    yield _csv_line(header, bom=True)
+    async for r in db.stream_consent_events(row_cap=config.EXPORT_ROW_CAP):
+        yield _csv_line([
+            _iso(r["occurred_at"]), r["action"], r["doc_type"], str(r["doc_version"]),
+            r["text_hash"] or "", r["channel"] or "", str(r["lead_id"] or ""),
+        ])
 
 
 def _has_narrowing_filter(filters: dict) -> bool:

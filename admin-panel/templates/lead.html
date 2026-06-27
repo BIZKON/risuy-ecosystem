@@ -102,6 +102,38 @@
   {# ── Правая колонка: переписка + write-поверхность + таймлайн + 152-ФЗ. ── #}
   <div class="col-right">
 
+    {# ── Реестр согласий (152-ФЗ ст.9): доказательная история кто/когда/действие/версия. ── #}
+    <section class="card" aria-label="История согласий">
+      <div class="card__head-row">
+        <h2 class="card__title">Согласия (152-ФЗ)</h2>
+        <form method="post" action="/consents.csv" style="margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn btn--ghost btn--sm" type="submit" title="Выгрузить реестр согласий тенанта в CSV">Реестр CSV</button>
+        </form>
+      </div>
+      {% if consent_events %}
+      <table style="width:100%; border-collapse:collapse; font-size:14px">
+        <thead><tr style="text-align:left; color:var(--muted,#888)">
+          <th style="padding:4px 8px 4px 0">Дата</th><th style="padding:4px 8px">Действие</th>
+          <th style="padding:4px 8px">Версия</th><th style="padding:4px 8px">Канал</th>
+        </tr></thead>
+        <tbody>
+          {% for e in consent_events %}
+          <tr style="border-top:1px solid var(--border,#eee)">
+            <td style="padding:4px 8px 4px 0">{{ e.occurred_at.strftime('%d.%m.%Y %H:%M') }}</td>
+            <td style="padding:4px 8px">{% if e.action == 'granted' %}✅ дал согласие{% else %}🚫 отозвал{% endif %}</td>
+            <td style="padding:4px 8px">v{{ e.doc_version }}</td>
+            <td style="padding:4px 8px">{{ e.channel or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="hint hint--block">Доказательная база для РКН: дата, действие, версия и хэш текста согласия.</p>
+      {% else %}
+      <p class="card__note muted">Записей о согласии пока нет (появятся, когда клиент нажмёт «Даю согласие» в боте).</p>
+      {% endif %}
+    </section>
+
     {# ── Переписка: тред + перехват + ручной ответ. Поверхность диалога вынесена
        в _chat.html (ЕДИНЫЙ композер с разделом «Диалоги»). chat_from по умолчанию
        'card' → PRG возвращает на эту карточку. ── #}

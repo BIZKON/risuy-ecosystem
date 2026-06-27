@@ -3329,6 +3329,31 @@ async def set_funnel_config(
     return []
 
 
+# ── Реестр согласий (consent_events, 152-ФЗ): чтение для карточки лида + CSV-экспорт ──
+async def list_lead_consent_events(lead_id) -> list[asyncpg.Record]:
+    """История согласий лида из реестра consent_events (152-ФЗ ст. 9): кто/когда/действие/версия.
+    Tenant-scoped через RLS (app.tenant_id из GUC сессии); panel_rw имеет SELECT. Свежие сверху."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            "select action, doc_type, doc_version, text_hash, channel, occurred_at "
+            "from consent_events where lead_id = $1 order by occurred_at desc, id desc",
+            lead_id,
+        )
+
+
+async def stream_consent_events(*, row_cap: int):
+    """Курсорный стрим реестра согласий активного тенанта для CSV (RLS по app.tenant_id). Свежие сверху.
+    Доказательная выгрузка для РКН (ст. 9): occurred_at/action/версия/хэш текста/канал/lead."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            async for r in c.cursor(
+                "select occurred_at, action, doc_type, doc_version, text_hash, channel, lead_id "
+                "from consent_events order by occurred_at desc, id desc limit $1",
+                row_cap,
+            ):
+                yield r
+
+
 # ── Слой B: CRUD триггеров клиента (tenant_triggers, RLS). Раздел панели «Триггеры». ──
 _TRIGGER_SELECT = ("id, type, action, stopwords, intent_desc, msg_count, "
                    "notify_chat_id, notify_topic_id, reply_text, enabled, position")
