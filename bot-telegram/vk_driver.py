@@ -237,6 +237,22 @@ class VKBot:
         # failed == 3 (или иное) — полностью пере-получаем
         return await self._get_lp()
 
+    async def is_member(self, group_id: int, user_id: int) -> bool:
+        """Проверка членства пользователя в сообществе-гейте (groups.isMember).
+
+        Fail-closed: ошибка API / таймаут / нет права токена → False (гейт держит).
+        VK API возвращает: 1 (int) — подписан, 0 — нет; либо dict {member:1|0} при extended.
+        ⚠️ Требует токен с правами groups (community token обычно имеет его автоматически
+        для своей группы; для чужой группы нужно users/groups-право пользователя)."""
+        import aiohttp
+        try:
+            res = await self._api("groups.isMember", group_id=int(group_id), user_id=int(user_id))
+            # groups.isMember отдаёт 1/0 (int) в обычном режиме, либо dict при extended=1
+            return bool(res) if isinstance(res, int) else bool((res or {}).get("member"))
+        except (aiohttp.ClientError, asyncio.TimeoutError, VKError, Exception) as e:  # noqa: BLE001
+            logger.warning("VK is_member fail-closed (group=%s user=%s): %s", group_id, user_id, e)
+            return False
+
     async def _safe_handle(self, from_id, peer_id, text, payload=None):
         try:
             await self.on_message(from_id, peer_id, text, payload)

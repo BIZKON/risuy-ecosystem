@@ -1481,7 +1481,7 @@ async def get_funnel_config(tid) -> dict:
         "funnel_enabled", "welcome_text",
         "operator_name", "operator_inn", "operator_email", "data_purpose",
         "privacy_url", "company_name", "phone_step_enabled",
-        "gate_enabled", "gate_channel_id", "gate_channel_url",
+        "gate_enabled", "gate_channel_id", "gate_channel_url", "vk_gate_group_id", "max_gate_chat_id",
         "leadmagnet_kind", "leadmagnet_url", "leadmagnet_file_id", "leadmagnet_product_id",
         "leadmagnet_caption", "video_note_file_id",
     ]
@@ -1532,6 +1532,8 @@ async def get_funnel_config(tid) -> dict:
             "enabled": bool(s("gate_enabled")),
             "channel_id": s("gate_channel_id") or None,
             "channel_url": s("gate_channel_url") or None,
+            "vk_gate_group_id": s("vk_gate_group_id") or None,
+            "max_gate_chat_id": s("max_gate_chat_id") or None,
         },
         "leadmagnet": {
             "kind": s("leadmagnet_kind") or None,

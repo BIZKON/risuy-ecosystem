@@ -172,6 +172,8 @@ FUNNEL_FIELDS: list[dict] = [
     {"key": "gate_enabled", "label": "Требовать подписку на канал", "kind": "bool", "required": False},
     {"key": "gate_channel_id", "label": "ID канала-гейта", "kind": "channel_id", "required": "gate"},
     {"key": "gate_channel_url", "label": "Ссылка на канал-гейт", "kind": "url", "required": "gate"},
+    {"key": "vk_gate_group_id", "label": "ID VK-сообщества для гейта (VK-канал)", "kind": "text", "required": False},
+    {"key": "max_gate_chat_id", "label": "ID MAX-канала для гейта", "kind": "text", "required": False},
 
     {"key": "leadmagnet_kind", "label": "Тип лид-магнита", "kind": "select", "options": ["link", "file"], "required": False},
     {"key": "leadmagnet_url", "label": "Ссылка на лид-магнит", "kind": "url", "required": "leadmagnet:link"},
