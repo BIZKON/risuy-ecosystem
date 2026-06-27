@@ -19,12 +19,24 @@ DSN = os.environ.get("NURTURE_SMOKE_DSN") or os.environ.get("DATABASE_URL")
 if not DSN or "risuy_dev" not in DSN:
     raise SystemExit("Задайте NURTURE_SMOKE_DSN на risuy_dev (защита от прода).")
 
-TG = 9123456780  # временный tg_user_id лида-пустышки
+TG = 9123456780      # временный tg_user_id лида-пустышки
+VK_UID = 9123450555  # временный vk_user_id лида-пустышки
+MAX_UID = 9123450777   # MAX-лид С chat_id (достижим дожимом)
+MAX_CHAT = 9123450888  # max_chat_id (адрес ответа MAX ≠ user_id)
+MAX_UID2 = 9123450999  # MAX-лид БЕЗ chat_id (недостижим → исключается из дожима)
 
 
 async def _cleanup(c, tid):
-    await c.execute("delete from messages where tg_user_id=$1 and tenant_id=$2", TG, tid)
-    await c.execute("delete from leads where tg_user_id=$1 and tenant_id=$2", TG, tid)
+    # лиды-пустышки всех каналов + их сообщения (vk/max: tg_user_id=NULL → чистим по lead_id) + конфиг
+    await c.execute(
+        "delete from messages where tenant_id=$1 and lead_id in "
+        "(select id from leads where tenant_id=$1 and "
+        " (tg_user_id=$2 or vk_user_id=$3 or max_user_id = any($4::bigint[])))",
+        tid, TG, VK_UID, [MAX_UID, MAX_UID2])
+    await c.execute(
+        "delete from leads where tenant_id=$1 and "
+        "(tg_user_id=$2 or vk_user_id=$3 or max_user_id = any($4::bigint[]))",
+        tid, TG, VK_UID, [MAX_UID, MAX_UID2])
     for k in ("nurture_enabled", "nurture_steps"):
         await c.execute("delete from tenant_settings where tenant_id=$1 and key=$2", tid, k)
 
@@ -75,8 +87,9 @@ async def main():
                     f"values($1,$2,'tg','in','text','q','demo',$3, now() - interval '{ago_sql}')",
                     lead_id, TG, tid)
 
-            async def due(col, delay, prev=None):
-                return await db.get_due_tenant_followups(tid, col, delay, prev_col=prev)
+            async def due(col, delay, prev=None, messenger="tg"):
+                rows = await db.get_due_tenant_followups(tid, col, delay, prev_col=prev, messenger=messenger)
+                return [r["addr"] for r in rows]  # адрес ответа канала (tg→tg_user_id, vk→vk_user_id, max→max_chat_id)
 
             COL = "follow_up_1_at"
             # последний входящий 4ч назад, касание не слали, delay 2ч → ДОЛЖЕН быть due
@@ -85,7 +98,7 @@ async def main():
             print("✅ due: лид молчит дольше задержки → касание положено")
 
             # пометили отправленным → НЕ due (касание свежее последнего входящего)
-            await db.mark_tenant_followup_sent(tid, COL, TG)
+            await db.mark_tenant_followup_sent(tid, COL, lead_id)
             assert TG not in await due(COL, 7200), "после отправки касания не должен повторяться"
             print("✅ стоп-повтор: касание отправлено для этой активности → больше не due")
 
@@ -124,6 +137,38 @@ async def main():
             assert TG in await due(C2, 86400, prev=C1), "шаг2 due через 1д после шага1"
             assert TG not in await due(C3, 259200, prev=C2), "шаг3 ждёт отправки шага2"
             print("✅ цепочка: шаг2 due только ПОСЛЕ шага1 (кумулятивная пауза, порядок гарантирован)")
+
+            # ── 4) VK/MAX: дожим по каналам (ключ lead_id, адрес = vk_user_id / max_chat_id) ─────
+            # VK-лид молчит 4ч, delay 2ч → due; адрес для отправки = vk_user_id
+            vk_lead = await c.fetchval(
+                "insert into leads(tenant_id,messenger,vk_user_id,source,consent,status) "
+                "values($1,'vk',$2,'demo',true,'new') returning id", tid, VK_UID)
+            await c.execute(
+                "insert into messages(lead_id,messenger,direction,kind,text,source,tenant_id,created_at) "
+                "values($1,'vk','in','text','q','demo',$2, now() - interval '4 hours')", vk_lead, tid)
+            assert VK_UID in await due(C1, 7200, messenger="vk"), "VK-лид должен быть due (адрес=vk_user_id)"
+            await db.mark_tenant_followup_sent(tid, C1, vk_lead)
+            assert VK_UID not in await due(C1, 7200, messenger="vk"), "после касания VK не повторяется"
+            print("✅ VK: лид due по vk_user_id; mark по lead_id → не повторяется")
+
+            # MAX-лид С chat_id → due, адрес ответа = max_chat_id (≠ max_user_id в личке)
+            max_lead = await c.fetchval(
+                "insert into leads(tenant_id,messenger,max_user_id,max_chat_id,source,consent,status) "
+                "values($1,'max',$2,$3,'demo',true,'new') returning id", tid, MAX_UID, MAX_CHAT)
+            await c.execute(
+                "insert into messages(lead_id,messenger,direction,kind,text,source,tenant_id,created_at) "
+                "values($1,'max','in','text','q','demo',$2, now() - interval '4 hours')", max_lead, tid)
+            # MAX-лид БЕЗ chat_id (не писал в личку) → должен быть ИСКЛЮЧЁН (нет адреса ответа)
+            max_lead2 = await c.fetchval(
+                "insert into leads(tenant_id,messenger,max_user_id,source,consent,status) "
+                "values($1,'max',$2,'demo',true,'new') returning id", tid, MAX_UID2)
+            await c.execute(
+                "insert into messages(lead_id,messenger,direction,kind,text,source,tenant_id,created_at) "
+                "values($1,'max','in','text','q','demo',$2, now() - interval '4 hours')", max_lead2, tid)
+            max_due = await due(C1, 7200, messenger="max")
+            assert MAX_CHAT in max_due, "MAX-лид с chat_id due (адрес=max_chat_id)"
+            assert None not in max_due, "MAX-лид без chat_id исключён (адрес ответа NULL)"
+            print("✅ MAX: due по max_chat_id (≠ user_id); лид без chat_id исключён")
         except AssertionError as e:
             ok = False
             print("❌", e)

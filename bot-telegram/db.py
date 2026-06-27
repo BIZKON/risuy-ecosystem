@@ -304,21 +304,26 @@ async def get_tenant_nurture(tid) -> dict:
 
 
 async def get_due_tenant_followups(
-    tid, col: str, delay_seconds: int, prev_col: str | None = None,
-) -> list[int]:
-    """tg_user_id лидов тенанта tid, кому пора касание col дожима (только TG; vk/max — следующий
-    инкремент). last_in = max(created_at) входящих лида (молчит → дожим; ответил → касание col
-    «протухает» относит. нового входящего → серия перезапускается).
+    tid, col: str, delay_seconds: int, prev_col: str | None = None, messenger: str = "tg",
+) -> list[dict]:
+    """Лиды тенанта tid в КАНАЛЕ messenger (tg/vk/max), кому пора касание col дожима. Возвращает
+    [{"lead_id", "addr"}], где addr — адрес ответа канала (tg→tg_user_id, vk→vk_user_id,
+    max→max_chat_id); лиды без адреса (напр. MAX без chat_id — лид не писал) исключаются. last_in =
+    max(created_at) входящих лида (молчит → дожим; ответил → касание col «протухает» относит. нового
+    входящего → серия перезапускается).
 
     КАСАНИЯ — ЦЕПОЧКА (защита от залпа всех шагов в один тик и от обратного порядка при нелогичных
     задержках, ревью): шаг 1 (prev_col=None) якорится на last_in; шаг N>1 якорится на ВРЕМЕНИ
-    ПРЕДЫДУЩЕГО касания (prev_col) — кумулятивная пауza delay ПОСЛЕ него, и предыдущее касание
+    ПРЕДЫДУЩЕГО касания (prev_col) — кумулятивная пауза delay ПОСЛЕ него, и предыдущее касание
     обязано быть сделано ДЛЯ ТЕКУЩЕЙ активности (prev_col >= last_in). Так за тик уходит максимум
     одно касание лиду (только что проставленный prev_col + delay > now → следующий шаг ждёт тик).
 
+    Лид — одна строка на канал (свой messenger + свой id-столбец) → касания follow_up_1..3_at и
+    стоп-флаги канал-локальны, кросс-канального конфликта нет.
     Стоп: отписка / ручная пауза / эскалация (передан менеджеру) / конверсия."""
     assert col in _FOLLOWUP_COLS
     assert prev_col is None or prev_col in _FOLLOWUP_COLS
+    addr_col = _reply_addr_col(messenger)  # tg→tg_user_id, vk→vk_user_id, max→max_chat_id (из карты)
     if prev_col is None:
         anchor_gate = "x.last_in + make_interval(secs => $1) <= now()"
     else:
@@ -327,7 +332,7 @@ async def get_due_tenant_followups(
             f"and l.{prev_col} + make_interval(secs => $1) <= now()"
         )
     q = f"""
-        select l.tg_user_id
+        select l.id as lead_id, l.{addr_col} as addr
         from leads l
         join lateral (
             select max(m.created_at) as last_in
@@ -335,8 +340,8 @@ async def get_due_tenant_followups(
             where m.lead_id = l.id and m.direction = 'in'
         ) x on true
         where l.tenant_id = $2
-          and l.messenger = 'tg'
-          and l.tg_user_id is not null
+          and l.messenger = $3
+          and l.{addr_col} is not null
           and l.unsubscribed_at is null
           and l.bot_paused = false
           and l.escalated_at is null
@@ -347,18 +352,19 @@ async def get_due_tenant_followups(
         limit 100
     """
     async with pool.acquire() as c:
-        rows = await c.fetch(q, float(delay_seconds), tid)
-    return [r["tg_user_id"] for r in rows]
+        rows = await c.fetch(q, float(delay_seconds), tid, messenger)
+    return [{"lead_id": r["lead_id"], "addr": r["addr"]} for r in rows]
 
 
-async def mark_tenant_followup_sent(tid, col: str, tg_user_id: int) -> None:
-    """Помечаем касание дожима отправленным (status → nurturing, кроме уже converted)."""
+async def mark_tenant_followup_sent(tid, col: str, lead_id) -> None:
+    """Помечаем касание дожима отправленным (status → nurturing, кроме уже converted). Ключ —
+    lead_id (PK, канал-агностично): один лид = одна строка одного канала, mark не зависит от messenger."""
     assert col in _FOLLOWUP_COLS
     q = (f"update leads set {col} = now(), "
          "status = case when status = 'converted' then status else 'nurturing' end "
-         "where tg_user_id = $1 and tenant_id = $2 and messenger = 'tg'")
+         "where id = $1 and tenant_id = $2")
     async with pool.acquire() as c:
-        await c.execute(q, tg_user_id, tid)
+        await c.execute(q, lead_id, tid)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

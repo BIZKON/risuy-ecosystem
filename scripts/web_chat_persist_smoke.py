@@ -57,10 +57,11 @@ async def main():
             assert lead["messenger"] == "web" and lead["source"] == "web", dict(lead)
             print(f"✅ лид: messenger={lead['messenger']}, source={lead['source']}, status={lead['status']}")
 
-            # get_due_tenant_followups НЕ должен цеплять веб-лида (дожим — только messenger='tg')
+            # дожим не цепляет веб-лида: канал 'web' не в _NURTURE_CHANNELS (tg/vk/max), а запрос
+            # по любому из этих messenger не вернёт web-лида (другой messenger + нет адреса канала)
             due = await db.get_due_tenant_followups(tid, "follow_up_1_at", 1)
-            assert SID not in [str(x) for x in due], "веб-лид не должен попадать в TG-дожим"
-            print("✅ дожим (TG-only) не трогает веб-лида")
+            assert str(lid) not in [str(r["lead_id"]) for r in due], "веб-лид не должен попадать в дожим"
+            print("✅ дожим не трогает веб-лида")
         except AssertionError as e:
             ok = False
             print("❌", e)
