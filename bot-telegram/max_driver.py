@@ -268,6 +268,44 @@ class MAXBot:
             if self._session is not None:
                 await self._session.close()
 
+    async def is_channel_member(self, chat_id: int, user_id: int) -> bool:
+        """Проверка членства пользователя в MAX-канале-гейте.
+
+        ⚠️ Endpoint проверки членства MAX вживую НЕ подтверждён — пробуем
+        GET /chats/{chat_id}/members/{user_id}; любой не-200 / сетевая ошибка → False
+        (fail-closed, гейт держит). Сырой ответ логируем для точечной правки по живому тесту.
+        При подтверждении реального endpoint'а — исправить здесь и убрать предупреждение."""
+        import aiohttp
+        try:
+            async with self._session.get(
+                f"{MAX_API}/chats/{int(chat_id)}/members/{int(user_id)}"
+            ) as r:
+                txt = await r.text()
+                if r.status != 200:
+                    logger.info(
+                        "MAX is_channel_member HTTP %s (chat=%s user=%s): %s",
+                        r.status, chat_id, user_id, txt[:200])
+                    return False
+                data = self._safe_json(txt)
+                # Логируем ответ для верификации endpoint'а вживую
+                logger.debug(
+                    "MAX is_channel_member ответ (chat=%s user=%s): %s",
+                    chat_id, user_id, txt[:300])
+                return bool((data or {}).get("user_id")) or bool((data or {}).get("is_member"))
+        except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+            logger.warning(
+                "MAX is_channel_member fail-closed (chat=%s user=%s): %s", chat_id, user_id, e)
+            return False
+
+    @staticmethod
+    def _safe_json(txt: str) -> dict | None:
+        """Безопасный JSON-разбор строки ответа. None при любой ошибке парсинга."""
+        try:
+            import json as _json
+            return _json.loads(txt)
+        except (ValueError, TypeError):
+            return None
+
     async def _safe_handle(self, user_id, chat_id, text):
         try:
             await self.on_message(user_id, chat_id, text)

@@ -39,6 +39,7 @@ import config
 import db
 import escalation
 import funnel
+import funnel_channels
 import messaging
 import selling
 import texts
@@ -104,7 +105,7 @@ async def t_start(message: Message) -> None:
                 await db.set_name(message.from_user.id, name)
             except Exception:  # noqa: BLE001 — имя не критично
                 logger.warning("multiplex: не записал имя лида", exc_info=True)
-        await funnel.start(message, cfg)
+        await funnel.start(funnel_channels.TgFunnelChannel(message.bot, message.from_user.id), cfg)
         return
     await messaging.send_text(
         message.bot, message.from_user.id, _TENANT_GREETING, source="funnel"
@@ -132,7 +133,7 @@ async def t_consent(cb: CallbackQuery) -> None:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
         pass
-    await funnel.after_consent(cb.bot, cb.from_user.id, cfg)
+    await funnel.after_consent(funnel_channels.TgFunnelChannel(cb.bot, cb.from_user.id), cfg)
 
 
 @tenant_router.message(F.contact)
@@ -147,7 +148,7 @@ async def t_contact(message: Message) -> None:
     if not phone:  # контакт без номера (редкий, но валидный апдейт) → не падаем
         return
     await db.set_phone(message.from_user.id, phone, funnel.phone_hash(phone))
-    await funnel.after_phone(message.bot, message.from_user.id, cfg)
+    await funnel.after_phone(funnel_channels.TgFunnelChannel(message.bot, message.from_user.id), cfg)
 
 
 @tenant_router.callback_query(F.data == "check_sub")
@@ -162,12 +163,12 @@ async def t_check_sub(cb: CallbackQuery) -> None:
         return
     if await funnel.is_subscribed(cb.bot, cfg["gate"]["channel_id"], cb.from_user.id):
         await cb.answer(funnel.PHONE_OK)
-        await db.set_subscribed(cb.from_user.id, True)
+        await db.set_subscribed(cb.from_user.id, True, messenger="tg")
         try:
             await cb.message.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001
             pass
-        await funnel.deliver(cb.bot, cb.from_user.id, cfg)
+        await funnel.deliver(funnel_channels.TgFunnelChannel(cb.bot, cb.from_user.id), cfg)
     else:
         await cb.answer(funnel.NOT_SUBSCRIBED_ALERT, show_alert=True)
 
@@ -513,6 +514,21 @@ async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, p
             await db.set_unsubscribed(from_id, messenger="vk")
             await vkbot.send(peer_id, texts.UNSUBSCRIBED_OK)
             return
+        # 152-ФЗ: воронка/согласие ДО продаж и Лии. Отзыв обрабатываем в любой момент.
+        if funnel.is_revoke(text):
+            await db.request_erase(from_id, channel="vk", messenger="vk")
+            await vkbot.send(peer_id, texts.REVOKE_OK)
+            return
+        if await db.is_erase_requested(from_id, messenger="vk"):
+            return  # субъект отозвал согласие → молчим
+        fcfg = await db.get_funnel_config(tenant_id)
+        if fcfg["enabled"] and funnel.requisites_filled(fcfg):
+            lead = await db.get_lead_snapshot(from_id, messenger="vk") or {}
+            if (lead.get("status") or "") != "guide_sent":
+                ch = funnel_channels.VkFunnelChannel(vkbot, peer_id, from_id)
+                consent_pressed = bool(payload and payload.get("cmd") == "consent_yes")
+                await funnel.dispatch(ch, fcfg, lead, {"text": text, "consent_pressed": consent_pressed})
+                return
         # Слой C: продажи — по кнопке (payload) или слову-триггеру; независимо от тумблера Лии.
         sell = selling.selling_command(text, payload)
         if sell is not None:
@@ -658,6 +674,19 @@ async def _max_callback(maxbot, tenant_id, user_id: int, chat_id: int, payload, 
     try:
         await db.upsert_start(user_id, source="max", messenger="max")
         await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
+        # 152-ФЗ: согласие через callback (кнопка «consent_yes»).
+        if payload and payload.get("cmd") == "consent_yes":
+            # 152-ФЗ: субъект отозвал согласие → старая кнопка не должна откатить отзыв.
+            if await db.is_erase_requested(user_id, messenger="max"):
+                await maxbot.answer_callback(callback_id)
+                return
+            fcfg = await db.get_funnel_config(tenant_id)
+            if fcfg["enabled"] and funnel.requisites_filled(fcfg):
+                lead = await db.get_lead_snapshot(user_id, messenger="max") or {}
+                ch = funnel_channels.MaxFunnelChannel(maxbot, chat_id, user_id)
+                await funnel.dispatch(ch, fcfg, lead, {"text": "", "consent_pressed": True})
+            await maxbot.answer_callback(callback_id)
+            return
         sell = selling.selling_command(None, payload)
         if sell is not None and sell[0] == "buy":
             pay_url, product = await _make_pay_url("max", user_id, sell[1], "https://max.ru")
@@ -683,6 +712,20 @@ async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str)
             await db.set_unsubscribed(user_id, messenger="max")
             await maxbot.send(chat_id, texts.UNSUBSCRIBED_OK)
             return
+        # 152-ФЗ: воронка/согласие до продаж и Лии. Отзыв — в любой момент.
+        if funnel.is_revoke(text):
+            await db.request_erase(user_id, channel="max", messenger="max")
+            await maxbot.send(chat_id, texts.REVOKE_OK)
+            return
+        if await db.is_erase_requested(user_id, messenger="max"):
+            return  # субъект отозвал согласие → молчим
+        fcfg = await db.get_funnel_config(tenant_id)
+        if fcfg["enabled"] and funnel.requisites_filled(fcfg):
+            lead = await db.get_lead_snapshot(user_id, messenger="max") or {}
+            if (lead.get("status") or "") != "guide_sent":
+                ch = funnel_channels.MaxFunnelChannel(maxbot, chat_id, user_id)
+                await funnel.dispatch(ch, fcfg, lead, {"text": text, "consent_pressed": False})
+                return
         # Слой C: витрина по слову-триггеру (покупка — кнопкой → message_callback → _max_callback).
         sell = selling.selling_command(text, None)
         if sell is not None and sell[0] == "shop":

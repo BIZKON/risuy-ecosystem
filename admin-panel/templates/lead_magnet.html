@@ -135,6 +135,16 @@
       <input class="field__input" type="url" name="gate_channel_url" value="{{ values.gate_channel_url|e }}"
              placeholder="https://t.me/your_channel" maxlength="300">
     </label>
+    <label class="field">
+      <span class="field__label">ID VK-сообщества для гейта (VK-канал)</span>
+      <input class="field__input" type="text" name="vk_gate_group_id" inputmode="numeric"
+             value="{{ values.vk_gate_group_id|e }}" placeholder="123456789" maxlength="32">
+    </label>
+    <label class="field">
+      <span class="field__label">ID MAX-канала для гейта</span>
+      <input class="field__input" type="text" name="max_gate_chat_id" inputmode="numeric"
+             value="{{ values.max_gate_chat_id|e }}" placeholder="-100..." maxlength="32">
+    </label>
   </section>
 
   {# ── 4. Лид-магнит ── #}

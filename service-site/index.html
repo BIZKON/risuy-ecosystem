@@ -84,9 +84,13 @@
           <span>Лия · ИИ-агент продаж — онлайн</span>
         </div>
         <div class="chat__log" id="chatLog" aria-live="polite"></div>
+        <label class="dc-consent" id="dcConsentWrap">
+          <input type="checkbox" id="dc-consent-cb">
+          <span>Согласен на обработку <a href="/legal/demo-sandbox/privacy" target="_blank" rel="noopener">персональных данных</a></span>
+        </label>
         <form class="chat__form" id="chatForm" autocomplete="off">
           <input class="chat__input" id="chatInput" type="text" placeholder="Напишите сообщение…" maxlength="2000" aria-label="Сообщение для Лии">
-          <button class="btn btn--primary chat__send" id="chatSend" type="submit">Отправить</button>
+          <button class="btn btn--primary chat__send" id="chatSend" type="submit" disabled>Отправить</button>
         </form>
         <p class="chat__note">Демо: Лия отвечает ИИ-моделью в реальном времени. Не вводите личные данные.</p>
       </div>
@@ -119,19 +123,40 @@
       log.appendChild(el); log.scrollTop = log.scrollHeight; return el;
     }
     bubble('assistant', GREETING);
+    // ── Галочка согласия 152-ФЗ ──────────────────────────────────────────────
+    var consentWrap = document.getElementById('dcConsentWrap');
+    var consentCb   = document.getElementById('dc-consent-cb');
+    var CONSENT_KEY = 'x10_demo_consent';
+    // Если уже согласились ранее — скрываем галочку, кнопку разблокируем сразу
+    try {
+      if(localStorage.getItem(CONSENT_KEY) === '1'){
+        if(consentWrap){ consentWrap.style.display = 'none'; }
+        send.disabled = false;
+      }
+    } catch(e){}
+    // Переключатель галочки: разблокировать/заблокировать кнопку
+    if(consentCb){
+      consentCb.addEventListener('change', function(){
+        send.disabled = !consentCb.checked;
+      });
+    }
     var busy = false;
     form.addEventListener('submit', function(e){
       e.preventDefault();
       if(busy){ return; }
       var text = (input.value||'').trim();
       if(!text){ return; }
+      // Проверяем согласие ещё раз (на случай прямого вызова)
+      var consented = (consentCb && consentCb.checked) ||
+                      (function(){ try{ return localStorage.getItem(CONSENT_KEY)==='1'; }catch(e){ return false; } })();
+      if(!consented){ return; }
       input.value='';
       messages.push({role:'user', content:text});
       bubble('user', text);
       busy = true; send.disabled = true; input.disabled = true;
       var typing = bubble('assistant', 'Лия печатает…', 'chat__msg--typing');
       fetch(ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({messages: messages, session_id: SID}) })
+        body: JSON.stringify({messages: messages, session_id: SID, consent: true}) })
         .then(function(r){ return r.json().catch(function(){ return {}; }); })
         .then(function(data){
           typing.remove();
@@ -140,6 +165,11 @@
             : 'Не получилось ответить. Попробуйте ещё раз или напишите нам в Telegram.';
           messages.push({role:'assistant', content:reply});
           bubble('assistant', reply);
+          // Запоминаем согласие в localStorage, скрываем галочку после первого успешного ответа
+          try{
+            localStorage.setItem(CONSENT_KEY, '1');
+            if(consentWrap){ consentWrap.style.display = 'none'; }
+          }catch(e){}
         })
         .catch(function(){ typing.remove(); bubble('assistant', 'Связь прервалась. Попробуйте ещё раз.'); })
         .then(function(){ busy=false; send.disabled=false; input.disabled=false; input.focus(); });

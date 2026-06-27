@@ -118,46 +118,40 @@ def _guide_kb(url: str):
 
 
 # ── Шаги воронки (async; messaging/aiogram — ленивый импорт) ──────────────────
-async def start(message, cfg: dict) -> None:
-    """Приветствие + согласие на /start тенант-бота (вызывается из multiplex.t_start при enabled)."""
-    import messaging
-    await messaging.send_text(
-        message.bot, message.from_user.id, start_text(cfg),
-        source="funnel", reply_markup=_consent_kb(cfg))
+async def start(ch, cfg: dict) -> None:
+    """Приветствие + согласие (вызывается из диспетчера канала при enabled)."""
+    privacy = (cfg.get("privacy_url") or cfg.get("legal_privacy_url") or "")
+    await ch.send_consent(start_text(cfg), privacy or None)
 
 
-async def after_consent(bot, user_id: int, cfg: dict) -> None:
+async def after_consent(ch, cfg: dict) -> None:
     """После согласия: телефон → гейт → выдача (по конфигу)."""
-    import messaging
     step = next_after_consent(cfg)
     if step == "phone":
-        await messaging.send_text(bot, user_id, ASK_PHONE, source="funnel", reply_markup=_phone_kb())
+        await ch.ask_phone(ASK_PHONE)
     elif step == "gate":
-        await go_to_gate(bot, user_id, cfg)
+        await go_to_gate(ch, cfg)
     else:
-        await deliver(bot, user_id, cfg)
+        await deliver(ch, cfg)
 
 
-async def after_phone(bot, user_id: int, cfg: dict) -> None:
+async def after_phone(ch, cfg: dict) -> None:
     """После телефона: подтверждение + гейт/выдача."""
-    import messaging
-    from aiogram.types import ReplyKeyboardRemove
-    await messaging.send_text(bot, user_id, PHONE_OK, source="funnel", reply_markup=ReplyKeyboardRemove())
+    await ch.send_text(PHONE_OK)
     if next_after_phone(cfg) == "gate":
-        await go_to_gate(bot, user_id, cfg)
+        await go_to_gate(ch, cfg)
     else:
-        await deliver(bot, user_id, cfg)
+        await deliver(ch, cfg)
 
 
-async def go_to_gate(bot, user_id: int, cfg: dict) -> None:
+async def go_to_gate(ch, cfg: dict) -> None:
     """Гейт подписки на канал тенанта (fail-closed). Подписан → выдача; иначе просьба подписаться."""
-    import messaging
-    channel_id = (cfg.get("gate") or {}).get("channel_id")
-    if await is_subscribed(bot, channel_id, user_id):
-        await db.set_subscribed(user_id, True)
-        await deliver(bot, user_id, cfg)
+    gate = cfg.get("gate") or {}
+    if await ch.check_subscription(gate, ch.uid):
+        await db.set_subscribed(ch.uid, True, messenger=ch.messenger)
+        await deliver(ch, cfg)
     else:
-        await messaging.send_text(bot, user_id, ASK_SUBSCRIBE, source="funnel", reply_markup=_gate_kb(cfg))
+        await ch.ask_gate(ASK_SUBSCRIBE, gate.get("channel_url"))
 
 
 async def is_subscribed(bot, channel_id, user_id: int) -> bool:
@@ -181,58 +175,101 @@ async def is_subscribed(bot, channel_id, user_id: int) -> bool:
     return False
 
 
-async def deliver(bot, user_id: int, cfg: dict) -> None:
-    """Финальная выдача лид-магнита из cfg: видео-кружок (опц.) → файл/ссылка.
+# ── Хелперы диспетчера (Task 3) ──────────────────────────────────────────────
+
+def looks_like_phone(text: str) -> bool:
+    """Эвристика «это номер телефона» для каналов без request_contact (VK/MAX): ≥10 цифр."""
+    return sum(ch.isdigit() for ch in (text or "")) >= 10
+
+
+def requisites_filled(cfg: dict) -> bool:
+    """Есть ли из чего собрать согласие (реквизиты оператора заполнены → consent_text непустой)."""
+    return bool((cfg.get("consent_text") or "").strip())
+
+
+REVOKE_WORDS = ("отозвать согласие", "отзываю согласие", "/revoke")
+
+
+def is_revoke(text: str) -> bool:
+    """Проверяет, является ли сообщение командой отзыва согласия 152-ФЗ."""
+    t = (text or "").strip().lower()
+    return any(w in t for w in REVOKE_WORDS)
+
+
+async def dispatch(ch, cfg: dict, lead: dict, incoming: dict) -> bool:
+    """Гоняет шаг воронки по состоянию лида. Возвращает True, если воронка обработала ход
+    (Лию/продажи на этот ход НЕ зовём), False — если лид уже прошёл воронку (status='guide_sent')."""
+    if (lead.get("status") or "") == "guide_sent":
+        return False
+    consent = bool(lead.get("consent"))
+    text = (incoming.get("text") or "").strip()
+    # Шаг 1: согласие
+    if not consent:
+        if incoming.get("consent_pressed"):
+            await db.set_consent(ch.uid, True, consent_text=cfg.get("consent_text") or None,
+                                 channel=ch.messenger, messenger=ch.messenger)
+            await after_consent(ch, cfg)
+        else:
+            await start(ch, cfg)   # (повторно) показать приветствие+согласие
+        return True
+    # Шаг 2: телефон (текстом, если phone_step и ещё нет номера)
+    if cfg.get("phone_step") and not lead.get("phone"):
+        if text and looks_like_phone(text):
+            await db.set_phone(ch.uid, text, phone_hash(text), messenger=ch.messenger)
+            await after_phone(ch, cfg)
+        else:
+            await ch.ask_phone(ASK_PHONE)
+        return True
+    # Шаг 3: гейт / выдача
+    if (cfg.get("gate") or {}).get("enabled") and not lead.get("subscribed"):
+        await go_to_gate(ch, cfg)
+    else:
+        await deliver(ch, cfg)
+    return True
+
+
+async def deliver(ch, cfg: dict) -> None:
+    """Финальная выдача лид-магнита через адаптер: видео-кружок (опц.) → файл/ссылка.
 
     ⚠️ mark_guide_sent — ТОЛЬКО ПОСЛЕ успешной отправки материала. Воронка тенанта DB-state-driven:
     преждевременная пометка → при сбое отправки (битый file_id/Telegram down) лид помечен выданным,
     но материал не получил. При НЕнастроенном лид-магните не помечаем (выдадим, когда настроят)."""
-    import messaging
     plan = deliver_plan(cfg)
     if plan["has_video"]:
         try:
-            await messaging.send_video_note(bot, user_id, (cfg.get("video_note_file_id") or "").strip(),
-                                            source="funnel")
-        except Exception as e:  # noqa: BLE001 — видео не критично для выдачи
+            await ch.deliver_video_note((cfg.get("video_note_file_id") or "").strip())
+        except Exception as e:  # noqa: BLE001 — видео не критично
             logger.warning("funnel: видео-кружок не отправлен: %s", e)
     if not plan["configured"]:
-        await messaging.send_text(bot, user_id, NOT_CONFIGURED, source="funnel")
-        return  # лид-магнит не настроен → НЕ помечаем guide_sent
+        await ch.deliver_text(NOT_CONFIGURED)
+        return
     if plan["kind"] == "file":
-        # 1) Загруженный файл-материал = tenant-продукт lead_magnet (приоритет; file_tg_id ставит воркёр).
+        prod = None
         if plan["product_id"]:
             try:
                 prod = await db.get_funnel_product(int(plan["product_id"]))
             except (TypeError, ValueError):
                 prod = None
-            if prod is not None:
-                if prod.get("file_tg_id"):
-                    kind = messaging.kind_for_mime(prod.get("file_mime"))
-                    await messaging.send_by_kind(bot, user_id, kind, file_id=prod["file_tg_id"],
-                                                 caption=plan["caption"], source="funnel")
-                    await db.mark_guide_sent(user_id)
+        if prod is not None:
+            if prod.get("file_tg_id") or prod.get("link") or prod.get("file_bytes"):
+                if await ch.deliver_file(plan["caption"], prod):
+                    await db.mark_guide_sent(ch.uid, messenger=ch.messenger)
                     return
-                if prod.get("link"):
-                    await messaging.send_text(bot, user_id, f"{plan['caption']}\n\n{prod['link']}",
-                                              source="funnel", reply_markup=_guide_kb(prod["link"]))
-                    await db.mark_guide_sent(user_id)
-                    return
-                # продукт есть, но файл ещё заливается (file_tg_id не готов) → мягко, НЕ помечаем (повторный проход выдаст)
-                await messaging.send_text(bot, user_id, FILE_PREPARING, source="funnel")
+                # доставка файла вернула False (напр. VK/MAX-отправка не удалась) → мягко, НЕ помечаем
+                await ch.deliver_text(FILE_PREPARING)
                 return
-            # prod is None (удалён/не наш тенант) → пробуем сырой file_id ниже
-        # 2) Сырой tg file_id (продвинутый путь).
+            else:
+                await ch.deliver_text(FILE_PREPARING)
+                return
         if plan["file_id"]:
             try:
-                await messaging.send_by_kind(bot, user_id, "document", file_id=plan["file_id"],
-                                             caption=plan["caption"], source="funnel")
-                await db.mark_guide_sent(user_id)  # помечаем ТОЛЬКО после успешной отправки
-                return
-            except Exception as e:  # noqa: BLE001 — сбой файла → фолбэк на ссылку/текст
+                if await ch.deliver_file(plan["caption"], {"file_tg_id": plan["file_id"], "file_mime": None}):
+                    await db.mark_guide_sent(ch.uid, messenger=ch.messenger)
+                    return
+            except Exception as e:  # noqa: BLE001
                 logger.warning("funnel: файл-лид-магнит (file_id) не выдан (%s) — фолбэк", e)
     if plan["url"]:
-        await messaging.send_text(bot, user_id, f"{plan['caption']}\n\n{plan['url']}",
-                                  source="funnel", reply_markup=_guide_kb(plan["url"]))
+        await ch.deliver_url(plan["caption"], plan["url"])
     else:
-        await messaging.send_text(bot, user_id, plan["caption"], source="funnel")
-    await db.mark_guide_sent(user_id)  # после успешной финальной отправки материала
+        await ch.deliver_text(plan["caption"])
+    await db.mark_guide_sent(ch.uid, messenger=ch.messenger)

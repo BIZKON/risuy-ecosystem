@@ -108,23 +108,25 @@ async def upsert_start(tg_user_id: int, source: str, *, messenger: str = "tg") -
 
 
 async def set_consent(tg_user_id: int, value: bool, *, consent_text: str | None = None,
-                      doc_version: int = 1, channel: str = "tg") -> None:
+                      doc_version: int = 1, channel: str = "tg", messenger: str = "tg") -> None:
     """Ставит leads.consent И пишет событие в реестр согласий consent_events (152-ФЗ ст. 9 —
     доказательство кто/когда/на какую редакцию текста). Одной транзакцией (атомарно): флаг и
     запись реестра не расходятся. consent_text → text_hash (на какую редакцию дано согласие).
     Событие 'granted' пишется только при выдаче (value=True); отзыв ('revoked') — отдельным путём
-    (кнопка «Отозвать согласие»). tenant-scoped (бот=owner, фильтрует tenant_id явно)."""
+    (кнопка «Отозвать согласие»). messenger — канал идентичности (tg/vk/max).
+    tenant-scoped (бот=owner, фильтрует tenant_id явно)."""
     text_hash = (hashlib.sha256(consent_text.encode("utf-8")).hexdigest()
                  if consent_text else None)
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         async with c.transaction():
             lead_id = await c.fetchval(
                 # При повторном согласии (value=true) субъект ВЕРНУЛСЯ → снимаем прежний отзыв/отписку,
                 # иначе retention-cron обезличит вернувшегося. Первое согласие: оба и так null → no-op.
-                "update leads set consent = $2, "
-                "  erase_requested_at = case when $2 then null else erase_requested_at end, "
-                "  unsubscribed_at    = case when $2 then null else unsubscribed_at end "
-                "where tg_user_id = $1 and tenant_id = $3 returning id",
+                f"update leads set consent = $2, "
+                f"  erase_requested_at = case when $2 then null else erase_requested_at end, "
+                f"  unsubscribed_at    = case when $2 then null else unsubscribed_at end "
+                f"where {col} = $1 and tenant_id = $3 returning id",
                 tg_user_id, value, tenant_id(),
             )
             if value and lead_id is not None:
@@ -136,17 +138,19 @@ async def set_consent(tg_user_id: int, value: bool, *, consent_text: str | None 
                 )
 
 
-async def request_erase(tg_user_id: int, *, channel: str = "tg"):
+async def request_erase(tg_user_id: int, *, channel: str = "tg", messenger: str = "tg"):
     """Отзыв согласия субъектом ИЗ БОТА (152-ФЗ ст. 9 ч. 2 — «в любой момент»): ставит
     leads.erase_requested_at (coalesce) + unsubscribed_at (стоп рассылок/касаний) + пишет
     consent_events('revoked') — одной транзакцией. Обезличивание ПДн — retention-cron через
-    ERASE_AFTER_DAYS (ничего нового). tenant-scoped, идемпотентно (coalesce). Возвращает lead_id|None."""
+    ERASE_AFTER_DAYS (ничего нового). messenger — канал идентичности (tg/vk/max).
+    tenant-scoped, идемпотентно (coalesce). Возвращает lead_id|None."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         async with c.transaction():
             lead_id = await c.fetchval(
-                "update leads set erase_requested_at = coalesce(erase_requested_at, now()), "
-                "                 unsubscribed_at    = coalesce(unsubscribed_at, now()) "
-                "where tg_user_id = $1 and tenant_id = $2 returning id",
+                f"update leads set erase_requested_at = coalesce(erase_requested_at, now()), "
+                f"                 unsubscribed_at    = coalesce(unsubscribed_at, now()) "
+                f"where {col} = $1 and tenant_id = $2 returning id",
                 tg_user_id, tenant_id(),
             )
             if lead_id is not None:
@@ -158,61 +162,69 @@ async def request_erase(tg_user_id: int, *, channel: str = "tg"):
     return lead_id
 
 
-async def is_erase_requested(tg_user_id: int) -> bool:
-    """Отозвал ли субъект согласие (erase_requested_at стоит) → бот молчит (стоп-обработка). tenant-scoped."""
+async def is_erase_requested(tg_user_id: int, *, messenger: str = "tg") -> bool:
+    """Отозвал ли субъект согласие (erase_requested_at стоит) → бот молчит (стоп-обработка).
+    messenger — канал идентичности (tg/vk/max). tenant-scoped."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         return bool(await c.fetchval(
-            "select erase_requested_at is not null from leads where tg_user_id = $1 and tenant_id = $2",
+            f"select erase_requested_at is not null from leads where {col} = $1 and tenant_id = $2",
             tg_user_id, tenant_id(),
         ))
 
 
-async def set_name(tg_user_id: int, name: str) -> None:
+async def set_name(tg_user_id: int, name: str, *, messenger: str = "tg") -> None:
+    col = _user_col(messenger)
+    async with pool.acquire() as c:
+        await c.execute(f"update leads set name = $2 where {col} = $1 and tenant_id = $3",
+                        tg_user_id, name, tenant_id())
+
+
+async def set_phone(tg_user_id: int, phone: str, phone_hash: str, *, messenger: str = "tg") -> None:
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         await c.execute(
-            "update leads set name = $2 where tg_user_id = $1 and tenant_id = $3",
-            tg_user_id, name, tenant_id(),
-        )
+            f"update leads set phone = $2, phone_hash = $3 where {col} = $1 and tenant_id = $4",
+            tg_user_id, phone, phone_hash, tenant_id())
 
 
-async def set_phone(tg_user_id: int, phone: str, phone_hash: str) -> None:
+async def set_subscribed(tg_user_id: int, value: bool, *, messenger: str = "tg") -> None:
+    col = _user_col(messenger)
     async with pool.acquire() as c:
-        await c.execute(
-            "update leads set phone = $2, phone_hash = $3 "
-            "where tg_user_id = $1 and tenant_id = $4",
-            tg_user_id, phone, phone_hash, tenant_id(),
-        )
+        await c.execute(f"update leads set subscribed = $2 where {col} = $1 and tenant_id = $3",
+                        tg_user_id, value, tenant_id())
 
 
-async def set_subscribed(tg_user_id: int, value: bool) -> None:
-    async with pool.acquire() as c:
-        await c.execute(
-            "update leads set subscribed = $2 where tg_user_id = $1 and tenant_id = $3",
-            tg_user_id, value, tenant_id(),
-        )
-
-
-async def get_lead_status(tg_user_id: int) -> str | None:
+async def get_lead_status(tg_user_id: int, *, messenger: str = "tg") -> str | None:
     """Текущий status лида (tenant-scoped) — для гейта повторного прохода тенант-воронки
-    (лид уже 'guide_sent' не гоняем по шагам заново). None — лида нет."""
+    (лид уже 'guide_sent' не гоняем по шагам заново). messenger — канал идентичности (tg/vk/max).
+    None — лида нет."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         return await c.fetchval(
-            "select status from leads where tg_user_id = $1 and tenant_id = $2",
-            tg_user_id, tenant_id(),
-        )
+            f"select status from leads where {col} = $1 and tenant_id = $2", tg_user_id, tenant_id())
 
 
-async def mark_guide_sent(tg_user_id: int) -> None:
-    """Фиксируем выдачу гайда один раз (guide_sent_at не перетираем при повторе)."""
+async def mark_guide_sent(tg_user_id: int, *, messenger: str = "tg") -> None:
+    """Фиксируем выдачу гайда один раз (guide_sent_at не перетираем при повторе).
+    messenger — канал идентичности (tg/vk/max)."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         await c.execute(
-            """
-            update leads
-            set status = 'guide_sent', guide_sent_at = coalesce(guide_sent_at, now())
-            where tg_user_id = $1 and tenant_id = $2
-            """,
-            tg_user_id, tenant_id(),
-        )
+            f"update leads set status = 'guide_sent', guide_sent_at = coalesce(guide_sent_at, now()) "
+            f"where {col} = $1 and tenant_id = $2", tg_user_id, tenant_id())
+
+
+async def get_lead_snapshot(uid: int, *, messenger: str = "tg") -> dict | None:
+    """Состояние лида для диспетчера воронки (consent/phone/subscribed/status).
+    None — лида нет. messenger — канал идентичности (tg/vk/max). tenant-scoped."""
+    col = _user_col(messenger)
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            f"select consent, phone, subscribed, status from leads "
+            f"where {col} = $1 and tenant_id = $2",
+            uid, tenant_id())
+    return dict(row) if row else None
 
 
 async def get_due_followups(col: str, delay_seconds: int) -> list[int]:
@@ -1073,10 +1085,17 @@ async def bump_product_upload_attempt(product_id: int, error: str) -> None:
 async def set_product_file_id(product_id: int, tg_file_id: str) -> None:
     """Проставить products.file_tg_id и ОБНУЛИТЬ file (bytea) — однократность заливки
     и гигиена места, симметрично set_broadcast_file_id. Пишет БОТ (owner-роль).
-    upload_error чистим (заливка удалась)."""
+    upload_error чистим (заливка удалась).
+
+    Исключение: для kind='lead_magnet' байты (file) НЕ обнуляем — они нужны для
+    файл-выдачи на VK/MAX (там TG file_id не подходит, только прямые байты).
+    Частичный индекс заливки опирается на file_tg_id is null, поэтому после простановки
+    file_tg_id продукт из очереди уходит даже с сохранёнными байтами (не перезаливается)."""
     async with pool.acquire() as c:
         await c.execute(
-            "update products set file_tg_id = $2, file = null, upload_error = null where id = $1",
+            "update products set file_tg_id = $2, upload_error = null, "
+            "  file = case when kind = 'lead_magnet' then file else null end "
+            "where id = $1",
             product_id, tg_file_id,
         )
 
@@ -1462,7 +1481,7 @@ async def get_funnel_config(tid) -> dict:
         "funnel_enabled", "welcome_text",
         "operator_name", "operator_inn", "operator_email", "data_purpose",
         "privacy_url", "company_name", "phone_step_enabled",
-        "gate_enabled", "gate_channel_id", "gate_channel_url",
+        "gate_enabled", "gate_channel_id", "gate_channel_url", "vk_gate_group_id", "max_gate_chat_id",
         "leadmagnet_kind", "leadmagnet_url", "leadmagnet_file_id", "leadmagnet_product_id",
         "leadmagnet_caption", "video_note_file_id",
     ]
@@ -1513,6 +1532,8 @@ async def get_funnel_config(tid) -> dict:
             "enabled": bool(s("gate_enabled")),
             "channel_id": s("gate_channel_id") or None,
             "channel_url": s("gate_channel_url") or None,
+            "vk_gate_group_id": s("vk_gate_group_id") or None,
+            "max_gate_chat_id": s("max_gate_chat_id") or None,
         },
         "leadmagnet": {
             "kind": s("leadmagnet_kind") or None,
@@ -1527,17 +1548,21 @@ async def get_funnel_config(tid) -> dict:
 
 async def get_funnel_product(product_id: int) -> dict | None:
     """Продукт-материал тенант-воронки по id (tenant-scoped, kind='lead_magnet') — для выдачи файла.
-    file_tg_id готов → шлём по нему; ещё нет (бот-воркёр не залил байты) → file_tg_id=None (вызвавший
-    мягко попросит подождать). None — продукта нет / не наш тенант / не lead_magnet."""
+    file_tg_id готов → шлём по нему (TG-адаптер); ещё нет (бот-воркёр не залил байты) →
+    file_tg_id=None (вызвавший мягко попросит подождать).
+    file_bytes — байты файла для прямой выдачи на VK/MAX (file_tg_id там не подходит);
+    для lead_magnet байты сохраняются после TG-заливки (set_product_file_id не обнуляет их).
+    None — продукта нет / не наш тенант / не lead_magnet."""
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select file_tg_id, file_mime, link from products "
+            "select file_tg_id, file_mime, file_name, file, link from products "
             "where id = $1 and tenant_id = $2 and kind = 'lead_magnet'",
             product_id, tenant_id(),
         )
     if row is None:
         return None
     return {"file_tg_id": row["file_tg_id"], "file_mime": row["file_mime"],
+            "file_name": row["file_name"], "file_bytes": row["file"],
             "link": (row["link"] or "").strip() or None}
 
 

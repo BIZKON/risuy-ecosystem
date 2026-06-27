@@ -538,6 +538,9 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 .chat__msg--out{ align-self:flex-end; background:var(--primary); color:#fff; border-end-end-radius:4px }
 .chat__msg--out a{ color:#fff; text-decoration:underline }
 .chat__msg--typing{ color:var(--muted); font-style:italic }
+.dc-consent{ display:flex; gap:8px; align-items:flex-start; font-size:.8rem; color:var(--muted); padding:.5rem 1.1rem 0; margin:0 }
+.dc-consent input[type=checkbox]{ margin-top:.15em; flex:0 0 auto; accent-color:var(--primary) }
+.dc-consent a{ color:var(--primary); text-decoration:underline }
 .chat__form{ display:flex; gap:.5rem; padding:.8rem 1.1rem; border-block-start:1px solid var(--line) }
 .chat__input{ flex:1 1 auto; padding:.65rem .9rem; border:1px solid var(--line); border-radius:10px;
   font:inherit; font-size:var(--fs-s); color:var(--ink) }
