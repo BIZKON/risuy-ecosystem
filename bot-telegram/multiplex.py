@@ -172,6 +172,15 @@ async def t_check_sub(cb: CallbackQuery) -> None:
         await cb.answer(funnel.NOT_SUBSCRIBED_ALERT, show_alert=True)
 
 
+@tenant_router.message(Command("revoke", ignore_case=True))
+async def t_revoke(message: Message) -> None:
+    """Отзыв согласия на обработку ПДн субъектом (152-ФЗ ст.9 ч.2 — «в любой момент»): ставит
+    erase_requested_at + unsubscribed_at + пишет consent_events('revoked'). Обезличивание — retention-cron
+    (ERASE_AFTER_DAYS). После отзыва бот молчит на свободный текст (см. t_text)."""
+    await db.request_erase(message.from_user.id, channel="tg")
+    await messaging.send_text(message.bot, message.from_user.id, texts.REVOKE_OK, source="system")
+
+
 @tenant_router.message(F.text)
 async def t_text(message: Message, bot: Bot) -> None:
     """Свободный текст → ответ Лии тенанта (AI из tenant_settings) + метеринг.
@@ -185,6 +194,9 @@ async def t_text(message: Message, bot: Bot) -> None:
     # Перехват: оператор взял лид руками (триггер notify_reply_pause / панель) → Лия и триггеры
     # молчат (как Школа handlers.on_free_text и каналы VK/MAX). Входящее уже залогировал middleware.
     if await db.is_bot_paused(message.from_user.id):
+        return
+    # Субъект отозвал согласие → бот молчит (стоп-обработка ПДн, 152-ФЗ). Возврат — через /start + согласие.
+    if await db.is_erase_requested(message.from_user.id):
         return
     cfg = await db.get_tenant_ai_overrides(db.tenant_id())
     if not cfg["enabled"]:

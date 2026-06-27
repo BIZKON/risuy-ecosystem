@@ -119,7 +119,12 @@ async def set_consent(tg_user_id: int, value: bool, *, consent_text: str | None 
     async with pool.acquire() as c:
         async with c.transaction():
             lead_id = await c.fetchval(
-                "update leads set consent = $2 where tg_user_id = $1 and tenant_id = $3 returning id",
+                # При повторном согласии (value=true) субъект ВЕРНУЛСЯ → снимаем прежний отзыв/отписку,
+                # иначе retention-cron обезличит вернувшегося. Первое согласие: оба и так null → no-op.
+                "update leads set consent = $2, "
+                "  erase_requested_at = case when $2 then null else erase_requested_at end, "
+                "  unsubscribed_at    = case when $2 then null else unsubscribed_at end "
+                "where tg_user_id = $1 and tenant_id = $3 returning id",
                 tg_user_id, value, tenant_id(),
             )
             if value and lead_id is not None:
@@ -129,6 +134,37 @@ async def set_consent(tg_user_id: int, value: bool, *, consent_text: str | None 
                     "values ($1, $2, 'consent', $3, $4, 'granted', $5)",
                     tenant_id(), lead_id, doc_version, text_hash, channel,
                 )
+
+
+async def request_erase(tg_user_id: int, *, channel: str = "tg"):
+    """Отзыв согласия субъектом ИЗ БОТА (152-ФЗ ст. 9 ч. 2 — «в любой момент»): ставит
+    leads.erase_requested_at (coalesce) + unsubscribed_at (стоп рассылок/касаний) + пишет
+    consent_events('revoked') — одной транзакцией. Обезличивание ПДн — retention-cron через
+    ERASE_AFTER_DAYS (ничего нового). tenant-scoped, идемпотентно (coalesce). Возвращает lead_id|None."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            lead_id = await c.fetchval(
+                "update leads set erase_requested_at = coalesce(erase_requested_at, now()), "
+                "                 unsubscribed_at    = coalesce(unsubscribed_at, now()) "
+                "where tg_user_id = $1 and tenant_id = $2 returning id",
+                tg_user_id, tenant_id(),
+            )
+            if lead_id is not None:
+                await c.execute(
+                    "insert into consent_events (tenant_id, lead_id, doc_type, action, channel) "
+                    "values ($1, $2, 'consent', 'revoked', $3)",
+                    tenant_id(), lead_id, channel,
+                )
+    return lead_id
+
+
+async def is_erase_requested(tg_user_id: int) -> bool:
+    """Отозвал ли субъект согласие (erase_requested_at стоит) → бот молчит (стоп-обработка). tenant-scoped."""
+    async with pool.acquire() as c:
+        return bool(await c.fetchval(
+            "select erase_requested_at is not null from leads where tg_user_id = $1 and tenant_id = $2",
+            tg_user_id, tenant_id(),
+        ))
 
 
 async def set_name(tg_user_id: int, name: str) -> None:

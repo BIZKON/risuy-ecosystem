@@ -121,6 +121,15 @@ async def on_unsub(cb: CallbackQuery):
     await messaging.send_text(cb.bot, cb.from_user.id, texts.UNSUBSCRIBED_OK, source="system")
 
 
+@router.message(Command("revoke", ignore_case=True))
+async def cmd_revoke(message: Message):
+    """Отзыв согласия на обработку ПДн субъектом (152-ФЗ ст.9 ч.2 — «в любой момент»). ОТЛИЧАЕТСЯ
+    от /stop (отписка от рассылок): ставит erase_requested_at + unsubscribed_at + пишет
+    consent_events('revoked'); обезличивание ПДн — retention-cron (ERASE_AFTER_DAYS)."""
+    await db.request_erase(message.from_user.id, channel="tg")
+    await messaging.reply_text(message, texts.REVOKE_OK, source="system")
+
+
 @router.callback_query(Funnel.consent, F.data == "consent_yes")
 async def on_consent(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
