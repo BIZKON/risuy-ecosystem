@@ -175,6 +175,59 @@ async def is_subscribed(bot, channel_id, user_id: int) -> bool:
     return False
 
 
+# ── Хелперы диспетчера (Task 3) ──────────────────────────────────────────────
+
+def looks_like_phone(text: str) -> bool:
+    """Эвристика «это номер телефона» для каналов без request_contact (VK/MAX): ≥10 цифр."""
+    return sum(ch.isdigit() for ch in (text or "")) >= 10
+
+
+def requisites_filled(cfg: dict) -> bool:
+    """Есть ли из чего собрать согласие (реквизиты оператора заполнены → consent_text непустой)."""
+    return bool((cfg.get("consent_text") or "").strip())
+
+
+REVOKE_WORDS = ("отозвать согласие", "отзываю согласие", "/revoke")
+
+
+def is_revoke(text: str) -> bool:
+    """Проверяет, является ли сообщение командой отзыва согласия 152-ФЗ."""
+    t = (text or "").strip().lower()
+    return any(w in t for w in REVOKE_WORDS)
+
+
+async def dispatch(ch, cfg: dict, lead: dict, incoming: dict) -> bool:
+    """Гоняет шаг воронки по состоянию лида. Возвращает True, если воронка обработала ход
+    (Лию/продажи на этот ход НЕ зовём), False — если лид уже прошёл воронку (status='guide_sent')."""
+    if (lead.get("status") or "") == "guide_sent":
+        return False
+    consent = bool(lead.get("consent"))
+    text = (incoming.get("text") or "").strip()
+    # Шаг 1: согласие
+    if not consent:
+        if incoming.get("consent_pressed"):
+            await db.set_consent(ch.uid, True, consent_text=cfg.get("consent_text") or None,
+                                 channel=ch.messenger, messenger=ch.messenger)
+            await after_consent(ch, cfg)
+        else:
+            await start(ch, cfg)   # (повторно) показать приветствие+согласие
+        return True
+    # Шаг 2: телефон (текстом, если phone_step и ещё нет номера)
+    if cfg.get("phone_step") and not lead.get("phone"):
+        if text and looks_like_phone(text):
+            await db.set_phone(ch.uid, text, phone_hash(text), messenger=ch.messenger)
+            await after_phone(ch, cfg)
+        else:
+            await ch.ask_phone(ASK_PHONE)
+        return True
+    # Шаг 3: гейт / выдача
+    if (cfg.get("gate") or {}).get("enabled") and not lead.get("subscribed"):
+        await go_to_gate(ch, cfg)
+    else:
+        await deliver(ch, cfg)
+    return True
+
+
 async def deliver(ch, cfg: dict) -> None:
     """Финальная выдача лид-магнита через адаптер: видео-кружок (опц.) → файл/ссылка.
 
