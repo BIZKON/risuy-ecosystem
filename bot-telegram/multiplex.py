@@ -676,6 +676,10 @@ async def _max_callback(maxbot, tenant_id, user_id: int, chat_id: int, payload, 
         await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
         # 152-ФЗ: согласие через callback (кнопка «consent_yes»).
         if payload and payload.get("cmd") == "consent_yes":
+            # 152-ФЗ: субъект отозвал согласие → старая кнопка не должна откатить отзыв.
+            if await db.is_erase_requested(user_id, messenger="max"):
+                await maxbot.answer_callback(callback_id)
+                return
             fcfg = await db.get_funnel_config(tenant_id)
             if fcfg["enabled"] and funnel.requisites_filled(fcfg):
                 lead = await db.get_lead_snapshot(user_id, messenger="max") or {}
