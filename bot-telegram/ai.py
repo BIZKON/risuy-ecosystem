@@ -17,6 +17,7 @@ import config
 import db
 import escalation
 import triggers
+from shared import pii  # PII-маскировка перед внешним ИИ (152-ФЗ): mask → LLM → unmask
 from shared.metering import charge_usage, get_tenant_plan
 from shared.money import ceil_mul
 
@@ -59,7 +60,12 @@ async def ask_liya(
         "authorization": f"Bearer {config.TIMEWEB_AI_TOKEN}",
         "content-type": "application/json",
     }
-    payload: dict = {"message": text}
+    try:  # fail-closed: при сбое маскировки НЕ отправляем сырые ПДн во внешний ИИ
+        masked_text, _pii = pii.redact_text(text)
+    except Exception as e:  # noqa: BLE001
+        logger.error("AI: PII-маскировка не удалась — сырьё не отправляем: %s", e)
+        return eff_fallback, None
+    payload: dict = {"message": masked_text}
     if parent_message_id:
         payload["parent_message_id"] = parent_message_id
 
@@ -94,7 +100,7 @@ async def ask_liya(
             data.get("finish_reason"), str(data)[:200],
         )
         return eff_fallback, None
-    return answer, msg_id
+    return pii.unmask_text(answer, _pii), msg_id  # вернуть оригиналы ПДн пользователю
 
 
 # ── Wave 5: cloud-ai агент через OpenAI-совместимый эндпоинт (промпт из ПАНЕЛИ) ──
@@ -160,9 +166,14 @@ async def ask_agent_openai(
         "authorization": f"Bearer {config.TIMEWEB_AI_TOKEN}",
         "content-type": "application/json",
     }
+    try:  # fail-closed: при сбое маскировки НЕ отправляем сырые ПДн во внешний ИИ
+        masked_messages, _pii = pii.redact_messages(messages)
+    except Exception as e:  # noqa: BLE001
+        logger.error("AI(agent-openai): PII-маскировка не удалась — сырьё не отправляем: %s", e)
+        return None
     # model в этом эндпоинте игнорируется (берётся модель агента), но шлём непустой —
     # для совместимости со строгими OpenAI-парсерами. stream=False — ждём полный ответ.
-    payload = {"model": "tw-cloud-ai", "messages": messages, "stream": False}
+    payload = {"model": "tw-cloud-ai", "messages": masked_messages, "stream": False}
 
     try:
         async with aiohttp.ClientSession(timeout=_OPENAI_TIMEOUT) as session:
@@ -187,7 +198,7 @@ async def ask_agent_openai(
     if not answer:
         logger.error("AI(agent-openai) пустой ответ: %s", raw[:200])
         return None
-    return answer
+    return pii.unmask_text(answer, _pii)  # вернуть оригиналы ПДн пользователю
 
 
 # ── Бэкенд «gateway»: Timeweb AI Gateway (OpenAI-совместимый, прямой вызов модели) ──
@@ -224,7 +235,12 @@ async def ask_gateway(
         "content-type": "application/json",
     }
     messages = _build_chat_messages(system_prompt, history, text)
-    payload = {"model": eff_model, "messages": messages, "stream": False}
+    try:  # fail-closed: при сбое маскировки НЕ отправляем сырые ПДн во внешний ИИ
+        masked_messages, _pii = pii.redact_messages(messages)
+    except Exception as e:  # noqa: BLE001
+        logger.error("AI Gateway: PII-маскировка не удалась — сырьё не отправляем: %s", e)
+        return eff_fallback, None
+    payload = {"model": eff_model, "messages": masked_messages, "stream": False}
 
     try:
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
@@ -255,7 +271,7 @@ async def ask_gateway(
         "usage": usage,
         "request_id": (data.get("id") or "").strip() or uuid.uuid4().hex,
     } if usage else None
-    return answer, meta
+    return pii.unmask_text(answer, _pii), meta  # вернуть оригиналы ПДн пользователю
 
 
 # ── Cost-capture gateway-вызова (Wave 3, ТЗ §5.2; DECISIONS п.16) ─────────────
