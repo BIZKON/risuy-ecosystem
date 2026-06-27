@@ -212,6 +212,7 @@ grant usage on sequence outbox_id_seq          to panel_rw;
 grant usage on sequence broadcasts_id_seq      to panel_rw;
 grant usage on sequence broadcast_files_id_seq to panel_rw;
 grant usage on sequence products_id_seq        to panel_rw;  -- INSERT нового офера панелью
+grant usage on sequence consent_events_id_seq  to panel_rw;  -- 152-ФЗ реестр согласий (bigserial): INSERT 'revoked' из панели
 -- messages / broadcast_recipients / link_clicks (bigserial) — туда пишет БОТ (owner),
 -- панели их sequence НЕ нужен. link_tokens.token / app_settings.key — text PK, sequence нет.
 
@@ -237,6 +238,7 @@ grant select, insert, update, delete on kb_chunks    to panel_rw;
 --   usage_ledger       SELECT, INSERT — APPEND-ONLY: update/delete НЕ выдавать НИКОГДА
 --   model_prices       SELECT, INSERT — себестоимость: цены добавляются новой строкой, не правятся
 --   agent_token_snapshots SELECT, INSERT — снимает воркер бота; панель читает для сверки
+--   consent_events     SELECT, INSERT — APPEND-ONLY (152-ФЗ ст.9 реестр согласий): update/delete НЕ выдаём
 --   tenant_secrets     CRUD — write-only UI ключей (значение наружу не отдаётся)
 grant select, insert, update         on tenants               to panel_rw;
 grant select, insert, update, delete on memberships           to panel_rw;
@@ -252,6 +254,8 @@ grant select, insert                 on agent_token_snapshots to panel_rw;
 grant select, insert, update, delete on tenant_secrets        to panel_rw;
 grant select, insert, update, delete on tenant_agents         to panel_rw;  -- Wave 3: реестр агент→тенант
 grant select, insert, update, delete on tenant_triggers       to panel_rw;  -- Слой B: CRUD триггеров клиента
+grant select, insert                 on consent_events        to panel_rw;  -- 152-ФЗ ст.9: реестр согласий (append-only — читает + пишет 'revoked')
+revoke update, delete                on consent_events        from panel_rw; -- доказательная база неизменна (зеркало admin_audit / migrate_consent_events.sql:44)
 -- Парадная: внешние идентичности клиентских учёток (object — db/schema_account_identities.sql).
 -- Self-serve регистрация (за флагом PUBLIC_SIGNUP_ENABLED) пишет identity + создаёт tenant/
 -- membership (insert на них уже выдан выше). Резолв логина (email/ВК/ТГ→username) — select.
