@@ -39,6 +39,7 @@ import config
 import db
 import escalation
 import funnel
+import funnel_channels
 import messaging
 import selling
 import texts
@@ -104,7 +105,7 @@ async def t_start(message: Message) -> None:
                 await db.set_name(message.from_user.id, name)
             except Exception:  # noqa: BLE001 — имя не критично
                 logger.warning("multiplex: не записал имя лида", exc_info=True)
-        await funnel.start(message, cfg)
+        await funnel.start(funnel_channels.TgFunnelChannel(message.bot, message.from_user.id), cfg)
         return
     await messaging.send_text(
         message.bot, message.from_user.id, _TENANT_GREETING, source="funnel"
@@ -132,7 +133,7 @@ async def t_consent(cb: CallbackQuery) -> None:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
         pass
-    await funnel.after_consent(cb.bot, cb.from_user.id, cfg)
+    await funnel.after_consent(funnel_channels.TgFunnelChannel(cb.bot, cb.from_user.id), cfg)
 
 
 @tenant_router.message(F.contact)
@@ -147,7 +148,7 @@ async def t_contact(message: Message) -> None:
     if not phone:  # контакт без номера (редкий, но валидный апдейт) → не падаем
         return
     await db.set_phone(message.from_user.id, phone, funnel.phone_hash(phone))
-    await funnel.after_phone(message.bot, message.from_user.id, cfg)
+    await funnel.after_phone(funnel_channels.TgFunnelChannel(message.bot, message.from_user.id), cfg)
 
 
 @tenant_router.callback_query(F.data == "check_sub")
@@ -167,7 +168,7 @@ async def t_check_sub(cb: CallbackQuery) -> None:
             await cb.message.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001
             pass
-        await funnel.deliver(cb.bot, cb.from_user.id, cfg)
+        await funnel.deliver(funnel_channels.TgFunnelChannel(cb.bot, cb.from_user.id), cfg)
     else:
         await cb.answer(funnel.NOT_SUBSCRIBED_ALERT, show_alert=True)
 
