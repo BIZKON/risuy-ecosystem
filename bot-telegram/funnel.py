@@ -198,10 +198,13 @@ async def deliver(ch, cfg: dict) -> None:
             except (TypeError, ValueError):
                 prod = None
         if prod is not None:
-            if prod.get("file_tg_id") or prod.get("link"):
+            if prod.get("file_tg_id") or prod.get("link") or prod.get("file_bytes"):
                 if await ch.deliver_file(plan["caption"], prod):
                     await db.mark_guide_sent(ch.uid, messenger=ch.messenger)
                     return
+                # доставка файла вернула False (напр. VK/MAX-отправка не удалась) → мягко, НЕ помечаем
+                await ch.deliver_text(FILE_PREPARING)
+                return
             else:
                 await ch.deliver_text(FILE_PREPARING)
                 return

@@ -163,7 +163,7 @@ async def t_check_sub(cb: CallbackQuery) -> None:
         return
     if await funnel.is_subscribed(cb.bot, cfg["gate"]["channel_id"], cb.from_user.id):
         await cb.answer(funnel.PHONE_OK)
-        await db.set_subscribed(cb.from_user.id, True)
+        await db.set_subscribed(cb.from_user.id, True, messenger="tg")
         try:
             await cb.message.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001
