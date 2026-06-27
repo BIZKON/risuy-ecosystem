@@ -233,6 +233,12 @@ def _cors(resp: web.StreamResponse) -> web.StreamResponse:
     return resp
 
 
+def _consent_required(body: dict) -> bool:
+    """Чистый гард согласия 152-ФЗ для веб-чата. True → нужно согласие (запрос блокируем).
+    Тестируется напрямую в web_consent_smoke.py без сети/БД."""
+    return not bool(isinstance(body, dict) and body.get("consent"))
+
+
 async def _demo_chat(request: web.Request) -> web.StreamResponse:
     """POST /api/demo-chat: тело {messages:[{role,content}...]} (последнее — текущий вопрос user).
     Возвращает {reply}. Любая ошибка → мягкий JSON (не 5xx-утечка). OPTIONS → preflight."""
@@ -244,6 +250,12 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
         body = await request.json()
     except Exception:  # noqa: BLE001
         return _cors(web.json_response({"error": "bad_json"}, status=400))
+    # 152-ФЗ: требуем явное согласие до любого обращения к Лие
+    if _consent_required(body):
+        return _cors(web.json_response({
+            "error": "consent_required",
+            "reply": "Чтобы продолжить, отметьте согласие на обработку персональных данных 🙏",
+        }))
     msgs = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(msgs, list) or not msgs:
         return _cors(web.json_response({"error": "no_messages"}, status=400))
@@ -289,6 +301,10 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
         _tok = db.current_tenant_id.set(cfg["tid"])
         try:
             await db.upsert_start(sid, "web", messenger="web")
+            # Дедуп согласия: пишем granted-событие ОДИН РАЗ на сессию (не на каждое сообщение)
+            _snap = await db.get_lead_snapshot(sid, messenger="web")
+            if not (_snap and _snap.get("consent")):
+                await db.set_consent(sid, True, consent_text=None, channel="web", messenger="web")
             _lid = await db.get_lead_id(sid, messenger="web")
             await db.log_message(lead_id=_lid, tg_user_id=0, messenger="web", direction="in", text=text)
             await db.log_message(lead_id=_lid, tg_user_id=0, messenger="web", direction="out",
