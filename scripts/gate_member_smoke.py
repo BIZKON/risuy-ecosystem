@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(ROOT, "shared"))
 
 from vk_driver import VKBot  # noqa: E402
 from leadmagnet import validate_funnel_fields, FUNNEL_KEYS  # noqa: E402
+from max_driver import MAXBot  # noqa: E402
 
 
 class FakeVKBot:
@@ -60,7 +61,18 @@ async def main() -> None:
     if result3 is not False:
         fails.append(f"is_member должен fail-closed (False) при исключении, получено: {result3!r}")
 
-    # --- Тест 4: validate_funnel_fields не требует vk_gate_group_id/max_gate_chat_id ---
+    # --- Тест 4: MAXBot.is_channel_member fail-closed без сессии ---
+    # _session=None (run() не вызван) → self._session.get(...) бросает AttributeError →
+    # ловится широким except → возвращает False (fail-closed, гейт держит).
+    max_bot = MAXBot("fake-tok", on_message=None)
+    result_max = await max_bot.is_channel_member(100, 200)
+    if result_max is not False:
+        fails.append(
+            f"MAXBot.is_channel_member должен быть fail-closed (False) без сессии,"
+            f" получено: {result_max!r}"
+        )
+
+    # --- Тест 5: validate_funnel_fields не требует vk_gate_group_id/max_gate_chat_id ---
     # Конфиг без новых полей — воронка включена, реквизиты заполнены, лид-магнит = ссылка
     cfg_no_gate_fields = {
         "funnel_enabled": "1",
@@ -74,7 +86,7 @@ async def main() -> None:
     if errs:
         fails.append(f"validate_funnel_fields без vk/max полей дала ошибки: {errs}")
 
-    # --- Тест 5: новые ключи есть в FUNNEL_KEYS ---
+    # --- Тест 6: новые ключи есть в FUNNEL_KEYS ---
     if "vk_gate_group_id" not in FUNNEL_KEYS:
         fails.append("vk_gate_group_id отсутствует в FUNNEL_KEYS")
     if "max_gate_chat_id" not in FUNNEL_KEYS:
