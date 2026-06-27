@@ -75,10 +75,21 @@
              value="{{ values.operator_inn|e }}" placeholder="7700000000" maxlength="12">
     </label>
     <label class="field">
-      <span class="field__label">E-mail для отзыва согласия</span>
+      <span class="field__label">E-mail для отзыва согласия / запросов субъекта</span>
       <input class="field__input" type="email" name="operator_email" value="{{ values.operator_email|e }}"
              placeholder="info@example.ru" maxlength="200">
     </label>
+    <label class="field">
+      <span class="field__label">ОГРН / ОГРНИП <span class="field__hint">для Политики обработки ПДн</span></span>
+      <input class="field__input" type="text" name="operator_ogrn" value="{{ values.operator_ogrn|e }}"
+             placeholder="304770000000017" maxlength="20">
+    </label>
+    <label class="field">
+      <span class="field__label">Юридический / почтовый адрес <span class="field__hint">для Политики обработки ПДн</span></span>
+      <input class="field__input" type="text" name="operator_address" value="{{ values.operator_address|e }}"
+             placeholder="г. Москва, ул. …, д. …" maxlength="300">
+    </label>
+    <p class="hint hint--block">⚖️ Из этих реквизитов формируется текст согласия <b>и Политики обработки ПДн</b> (публикация страниц — следующим шагом). Перед использованием рекомендуем проверить документы у юриста — ответственность оператора по 152-ФЗ.</p>
     <label class="field">
       <span class="field__label">Цель обработки <span class="field__hint">необязательно — по умолчанию «отправить материалы и быть на связи»</span></span>
       <input class="field__input" type="text" name="data_purpose" value="{{ values.data_purpose|e }}"

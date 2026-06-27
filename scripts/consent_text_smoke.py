@@ -9,7 +9,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)  # пакет shared (как в b5_payments_smoke и др.)
 
-from shared.leadmagnet import build_consent_text, validate_funnel_fields, FUNNEL_FIELDS  # noqa: E402
+from shared.leadmagnet import (  # noqa: E402
+    build_consent_text, build_privacy_policy, validate_funnel_fields, FUNNEL_FIELDS)
 
 
 def main() -> None:
@@ -66,6 +67,23 @@ def main() -> None:
     for need in ("funnel_enabled", "operator_name", "operator_inn", "operator_email", "leadmagnet_kind"):
         if need not in keys:
             fails.append(f"FUNNEL_FIELDS не содержит ключ {need}")
+
+    # 7) Политика обработки ПДн (ст.18.1): полный документ с подстановкой реквизитов
+    pp = build_privacy_policy("ИП Петров П.П.", "770000000000", "hello@petrov.ru",
+                              operator_ogrn="304770000000017", operator_address="г. Москва, ул. Тестовая, 1",
+                              data_purpose=None)
+    for must in ("ИП Петров П.П.", "770000000000", "304770000000017", "г. Москва, ул. Тестовая, 1",
+                 "hello@petrov.ru", "152-ФЗ", "18.1"):
+        if must not in pp:
+            fails.append(f"в Политике нет '{must}'")
+    if "Российской Федерации" not in pp:
+        fails.append("в Политике нет локализации хранения (РФ)")
+    if "отозвать" not in pp.lower():
+        fails.append("в Политике нет права отзыва согласия")
+    # без ОГРН/адреса — документ всё равно собирается (опц. поля)
+    pp2 = build_privacy_policy("ООО Тест", "7700000000", "a@b.ru")
+    if "ООО Тест" not in pp2 or "152-ФЗ" not in pp2:
+        fails.append("Политика без опц. реквизитов не собралась")
 
     if fails:
         print("\n".join("❌ " + f for f in fails))
