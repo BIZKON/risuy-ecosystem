@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Защита данных (152-ФЗ){% endblock %}
+{% block body_class %}page-my-agent{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Защита данных (152-ФЗ)</h1>
+  <p class="page-head__hint">По требованию Роскомнадзора (Приказ №140) оператор должен уметь <b>обезличить</b> свою базу и передать её в защищённый контур НСУД. Здесь это делается одной кнопкой.</p>
+</div>
+
+{% if not has_tenant %}
+<section class="card" aria-label="Кабинет не привязан">
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">Этот раздел работает с базой вашего кабинета. Сейчас кабинет к учётной записи не привязан — напишите в поддержку.</p>
+</section>
+{% else %}
+
+<section class="card">
+  <h2 class="card__title">Обезличенная база</h2>
+  <p class="card__note">CSV вашей базы лидов ({{ lead_count }} {{ 'запись' if lead_count == 1 else 'записей' }}), где прямые идентификаторы (имя, телефон, ID каналов) заменены на стабильный код субъекта вида <code>СУБЪЕКТ-…</code>. Свободные заметки в файл не включаются (только пометка, что заметка есть). ⚠️ Файл содержит точные даты событий — в совокупности они могут косвенно указать на человека на небольшой базе. Поэтому он предназначен <b>только для передачи в защищённый контур НСУД</b> и <b>не для публикации</b> или передачи третьим лицам.</p>
+  <form method="post" action="/data-protection/anon.csv" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-actions"><button class="btn btn--primary" type="submit">Скачать обезличенную базу</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2 class="card__title">Справочник соответствия</h2>
+  <p class="card__note">Отдельный файл, связывающий <code>СУБЪЕКТ-…</code> с настоящими ПДн — это <b>реверс обезличивания</b>. ⚠️ Храните его <b>отдельно</b> от обезличенной базы, не объединяйте файлы и передавайте только по отдельному законному запросу. Для отозвавших согласие субъектов ПДн в справочнике скрыты.</p>
+  <form method="post" action="/data-protection/map.csv" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Основание выгрузки</span>
+      <input class="field__input" type="text" name="reason" maxlength="500" required
+             placeholder="Например: запрос РКН №… от …">
+    </label>
+    <label class="field field--check">
+      <input type="checkbox" name="confirm" value="yes" required>
+      <span class="field__label">Понимаю: это реверс псевдонима, храню файл отдельно</span>
+    </label>
+    <div class="form-actions"><button class="btn btn--secondary" type="submit">Скачать справочник соответствия</button></div>
+  </form>
+</section>
+
+{% endif %}
+{% endblock %}

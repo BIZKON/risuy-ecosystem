@@ -46,7 +46,7 @@ import security
 import timeweb_ai
 import yookassa
 
-from shared import leadmagnet, money, nurture, vault
+from shared import anon, leadmagnet, money, nurture, vault
 
 
 # --------------------------------------------------------------------------- #
@@ -1606,6 +1606,100 @@ async def _csv_consent_rows():
         ])
 
 
+# ---- Раздел «Защита данных (152-ФЗ)»: обезличенная выгрузка + справочник (Приказ №140) ---- #
+async def _csv_anon_rows():
+    # Маркер неполноты — по ФАКТИЧЕСКИ отданным строкам (не по заранее посчитанному matched): при гонке
+    # (база изменилась между count и стримом) усечение всё равно не уйдёт регулятору молча. Коллизия
+    # subject_code (астрономически маловероятна на 64 битах) → fail-closed, как в map (единый инвариант).
+    yield _csv_line(anon.ANON_HEADER, bom=True)
+    seen: set[str] = set()
+    n = 0
+    async for r in db.stream_leads_anon(row_cap=config.EXPORT_ROW_CAP):
+        row = anon.anon_row(dict(r), config.PERSONA_PRESETS)
+        if row[0] in seen:
+            raise RuntimeError(f"stream_leads_anon: коллизия subject_code {row[0]} — выгрузка прервана")
+        seen.add(row[0])
+        n += 1
+        yield _csv_line(row)
+    if n >= config.EXPORT_ROW_CAP:
+        yield _csv_line([f"# ВНИМАНИЕ: выгрузка усечена до {config.EXPORT_ROW_CAP} строк — "
+                         "обратитесь в поддержку для полной выгрузки."])
+
+
+async def _csv_map_rows():
+    yield _csv_line(anon.MAP_HEADER, bom=True)
+    seen: set[str] = set()
+    n = 0
+    async for r in db.stream_leads_map(row_cap=config.EXPORT_ROW_CAP):
+        row = anon.map_row(dict(r))
+        if row[0] in seen:
+            raise RuntimeError(f"stream_leads_map: коллизия subject_code {row[0]} — выгрузка прервана")
+        seen.add(row[0])
+        n += 1
+        yield _csv_line(row)
+    if n >= config.EXPORT_ROW_CAP:
+        yield _csv_line([f"# ВНИМАНИЕ: справочник усечён до {config.EXPORT_ROW_CAP} строк — "
+                         "обратитесь в поддержку для полной выгрузки."])
+
+
+@app.get("/data-protection", response_class=HTMLResponse)
+async def data_protection_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+):
+    tid = session.active_tenant_id
+    lead_count = await db.count_leads({}) if tid else 0
+    return templates.TemplateResponse(request, "data_protection.html", {
+        "session": session, "active": "data_protection",
+        "csrf_token": session.csrf_token, "has_tenant": bool(tid),
+        "lead_count": lead_count, "row_cap": config.EXPORT_ROW_CAP,
+    })
+
+
+@app.post("/data-protection/anon.csv")
+async def export_anon(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        raise StarletteHTTPException(status_code=400, detail="Кабинет не привязан к клиенту")
+    matched = await db.count_leads({})
+    # Аудит ДО стрима (fail-closed). Без ПДн.
+    await db.audit(actor=session.actor, action="pii_export_anon", ip=_ip(request),
+                   user_agent=_ua(request), detail={"matched": matched, "row_cap": config.EXPORT_ROW_CAP})
+    return StreamingResponse(_csv_anon_rows(), media_type="text/csv; charset=utf-8",
+                             headers=_csv_headers("anon_leads"))
+
+
+@app.post("/data-protection/map.csv")
+async def export_subject_map(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+    confirm: str = Form(""),
+    reason: str = Form(""),
+):
+    # TODO (спека §map.csv): ограничить выгрузку справочника по роли (только владелец тенанта, не любой
+    # оператор) — текущая модель ролей панели ограничена; пока гейт = CSRF + confirm + повод + аудит.
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        raise StarletteHTTPException(status_code=400, detail="Кабинет не привязан к клиенту")
+    if confirm != "yes":
+        raise StarletteHTTPException(status_code=400, detail="Требуется подтверждение")
+    reason = reason.strip()
+    if not reason:
+        raise StarletteHTTPException(status_code=400, detail="Укажите основание выгрузки справочника")
+    matched = await db.count_leads({})
+    # Отдельный аудит «передача справочника» с поводом (БЕЗ ПДн).
+    await db.audit(actor=session.actor, action="pii_export_map", ip=_ip(request),
+                   user_agent=_ua(request),
+                   detail={"matched": matched, "row_cap": config.EXPORT_ROW_CAP, "reason": reason[:500]})
+    return StreamingResponse(_csv_map_rows(), media_type="text/csv; charset=utf-8",
+                             headers=_csv_headers("subject_map"))
+
+
 def _has_narrowing_filter(filters: dict) -> bool:
     return any(
         filters.get(k) not in (None, "")
@@ -1661,7 +1755,9 @@ async def _csv_full_rows(filters: dict):
 
 def _csv_line(values: list[str], *, bom: bool = False) -> bytes:
     buf = io.StringIO()
-    csv.writer(buf, quoting=csv.QUOTE_MINIMAL).writerow(values)
+    # formula-guard: нейтрализуем ведущие =,+,-,@,TAB,CR (анти-инъекция в Excel/LibreOffice).
+    # Покрывает и существующие экспорты (export_masked/full/consents) — defence-in-depth.
+    csv.writer(buf, quoting=csv.QUOTE_MINIMAL).writerow([anon.csv_safe(v) for v in values])
     text = buf.getvalue()
     if bom:
         text = "﻿" + text   # BOM для Excel-RU (§3.11)

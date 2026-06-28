@@ -561,6 +561,54 @@ async def stream_export_full(filters: dict[str, Any], *, row_cap: int):
                 yield rec
 
 
+# --------------------------------------------------------------------------- #
+# Обезличенная выгрузка (Приказ №140). Whitelist-колонки + псевдонимизация в app-слое
+# (shared.anon). RLS: app.tenant_id ставит pool-хук; здесь ДОПОЛНИТЕЛЬНО ставим явно
+# (defence-in-depth) и падаем при пустом активном тенанте — не отдаём неопределённый набор.
+# ⚠️ ИНВАРИАНТ: stream_leads_anon и stream_leads_map ОБЯЗАНЫ иметь ОДИНАКОВЫЕ
+# `order by created_at desc limit $1` (row_cap). subject_code в anon и map совпадают только
+# при одинаковом порядке/лимите — иначе при усечении пара псевдоним↔ПДн рассинхронизируется.
+# --------------------------------------------------------------------------- #
+async def stream_leads_anon(*, row_cap: int):
+    """Курсорный стрим обезличиваемой базы лидов активного тенанта (БЕЗ прямых идентификаторов и
+    raw-notes; notes → boolean has_notes). Псевдоним subject_code считает app-слой из id."""
+    tid = _active_tenant.get()
+    if not tid:
+        raise RuntimeError("stream_leads_anon: активный тенант не установлен (RLS-скоуп)")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", tid)
+            async for rec in c.cursor(
+                "select id, messenger, source, consent, subscribed, status, "
+                "created_at, updated_at, guide_sent_at, "
+                "follow_up_1_at, follow_up_2_at, follow_up_3_at, "
+                "unsubscribed_at, erase_requested_at, ai_persona, "
+                "bot_paused, escalated_at, "
+                "(notes is not null and notes <> '') as has_notes "
+                "from leads order by created_at desc limit $1",
+                row_cap,
+            ):
+                yield rec
+
+
+async def stream_leads_map(*, row_cap: int):
+    """Справочник соответствия subject_code → прямые идентификаторы (gated, реверс псевдонима).
+    Лиды с erase_requested_at app-слой обнуляет (обработка отзыва). RLS-скоуп — как в stream_leads_anon."""
+    tid = _active_tenant.get()
+    if not tid:
+        raise RuntimeError("stream_leads_map: активный тенант не установлен (RLS-скоуп)")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", tid)
+            async for rec in c.cursor(
+                "select id, name, phone, tg_user_id, vk_user_id, max_user_id, "
+                "max_chat_id, web_session_id, notes, erase_requested_at "
+                "from leads order by created_at desc limit $1",
+                row_cap,
+            ):
+                yield rec
+
+
 # =========================================================================== #
 # РАСШИРЕНИЕ: переписка / перехват / рассылки / аналитика (план §3-§7).
 #
