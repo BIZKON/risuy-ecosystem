@@ -7,19 +7,38 @@
 {% block content %}
 <div class="page-head">
   <h1 class="page-head__title">База знаний — документы для бота</h1>
-  <p class="page-head__hint">Загрузите сюда прайс, FAQ, условия, методички — бот находит нужное по смыслу и подмешивает в ответ. Данные в РФ, без сторонних сервисов. <b>Роль и инструкции</b> сотрудника задаются в разделе «ИИ-Агенты» → карточка сотрудника.</p>
+  <p class="page-head__hint">Загрузите сюда прайс, FAQ, условия, методички — бот находит нужное по смыслу и подмешивает в ответ. Данные в РФ, без сторонних сервисов. <b>Роль и инструкции</b> сотрудника задаются в разделе «ИИ-команда».</p>
+  {% if session and session.is_platform and has_tenant and session.active_tenant_name %}
+  <p class="page-head__hint"><span class="pill pill--warn">Клиент: {{ session.active_tenant_name }}</span></p>
+  {% endif %}
 </div>
 
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 {% if kb_saved %}{{ flash('Файл загружен: ' ~ kb_saved ~ ' фрагм. добавлено в базу. Бот учтёт со следующего ответа.', 'ok') }}{% endif %}
 
-{# тумблер поиска по базе #}
+{% if not has_tenant %}
+<section class="card">
+  {% if session and session.is_platform %}
+  <div class="card__title">Клиент не выбран</div>
+  <p class="card__note">Выберите клиента в разделе «Клиенты», чтобы вести его базу знаний.</p>
+  <div class="acct-actions"><a class="btn btn--primary" href="/tenants">Перейти к «Клиентам»</a></div>
+  {% else %}
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">База знаний ведётся в кабинете клиента. Сейчас к учётной записи кабинет не привязан — напишите в поддержку.</p>
+  {% if support_url %}<div class="acct-actions"><a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a></div>{% endif %}
+  {% endif %}
+</section>
+{% else %}
+
+{% if show_global_toggle %}
+{# глобальный тумблер поиска по базе (School) #}
 <form method="post" action="/knowledge/toggle" class="card" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="kb_enabled" value="{{ '0' if kb_enabled else '1' }}">
   <p class="card__note">Поиск по базе знаний: <b>{{ 'включён' if kb_enabled else 'выключен' }}</b> — когда выключен, бот отвечает только по инструкции сотрудника.</p>
   <div class="form-actions"><button class="btn {{ 'btn--muted' if kb_enabled else 'btn--dark' }}" type="submit">{{ 'Выключить поиск' if kb_enabled else 'Включить поиск' }}</button></div>
 </form>
+{% endif %}
 
 {% if not embedder_enabled %}
 <p class="hint hint--block">⚠️ Загрузка файлов недоступна: не задан <code>EMBEDDER_URL</code> в окружении панели. Добавьте его скриптом деплоя (как у бота) — и появится форма загрузки.</p>
@@ -36,10 +55,10 @@
     <input class="field__input" type="text" name="title" maxlength="200" placeholder="Напр.: Прайс и условия записи">
   </label>
   <label class="field">
-    <span class="field__label">Для кого</span>
+    <span class="field__label">Отдел <span class="field__hint">какой агент видит документ</span></span>
     <select class="field__input" name="role">
       <option value="">Для всех ролей (общая справка)</option>
-      {% for slug, p in kb_roles.items() %}<option value="{{ slug }}">{{ p.name|e }} — {{ p.role|e }}</option>{% endfor %}
+      {% for slug, p in kb_roles.items() %}<option value="{{ slug }}">{{ p.name|e }}{% if p.role %} — {{ p.role|e }}{% endif %}</option>{% endfor %}
     </select>
   </label>
   <p class="hint hint--block">Таблицы лучше грузить как CSV. Из PDF берётся только текст (картинки и схемы не попадут). Один файл = один документ.</p>
@@ -64,6 +83,7 @@
 {% endfor %}
 {% else %}
 <p class="empty__text">База пуста. Загрузите первый файл выше.</p>
+{% endif %}
 {% endif %}
 {% endif %}
 {% endblock %}

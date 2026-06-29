@@ -41,6 +41,7 @@ import auth
 import config
 import db
 import kb
+import knowledge_roles
 import oauth_vk
 import security
 import timeweb_ai
@@ -3761,6 +3762,20 @@ def _knowledge_err_text(err: str | None) -> str | None:
     }.get(err or "")
 
 
+async def _kb_roles_for(session: auth.Session) -> tuple[dict, bool]:
+    """Карта отделов для дропдауна KB активного клиента + признак School-тенанта.
+    School (DEFAULT_TENANT_SLUG) → PERSONA_PRESETS (ретрив School ходит по lead_persona);
+    остальные тенанты → их team-агенты (slug→название). Вид {slug: {'name','role'}} —
+    совместим с knowledge.html (kb_roles.items() и kb_roles.get(role_tag).name)."""
+    is_school = bool(session.active_tenant_slug) and session.active_tenant_slug == config.DEFAULT_TENANT_SLUG
+    if is_school:
+        return config.PERSONA_PRESETS, True
+    tid = session.active_tenant_id
+    rows = await db.list_team_agents(tid) if tid else []
+    roles = {r["slug"]: {"name": r["name"], "role": (r["role_preset"] or "")} for r in rows}
+    return roles, False
+
+
 @app.get("/knowledge", response_class=HTMLResponse)
 async def knowledge_page(
     request: Request,
@@ -3768,11 +3783,15 @@ async def knowledge_page(
     kb_saved: int = 0,
     err: str | None = None,
 ):
-    _require_admin(session)  # база знаний Школы (глобальный pgvector + app_settings) — только платформе
-    # Раздел теперь — только своя база знаний (загрузка файлов). Промпт/инструкции агента
-    # живут в «ИИ-Агенты» → карточка роли (/agents/role/<slug>).
-    kb_docs = await db.kb_list_documents()
-    kb_enabled = await db.get_kb_enabled()
+    # СП-2b: раздел доступен обоим контурам (как /my-team в A1). Скоуп — активный клиент
+    # (RLS через require_session→set_active_tenant). _require_admin снят.
+    tid = session.active_tenant_id
+    kb_roles, is_school = await _kb_roles_for(session)
+    kb_docs = await db.kb_list_documents() if tid else []
+    # Глобальный тумблер поиска (app_settings) релевантен только School-пути → показываем
+    # его лишь для School-тенанта; у обычных тенантов поиск управляется per-agent в /my-team.
+    show_global_toggle = is_school
+    kb_enabled = await db.get_kb_enabled() if is_school else False
     return templates.TemplateResponse(
         request,
         "knowledge.html",
@@ -3781,13 +3800,15 @@ async def knowledge_page(
             "session": session,
             "active": "knowledge",
             "err": _knowledge_err_text(err),
-            # RF-RAG — своя база знаний (загрузка файлов в pgvector)
+            "has_tenant": bool(tid),
             "kb_docs": kb_docs,
             "kb_enabled": kb_enabled,
+            "show_global_toggle": show_global_toggle,
             "embedder_enabled": config.EMBEDDER_ENABLED,
-            "kb_roles": config.PERSONA_PRESETS,
+            "kb_roles": kb_roles,
             "kb_saved": kb_saved,
             "kb_max_mb": config.MAX_KB_FILE_BYTES // 1024 // 1024,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
         },
     )
 
@@ -3821,7 +3842,6 @@ async def knowledge_upload(
 ):
     """Файл (txt/md/csv/pdf) → текст → чанки → эмбеддинг (TEI) → pgvector. role '' = общая
     справка (все роли). Эмбеддер должен быть задан в env панели (EMBEDDER_URL)."""
-    _require_admin(session)  # загрузка в базу знаний Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     if not config.EMBEDDER_ENABLED:
         return RedirectResponse(url="/knowledge?err=kb_off", status_code=303)
@@ -3846,9 +3866,8 @@ async def knowledge_upload(
         import logging
         logging.getLogger("admin-panel").exception("kb upload failed")
         return RedirectResponse(url="/knowledge?err=kb_embed", status_code=303)
-    role = role.strip()
-    if role and role not in config.PERSONA_PRESETS:
-        role = ""
+    kb_roles, _ = await _kb_roles_for(session)
+    role = knowledge_roles.normalize_role(role, set(kb_roles))
     doc_title = (title.strip() or fname)[: config.KB_TITLE_MAX]
     n = await db.kb_insert_document(
         title=doc_title, source=fname[:200], role_tag=role, content=text,
@@ -3867,7 +3886,6 @@ async def knowledge_delete(
     csrf_token: str = Form(""),
 ):
     """Удалить документ базы знаний (каскад чистит чанки)."""
-    _require_admin(session)  # удаление из базы знаний Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
     doc_id = doc_id.strip()
     if not doc_id:
