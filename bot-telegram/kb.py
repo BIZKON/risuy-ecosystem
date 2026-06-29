@@ -55,8 +55,8 @@ async def embed_query(text: str) -> list[float] | None:
 
 async def retrieve_context(text: str, tenant_id, persona: str | None = None) -> str:
     """Готовый блок справки для подмешивания в запрос агента (или "" — если RAG не дал
-    результата). tenant_id=None → платформенная/School-справка. Фильтр по отделу: общая
-    справка тенанта (role_tag пуст) + чанки персоны/отдела."""
+    результата). tenant_id — тенант вызывающего (School-бот = lesov-school; team-агент = его
+    тенант). Фильтр по отделу: общая справка тенанта (role_tag пуст) + чанки отдела (= slug)."""
     vec = await embed_query(text)
     if not vec:
         return ""

@@ -1818,7 +1818,7 @@ async def kb_search(
     embedding: list[float], tenant_id, persona: str | None = None,
     *, top_k: int = 4, max_distance: float = 0.55,
 ) -> list[str]:
-    """Top-k чанков базы знаний ТЕНАНТА (tenant_id; None = платформенная/School-справка) по
+    """Top-k чанков базы знаний ТЕНАНТА (tenant_id; School-бот передаёт lesov-school, не NULL) по
     косинусной близости (pgvector `<=>`) + фильтр по отделу (role_tag). Бот — owner-роль
     (обходит RLS) → tenant фильтруем ЯВНО. Общая справка (role_tag пуст) видна ВСЕМ агентам
     тенанта; чанк отдела — только агенту с этим slug. max_distance отсекает нерелевантное

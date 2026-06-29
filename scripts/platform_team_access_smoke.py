@@ -80,6 +80,11 @@ check("UX: «Шаблон роли» вместо «Должность (роль
       ("Шаблон роли" in html) and ("Должность (роль)" not in html)
       and ("роль и поведение агента задаются здесь" in html))
 
+# 8. СП-2a: тумблер «База знаний» на агента в форме добавления (checked по умолчанию)
+html = render(session={"is_platform": False}, has_tenant=True)
+check("СП-2a: тумблер «База знаний» в /my-team (checked по умолчанию)",
+      ('name="kb_enabled"' in html) and ("База знаний компании" in html))
+
 
 def _summary():
     print(f"\n{'ВСЕ ОК' if not FAILS else 'ПРОВАЛЫ: ' + ', '.join(FAILS)}")

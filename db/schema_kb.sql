@@ -62,51 +62,23 @@ do $$ begin
     end if;
 end $$;
 
--- ── СП-2a: per-tenant изоляция базы знаний ──────────────────────────────────────
--- tenant_id NULL = платформенная/School-справка (видна owner-боту School-пути; в панели —
--- только при ОТСУТСТВИИ активного клиента). Не-NULL = знание конкретного тенанта.
--- Бэкфилл не нужен: существующие School-строки остаются NULL. Идемпотентно.
+-- ── СП-2a: per-tenant база знаний — заметки + фикс FK (KB уже tenant-scoped с Wave 3) ───────────
+-- ⚠️ kb_documents/kb_chunks УЖЕ tenant-scoped на живой БД: migrate_tenant_scope.sql добавил
+-- tenant_id (NOT NULL, DEFAULT lesov-school), а migrate_rls_orders_kb_broadcasts.sql — RLS-политику
+-- tenant_isolation (`tenant_id = nullif(current_setting('app.tenant_id',true),'')::uuid`). Поэтому
+-- ADD COLUMN/индексы ниже на живой БД = no-op (нужны лишь для СВЕЖИХ установок), а RLS здесь НЕ
+-- переопределяем — она живёт в migrate_rls_*. School-справка = тенант lesov-school (НЕ NULL!);
+-- per-отдел = metadata.role_tag (пусто = все агенты тенанта; = slug агента = только его отдел).
 alter table kb_documents add column if not exists tenant_id uuid;
 alter table kb_chunks    add column if not exists tenant_id uuid;
--- FK с on delete cascade — ЯВНЫМ ADD CONSTRAINT: inline `references ... on delete cascade` в
--- ADD COLUMN НЕ проставляет cascade-action (confdeltype остаётся 'a'/no-action). Идемпотентно по имени.
-do $$ begin
-  if not exists (select 1 from pg_constraint where conname='kb_documents_tenant_id_fkey') then
-    alter table kb_documents add constraint kb_documents_tenant_id_fkey
-      foreign key (tenant_id) references tenants(id) on delete cascade;
-  end if;
-  if not exists (select 1 from pg_constraint where conname='kb_chunks_tenant_id_fkey') then
-    alter table kb_chunks add constraint kb_chunks_tenant_id_fkey
-      foreign key (tenant_id) references tenants(id) on delete cascade;
-  end if;
-end $$;
 create index if not exists kb_documents_tenant_idx on kb_documents (tenant_id);
 create index if not exists kb_chunks_tenant_idx    on kb_chunks (tenant_id);
-
--- NULL-aware RLS: нет активного клиента (app.tenant_id пуст) → видны/пишутся ТОЛЬКО NULL-строки
--- (платформа/School); активный клиент → ТОЛЬКО его строки. Бот (owner) обходит RLS и фильтрует явно.
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='kb_documents' and policyname='tenant_isolation') then
-    create policy tenant_isolation on kb_documents for all
-      using (case when nullif(current_setting('app.tenant_id', true), '') is null
-                  then tenant_id is null
-                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end)
-      with check (case when nullif(current_setting('app.tenant_id', true), '') is null
-                  then tenant_id is null
-                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end);
-  end if;
-end $$;
-alter table kb_documents enable row level security;
-
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='kb_chunks' and policyname='tenant_isolation') then
-    create policy tenant_isolation on kb_chunks for all
-      using (case when nullif(current_setting('app.tenant_id', true), '') is null
-                  then tenant_id is null
-                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end)
-      with check (case when nullif(current_setting('app.tenant_id', true), '') is null
-                  then tenant_id is null
-                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end);
-  end if;
-end $$;
-alter table kb_chunks enable row level security;
+-- FK on delete cascade: Wave-0 (migrate_tenant_scope.sql) создала FK kb_*_tenant_id_fkey БЕЗ cascade
+-- (no-action) → удаление тенанта с KB падало бы FK-violation. Пересоздаём ЯВНО с cascade — смена
+-- on-delete-action к СУЩЕСТВУЮЩЕМУ FK иначе не применяется (guard-по-имени её пропускал бы). Идемпотентно.
+alter table kb_documents drop constraint if exists kb_documents_tenant_id_fkey;
+alter table kb_chunks    drop constraint if exists kb_chunks_tenant_id_fkey;
+alter table kb_documents add constraint kb_documents_tenant_id_fkey
+  foreign key (tenant_id) references tenants(id) on delete cascade;
+alter table kb_chunks add constraint kb_chunks_tenant_id_fkey
+  foreign key (tenant_id) references tenants(id) on delete cascade;

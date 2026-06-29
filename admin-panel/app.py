@@ -5189,6 +5189,7 @@ async def my_team_save(
     escalation_topic_id: str = Form(""),
     is_orchestrator: str = Form(""),
     memory_enabled: str = Form(""),
+    kb_enabled: str = Form(""),
     csrf_token: str = Form(""),
 ):
     await _enforce_csrf(request, session, csrf_token)
@@ -5211,6 +5212,7 @@ async def my_team_save(
         system_prompt=system_prompt.strip()[: config.TENANT_AI_PROMPT_MAX],
         escalation_chat_id=chat, escalation_topic_id=topic,
         is_orchestrator=bool(is_orchestrator), memory_enabled=bool(memory_enabled),
+        kb_enabled=bool(kb_enabled),
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/my-team?saved=saved", status_code=303)

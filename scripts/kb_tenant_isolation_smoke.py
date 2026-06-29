@@ -52,10 +52,14 @@ async def main():
         check("A видит ФАКТ-A", "ФАКТ-A" in a)
         check("A НЕ видит ФАКТ-B (изоляция)", "ФАКТ-B" not in a)
         check("B видит ФАКТ-B, не A", ("ФАКТ-B" in b) and ("ФАКТ-A" not in b))
-        check("платформа (None) не видит чанки тенантов", ("ФАКТ-A" not in plat) and ("ФАКТ-B" not in plat))
+        check("scope None не видит чанки тенантов (NULL-строк нет)", ("ФАКТ-A" not in plat) and ("ФАКТ-B" not in plat))
     finally:
         async with bdb.pool.acquire() as c:
-            await c.execute("delete from tenants where slug in ('kb-smoke-a','kb-smoke-b')")  # cascade чистит kb_*
+            # Явная очистка в порядке зависимостей (не полагаемся на FK-cascade — на Wave-0 БД он мог быть no-action).
+            sub = "select id from tenants where slug in ('kb-smoke-a','kb-smoke-b')"
+            await c.execute(f"delete from kb_chunks    where tenant_id in ({sub})")
+            await c.execute(f"delete from kb_documents where tenant_id in ({sub})")
+            await c.execute("delete from tenants where slug in ('kb-smoke-a','kb-smoke-b')")
     print("\nВСЕ ОК" if not FAILS else "\nПРОВАЛЫ: " + ", ".join(FAILS))
     sys.exit(1 if FAILS else 0)
 

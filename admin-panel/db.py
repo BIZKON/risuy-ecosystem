@@ -3588,7 +3588,7 @@ async def get_channel_agent_map(tenant_id) -> dict:
 async def upsert_team_agent(
     tenant_id, *, slug: str, name: str, role_preset: str | None, system_prompt: str,
     escalation_chat_id: str, escalation_topic_id: int | None,
-    is_orchestrator: bool, memory_enabled: bool,
+    is_orchestrator: bool, memory_enabled: bool, kb_enabled: bool,
     actor: str, ip: str | None, user_agent: str | None,
 ) -> None:
     """Создать/обновить агента команды по (tenant_id, slug) + аудит. Валидность/длины — у вызывающего."""
@@ -3604,8 +3604,9 @@ async def upsert_team_agent(
                 """
                 insert into team_agents
                     (tenant_id, slug, name, role_preset, system_prompt,
-                     escalation_chat_id, escalation_topic_id, is_orchestrator, memory_enabled, position)
-                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     escalation_chat_id, escalation_topic_id, is_orchestrator, memory_enabled,
+                     kb_enabled, position)
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                 on conflict (tenant_id, slug) do update set
                     name = excluded.name, role_preset = excluded.role_preset,
                     system_prompt = excluded.system_prompt,
@@ -3613,10 +3614,12 @@ async def upsert_team_agent(
                     escalation_topic_id = excluded.escalation_topic_id,
                     is_orchestrator = excluded.is_orchestrator,
                     memory_enabled = excluded.memory_enabled,
+                    kb_enabled = excluded.kb_enabled,
                     enabled = true, updated_at = now()
                 """,
                 tenant_id, slug, name, role_preset, system_prompt,
-                escalation_chat_id, escalation_topic_id, is_orchestrator, memory_enabled, pos,
+                escalation_chat_id, escalation_topic_id, is_orchestrator, memory_enabled,
+                kb_enabled, pos,
             )
             await _insert_audit(
                 c, actor=actor, action="team_agent_upsert", ip=ip, user_agent=user_agent,
