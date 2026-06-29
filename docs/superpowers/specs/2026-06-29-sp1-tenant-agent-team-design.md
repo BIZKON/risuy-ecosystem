@@ -7,10 +7,10 @@
 Тенант **self-serve в кабинете** собирает команду ИИ-агентов, привязанных к отделам: каждый агент = роль +
 свой системный промпт + привязка к каналу + адрес эскалации отдела. Резолвер выбирает агента по слоям
 **диалог > канал > дефолт тенанта**. Фундамент закладывает хуки для бесконечной памяти (на RAG-базе) и для
-СП-2/3/4 (знание/действие/оркестрация ссылаются на стабильный `tenant_agents.id`).
+СП-2/3/4 (знание/действие/оркестрация ссылаются на стабильный `team_agents.id`).
 
 ## Принятые решения (брейншторм 2026-06-29)
-1. **Модель данных — отдельная таблица `tenant_agents`** (с миграцией; прод-DDL за владельцем).
+1. **Модель данных — отдельная таблица `team_agents`** (с миграцией; прод-DDL за владельцем).
 2. **Привязка агента к входящему — по каналу + переопределение на диалог** (зеркало Школьного
    `get_ai_overrides`; авто-маршрутизация — СП-4, не здесь).
 3. **БЕЗ ЛИМИТА** на число агентов у тенанта (создаёт сколько нужно — отделы клиента нам неизвестны).
@@ -20,7 +20,12 @@
 
 ## Архитектура
 
-### 1. Таблица `tenant_agents` (новый DDL)
+> ⚠️ **Имя `tenant_agents` ЗАНЯТО** — это существующий Wave-3 метеринг-реестр (`db/schema_metering_w3.sql`:
+> `agent_id↔tenant_id↔access_id` для снапшотов токенов cloud-ai). Поэтому таблица команды называется
+> **`team_agents`**. Связь: если командный агент использует backend=cloud_ai, его Timeweb `agent_id` должен
+> быть зарегистрирован в метеринг-`tenant_agents` при провижининге (owner-side) — иначе расход не снапшотится.
+
+### 1. Таблица `team_agents` (новый DDL)
 RLS-политика `tenant_isolation` по `current_setting('app.tenant_id')` (как `tenant_triggers`); гранты `panel_rw`
 (select/insert/update/delete). Колонки:
 ```
@@ -44,7 +49,7 @@ created_at timestamptz not null default now()
 updated_at timestamptz not null default now()
 unique (tenant_id, slug)
 -- частичный уникальный индекс: один is_default на тенанта
-create unique index tenant_agents_one_default on tenant_agents(tenant_id) where is_default;
+create unique index team_agents_one_default on team_agents(tenant_id) where is_default;
 ```
 - **Привязка к каналу** — БЕЗ DDL: ключ `tenant_settings.agent_for_channel__<source>` = `slug` (зеркало
   Школьного `ai_*__<source>`; `source` ∈ MESSENGERS/каналов).
@@ -69,13 +74,13 @@ create unique index tenant_agents_one_default on tenant_agents(tenant_id) where 
 последние N сообщений → собирается контекст. Особенно важно оркестраторам (накопление кросс-диалогового
 контекста команды).
 **Что закладывает СП-1:**
-- Флаги `tenant_agents.is_orchestrator` / `memory_enabled` (выше).
+- Флаги `team_agents.is_orchestrator` / `memory_enabled` (выше).
 - **Схема хранилища `agent_memory`** (новый DDL, зеркало `db/schema_kb.sql` — pgvector, тот же self-host
   TEI-эмбеддер e5, РФ; размерность вектора ДОЛЖНА совпасть с `kb_chunks`):
 ```
 id          uuid pk default gen_random_uuid()
 tenant_id   uuid not null references tenants(id) on delete cascade
-agent_id    uuid not null references tenant_agents(id) on delete cascade   -- память приватна агенту
+agent_id    uuid not null references team_agents(id) on delete cascade   -- память приватна агенту
 kind        text not null            -- 'summary' | 'fact' | 'session' (тип записи памяти)
 text        text not null            -- человекочитаемый фрагмент памяти
 embedding   vector(<dim kb_chunks>)  -- эмбеддинг для retrieval (HNSW cosine, как kb)
@@ -100,11 +105,11 @@ created_at  timestamptz not null default now()
 - Шаблон `admin-panel/templates/my_team.html` + хелперы рендера (как `nurture.html`/`triggers`).
 
 ### 5. Миграция существующих тенантов
-- **DDL:** `db/schema_tenant_agents.sql` (`tenant_agents` + `agent_memory` + RLS + гранты + индексы). Накат:
+- **DDL:** `db/schema_team_agents.sql` (`team_agents` + `agent_memory` + RLS + гранты + индексы). Накат:
   dev → подтверждение → прод (за владельцем; owner-DSN).
 - **Бэкфилл (idempotent):** для каждого тенанта с непустым `tenant_settings.ai_system_prompt` создать одну
-  строку `tenant_agents` (slug=`default`, name из роли/«ИИ-сотрудник», is_default=true, backend/agent_id из
-  текущих ключей). Скрипт `scripts/backfill_tenant_agents.py` (owner-DSN, idempotent). До бэкфилла резолвер
+  строку `team_agents` (slug=`default`, name из роли/«ИИ-сотрудник», is_default=true, backend/agent_id из
+  текущих ключей). Скрипт `scripts/backfill_team_agents.py` (owner-DSN, idempotent). До бэкфилла резолвер
   мягко падает на легаси-ключи → действующие тенанты не ломаются.
 
 ### 6. 152-ФЗ и границы
@@ -116,9 +121,9 @@ created_at  timestamptz not null default now()
   авто-маршрутизация/поведение оркестратора (СП-4).
 
 ## Тесты
-- **Чистый смоук** `scripts/tenant_agents_resolver_smoke.py`: логика резолвера (диалог>канал>дефолт>легаси) на
+- **Чистый смоук** `scripts/team_agents_resolver_smoke.py`: логика резолвера (диалог>канал>дефолт>легаси) на
   фейковых данных — без БД.
-- **БД-смоук** `scripts/tenant_agents_db_smoke.py` на `risuy_dev` (FORCE RLS/panel_rw): 2 тенанта — CRUD видит
+- **БД-смоук** `scripts/team_agents_db_smoke.py` на `risuy_dev` (FORCE RLS/panel_rw): 2 тенанта — CRUD видит
   только свои агенты (RLS), `unique(tenant_id,slug)` + один `is_default`, резолвер по каналу/диалогу/дефолту,
   бэкфилл создаёт default-агента из легаси-промпта идемпотентно, `agent_memory` создаётся и RLS-скоупится.
 
