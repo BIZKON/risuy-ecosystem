@@ -33,18 +33,18 @@
 {% for a in agents %}
 <section class="card" aria-label="{{ a.name }}">
   <h2 class="card__title">{{ a.name }}{% if a.is_default %} <span class="pill pill--muted">по умолчанию</span>{% endif %}{% if not a.enabled %} <span class="pill pill--muted">выключен</span>{% endif %}</h2>
-  <p class="card__note">Код: <span class="mono">{{ a.slug }}</span>{% if a.role_preset %} · роль: {{ a.role_preset }}{% endif %}{% if a.escalation_chat_id %} · эскалация → <span class="mono">{{ a.escalation_chat_id }}</span>{% endif %}</p>
+  <p class="card__note">Код: <span class="mono">{{ a.slug }}</span>{% if a.role_preset %} · шаблон: {{ a.role_preset }}{% endif %}{% if a.escalation_chat_id %} · эскалация → <span class="mono">{{ a.escalation_chat_id }}</span>{% endif %}</p>
   <form method="post" action="/my-team/save" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="slug" value="{{ a.slug }}">
     <label class="field"><span class="field__label">Название</span>
       <input class="field__input" type="text" name="name" maxlength="120" value="{{ a.name|e }}"></label>
-    <label class="field"><span class="field__label">Должность (роль)</span>
+    <label class="field"><span class="field__label">Шаблон роли <span class="field__hint">необязательно</span></span>
       <select class="field__input" name="role_preset">
         <option value="">— без пресета —</option>
         {% for p in presets %}<option value="{{ p.key }}"{% if a.role_preset == p.key %} selected{% endif %}>{{ p.label }}</option>{% endfor %}
       </select></label>
-    <label class="field"><span class="field__label">Инструкции</span>
+    <label class="field"><span class="field__label">Инструкции <span class="field__hint">роль и поведение агента задаются здесь</span></span>
       <textarea class="field__input field__textarea" name="system_prompt" rows="4" maxlength="{{ prompt_max }}">{{ a.system_prompt }}</textarea></label>
     <label class="field"><span class="field__label">ID чата менеджеров отдела <span class="field__hint">необязательно</span></span>
       <input class="field__input" type="text" name="escalation_chat_id" inputmode="numeric" value="{{ a.escalation_chat_id|e }}" placeholder="-1002576119452" maxlength="32"></label>
@@ -91,10 +91,10 @@
       <input class="field__input" type="text" name="slug" maxlength="40" placeholder="sales"></label>
     <label class="field"><span class="field__label">Название</span>
       <input class="field__input" type="text" name="name" maxlength="120" placeholder="Отдел продаж"></label>
-    <label class="field"><span class="field__label">Должность (роль)</span>
+    <label class="field"><span class="field__label">Шаблон роли <span class="field__hint">необязательно</span></span>
       <select class="field__input" name="role_preset"><option value="">— без пресета —</option>
         {% for p in presets %}<option value="{{ p.key }}">{{ p.label }}</option>{% endfor %}</select></label>
-    <label class="field"><span class="field__label">Инструкции</span>
+    <label class="field"><span class="field__label">Инструкции <span class="field__hint">роль и поведение агента задаются здесь</span></span>
       <textarea class="field__input field__textarea" name="system_prompt" rows="4" maxlength="{{ prompt_max }}"></textarea></label>
     <label class="field"><span class="field__label">ID чата менеджеров отдела <span class="field__hint">необязательно</span></span>
       <input class="field__input" type="text" name="escalation_chat_id" inputmode="numeric" placeholder="-1002576119452" maxlength="32"></label>
