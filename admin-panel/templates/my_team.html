@@ -8,11 +8,10 @@
 <div class="page-head">
   <h1 class="page-head__title">ИИ-команда</h1>
   <p class="page-head__hint">Соберите команду ИИ-сотрудников по отделам: у каждого своя должность, инструкции и адрес уведомления менеджеров. Какой агент отвечает — выбирается по каналу, а оператор может назначить агента на конкретный диалог. Применяется со следующего сообщения, без перезапуска бота.</p>
+  {% if session and session.is_platform and has_tenant and session.active_tenant_name %}
+  <p class="page-head__hint"><span class="pill pill--warn">Клиент: {{ session.active_tenant_name }}</span></p>
+  {% endif %}
 </div>
-
-{% if session and session.is_platform and has_tenant and session.active_tenant_name %}
-<p class="page-head__hint"><span class="pill">Клиент: {{ session.active_tenant_name }}</span></p>
-{% endif %}
 
 {% if saved %}{{ flash(saved, 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
@@ -21,7 +20,7 @@
 <section class="card">
   {% if session and session.is_platform %}
   <div class="card__title">Клиент не выбран</div>
-  <p class="card__note">Выберите клиента в разделе «Клиенты», чтобы настроить его команду ИИ-агентов.</p>
+  <p class="card__note">Выберите клиента в разделе «Клиенты», чтобы настроить его ИИ-команду.</p>
   <div class="acct-actions"><a class="btn btn--primary" href="/tenants">Перейти к «Клиентам»</a></div>
   {% else %}
   <div class="card__title">Кабинет ещё не привязан</div>

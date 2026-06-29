@@ -42,15 +42,20 @@ def render(**over):
     return env.get_template("my_team.html").render(**ctx)
 
 
+# Точные nav-лейблы (макрос nav_item: <span class="snav__label">{{ label }}</span>) —
+# проверяем именно nav-пункт, а не <h1>/<title>/action= форм (robust к удалению nav-строки).
+PLATFORM_NAV = '<span class="snav__label">ИИ-команда клиента</span>'
+TENANT_NAV = '<span class="snav__label">ИИ-команда</span>'
+
 # 1. nav: платформа видит «ИИ-команда клиента» → /my-team
 html_p = render(session={"is_platform": True}, has_tenant=False)
 check("nav: платформа — пункт «ИИ-команда клиента» на /my-team",
-      "ИИ-команда клиента" in html_p and "/my-team" in html_p)
+      PLATFORM_NAV in html_p and 'href="/my-team"' in html_p)
 
-# 2. nav: тенант видит «ИИ-команда», но НЕ «ИИ-команда клиента»
+# 2. nav: тенант ПОЛОЖИТЕЛЬНО видит «ИИ-команда» и НЕ видит платформенную метку
 html_t = render(session={"is_platform": False}, has_tenant=True)
-check("nav: тенант — «ИИ-команда» без платформенной метки",
-      "ИИ-команда клиента" not in html_t)
+check("nav: тенант — пункт «ИИ-команда» рендерится, без платформенной метки",
+      TENANT_NAV in html_t and PLATFORM_NAV not in html_t)
 
 # 3. no-tenant + платформа → CTA на «Клиенты», без текста «поддержка»
 html = render(session={"is_platform": True}, has_tenant=False)
