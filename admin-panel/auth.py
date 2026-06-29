@@ -243,6 +243,9 @@ class Session:
     # Статус активного тенанта (tenants.status). 'provisioning' → кабинет показывает
     # баннер «ИИ-сотрудник готовится» (self-serve клиент до привязки бота владельцем).
     active_tenant_status: str | None = None
+    # СП-2b: слаг активного тенанта (tenants.slug) — для детекта School-тенанта
+    # (config.DEFAULT_TENANT_SLUG) при выборе источника отделов базы знаний.
+    active_tenant_slug: str | None = None
 
     @property
     def is_platform(self) -> bool:
@@ -318,7 +321,8 @@ async def load_session(sid: str) -> Session | None:
                 """
                 select s.sid, s.actor, s.last_seen, s.expires_at, s.revoked, s.role,
                        s.search_phone_hash, s.active_tenant_id,
-                       t.name as active_tenant_name, t.status as active_tenant_status
+                       t.name as active_tenant_name, t.status as active_tenant_status,
+                       t.slug as active_tenant_slug
                 from admin_sessions s
                 left join tenants t on t.id = s.active_tenant_id
                 where s.sid = $1
@@ -349,6 +353,7 @@ async def load_session(sid: str) -> Session | None:
                 active_tenant_id=str(row["active_tenant_id"]) if row["active_tenant_id"] else None,
                 active_tenant_name=row["active_tenant_name"],
                 active_tenant_status=row["active_tenant_status"],
+                active_tenant_slug=row["active_tenant_slug"],
             )
 
 

@@ -659,6 +659,11 @@ AI_AGENT_PROMPT_MAX = _opt_int("AI_AGENT_PROMPT_MAX", 20000)
 EMBEDDER_URL = os.environ.get("EMBEDDER_URL", "")
 EMBEDDER_TOKEN = os.environ.get("EMBEDDER_TOKEN", "")
 EMBEDDER_ENABLED = bool(EMBEDDER_URL)
+# СП-2b: слаг тенанта Школы (легаси одиночный путь). Тот же env-ключ, что у бота
+# (bot-telegram/config.py). Под этим тенантом role_tag KB интерпретируется по
+# PERSONA_PRESETS (School-путь ретрива ходит по lead_persona), под остальными — по
+# slug'ам team-агентов тенанта.
+DEFAULT_TENANT_SLUG = os.environ.get("DEFAULT_TENANT_SLUG", "lesov-school")
 KB_ENABLED_SETTING_KEY = "kb_enabled"            # тумблер RAG (бот читает; зеркало bot/db.py)
 MAX_KB_FILE_BYTES = _opt_int("MAX_KB_FILE_MB", 10) * 1024 * 1024   # ≤10 МБ на файл
 KB_ALLOWED_EXT = (".txt", ".md", ".csv", ".pdf")  # pdf → извлечение текста (pypdf)
