@@ -322,7 +322,7 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # текст (поведение без изменений). retrieve_context не падает и не блокирует ответ.
     user_text = message.text
     if ai_cfg.get("kb_enabled"):
-        kb_context = await kb.retrieve_context(user_text, None, lead_persona)  # None = платформенная справка School
+        kb_context = await kb.retrieve_context(user_text, db.tenant_id(), lead_persona)  # тенант Школы (default contextvar) — KB ингестится под него
         user_text = kb.augment(user_text, kb_context)
     # Wave 5: контекст диалога — историей сообщений (OpenAI-эндпоинт агента серверного
     # parent_message_id не имеет). Текущее входящее уже залогировано middleware → исключаем
