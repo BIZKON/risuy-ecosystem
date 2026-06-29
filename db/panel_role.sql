@@ -223,6 +223,11 @@ grant usage on sequence consent_events_id_seq  to panel_rw;  -- 152-ФЗ рее�
 grant select, insert, update, delete on kb_documents to panel_rw;
 grant select, insert, update, delete on kb_chunks    to panel_rw;
 
+-- ── СП-1 «Команда отделов»: team_agents + agent_memory (объекты в db/schema_team_agents.sql) ──
+-- Перевыдаются здесь, т.к. revoke all выше снимает грант при реконсиляции Timeweb. Бот (owner) не требует.
+grant select, insert, update, delete on team_agents  to panel_rw;
+grant select, insert, update, delete on agent_memory to panel_rw;
+
 -- ── Reseller-платформа Wave 0 (ТЗ docs/reseller-platform-tz.md) — объекты в
 -- db/schema_{tenancy,billing,metering,vault}.sql, применять ПОСЛЕ них.
 -- Зеркало грантов из этих файлов (этот файл — полный реестр: массовый revoke

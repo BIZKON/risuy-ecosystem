@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}ИИ-команда{% endblock %}
+{% block body_class %}page-triggers{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">ИИ-команда</h1>
+  <p class="page-head__hint">Соберите команду ИИ-сотрудников по отделам: у каждого своя должность, инструкции и адрес уведомления менеджеров. Какой агент отвечает — выбирается по каналу, а оператор может назначить агента на конкретный диалог. Применяется со следующего сообщения, без перезапуска бота.</p>
+</div>
+
+{% if saved %}{{ flash(saved, 'ok') }}{% endif %}
+{% if err %}{{ flash(err, 'error') }}{% endif %}
+
+{% if not has_tenant %}
+<section class="card">
+  <div class="card__title">Кабинет ещё не привязан</div>
+  <p class="card__note">Команда настраивается в кабинете клиента. Сейчас к учётной записи кабинет не привязан — напишите в поддержку.</p>
+  {% if support_url %}<div class="acct-actions"><a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a></div>{% endif %}
+</section>
+{% else %}
+
+{% for a in agents %}
+<section class="card" aria-label="{{ a.name }}">
+  <h2 class="card__title">{{ a.name }}{% if a.is_default %} <span class="pill pill--muted">по умолчанию</span>{% endif %}{% if not a.enabled %} <span class="pill pill--muted">выключен</span>{% endif %}</h2>
+  <p class="card__note">Код: <span class="mono">{{ a.slug }}</span>{% if a.role_preset %} · роль: {{ a.role_preset }}{% endif %}{% if a.escalation_chat_id %} · эскалация → <span class="mono">{{ a.escalation_chat_id }}</span>{% endif %}</p>
+  <form method="post" action="/my-team/save" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="slug" value="{{ a.slug }}">
+    <label class="field"><span class="field__label">Название</span>
+      <input class="field__input" type="text" name="name" maxlength="120" value="{{ a.name|e }}"></label>
+    <label class="field"><span class="field__label">Должность (роль)</span>
+      <select class="field__input" name="role_preset">
+        <option value="">— без пресета —</option>
+        {% for p in presets %}<option value="{{ p.key }}"{% if a.role_preset == p.key %} selected{% endif %}>{{ p.label }}</option>{% endfor %}
+      </select></label>
+    <label class="field"><span class="field__label">Инструкции</span>
+      <textarea class="field__input field__textarea" name="system_prompt" rows="4" maxlength="{{ prompt_max }}">{{ a.system_prompt }}</textarea></label>
+    <label class="field"><span class="field__label">ID чата менеджеров отдела <span class="field__hint">необязательно</span></span>
+      <input class="field__input" type="text" name="escalation_chat_id" inputmode="numeric" value="{{ a.escalation_chat_id|e }}" placeholder="-1002576119452" maxlength="32"></label>
+    <label class="field field--check"><input type="checkbox" name="memory_enabled" value="1"{% if a.memory_enabled %} checked{% endif %}><span class="field__label">Долгая память (готовится)</span></label>
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Сохранить</button>
+    </div>
+  </form>
+  <div class="acct-actions">
+    {% if not a.is_default %}
+    <form method="post" action="/my-team/default"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="slug" value="{{ a.slug }}"><button class="btn btn--secondary btn--sm" type="submit">Сделать дефолтным</button></form>
+    {% endif %}
+    {% if a.enabled %}
+    <form method="post" action="/my-team/disable" onsubmit="return confirm('Выключить агента?')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="slug" value="{{ a.slug }}"><button class="btn btn--danger-ghost btn--sm" type="submit">Выключить</button></form>
+    {% endif %}
+  </div>
+</section>
+{% endfor %}
+
+{% if agents %}
+<section class="card" aria-label="Привязка каналов">
+  <h2 class="card__title">Какой агент отвечает в каком канале</h2>
+  <p class="card__note">Привяжите канал к агенту-отделу. Если канал не привязан — отвечает агент по умолчанию. Оператор может переопределить агента на конкретный диалог.</p>
+  {% for m in messengers %}
+  <form method="post" action="/my-team/channel" autocomplete="off" style="margin-bottom:10px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="source" value="{{ m }}">
+    <label class="field"><span class="field__label">{{ {'tg':'Telegram','vk':'VK','max':'MAX'}.get(m, m) }}</span>
+      <select class="field__input" name="slug">
+        <option value="">— агент по умолчанию —</option>
+        {% for a in agents %}{% if a.enabled %}<option value="{{ a.slug }}"{% if channel_map.get(m) == a.slug %} selected{% endif %}>{{ a.name }} ({{ a.slug }})</option>{% endif %}{% endfor %}
+      </select></label>
+    <div class="form-actions"><button class="btn btn--secondary btn--sm" type="submit">Сохранить канал</button></div>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="card" aria-label="Новый агент">
+  <h2 class="card__title">Добавить агента</h2>
+  <form method="post" action="/my-team/save" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field"><span class="field__label">Код агента <span class="field__hint">латиница/цифры/дефис, напр. sales</span></span>
+      <input class="field__input" type="text" name="slug" maxlength="40" placeholder="sales"></label>
+    <label class="field"><span class="field__label">Название</span>
+      <input class="field__input" type="text" name="name" maxlength="120" placeholder="Отдел продаж"></label>
+    <label class="field"><span class="field__label">Должность (роль)</span>
+      <select class="field__input" name="role_preset"><option value="">— без пресета —</option>
+        {% for p in presets %}<option value="{{ p.key }}">{{ p.label }}</option>{% endfor %}</select></label>
+    <label class="field"><span class="field__label">Инструкции</span>
+      <textarea class="field__input field__textarea" name="system_prompt" rows="4" maxlength="{{ prompt_max }}"></textarea></label>
+    <label class="field"><span class="field__label">ID чата менеджеров отдела <span class="field__hint">необязательно</span></span>
+      <input class="field__input" type="text" name="escalation_chat_id" inputmode="numeric" placeholder="-1002576119452" maxlength="32"></label>
+    <div class="form-actions"><button class="btn btn--secondary" type="submit">Добавить</button></div>
+  </form>
+</section>
+
+{% endif %}
+{% endblock %}

@@ -5117,6 +5117,157 @@ async def triggers_delete(
                             status_code=303)
 
 
+# ── СП-1 «Команда отделов»: раздел тенанта «ИИ-команда» (/my-team). Паттерн /triggers (PRG+CSRF). ──
+def _team_saved_text(saved: str | None) -> str | None:
+    return {"saved": "Агент сохранён.", "default": "Дефолтный агент обновлён.",
+            "channel": "Привязка канала сохранена.", "disabled": "Агент выключен."}.get(saved or "")
+
+
+def _team_err_text(err: str | None) -> str | None:
+    return {
+        "no_tenant": "Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.",
+        "bad_slug": "Код агента — латиница/цифры/дефис, 1–40 символов.",
+        "no_name": "Укажите название агента (отдел/имя).",
+        "bad_chat": "ID Telegram-чата должен быть числом вида -1002576119452.",
+        "not_found": "Агент не найден.",
+    }.get(err or "")
+
+
+def _present_team_agent(r) -> dict:
+    return {
+        "slug": r["slug"], "name": r["name"] or "", "role_preset": r["role_preset"] or "",
+        "system_prompt": r["system_prompt"] or "", "escalation_chat_id": r["escalation_chat_id"] or "",
+        "escalation_topic_id": r["escalation_topic_id"], "is_default": r["is_default"],
+        "is_orchestrator": r["is_orchestrator"], "memory_enabled": r["memory_enabled"],
+        "enabled": r["enabled"],
+    }
+
+
+@app.get("/my-team", response_class=HTMLResponse)
+async def my_team_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: str | None = None,
+    err: str | None = None,
+):
+    tid = session.active_tenant_id
+    rows = await db.list_team_agents(tid) if tid else []
+    chmap = await db.get_channel_agent_map(tid) if tid else {}
+    return templates.TemplateResponse(
+        request,
+        "my_team.html",
+        {
+            "active": "my_team",
+            "session": session,
+            "csrf_token": session.csrf_token,
+            "has_tenant": bool(tid),
+            "agents": [_present_team_agent(r) for r in rows],
+            "presets": [{"key": k, "label": v.get("role", k)} for k, v in config.PERSONA_PRESETS.items()],
+            "prompt_max": config.TENANT_AI_PROMPT_MAX,
+            # Привязка «по каналу» (резолвер: канал → агент): список каналов + текущие привязки.
+            "messengers": list(config.MESSENGERS),
+            "channel_map": chmap,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+            "saved": _team_saved_text(saved),
+            "err": _team_err_text(err),
+        },
+    )
+
+
+_TEAM_SLUG_RE = r"^[a-z0-9\-]{1,40}$"
+
+
+@app.post("/my-team/save")
+async def my_team_save(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    slug: str = Form(""),
+    name: str = Form(""),
+    role_preset: str = Form(""),
+    system_prompt: str = Form(""),
+    escalation_chat_id: str = Form(""),
+    escalation_topic_id: str = Form(""),
+    is_orchestrator: str = Form(""),
+    memory_enabled: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/my-team?err=no_tenant", status_code=303)
+    slug = slug.strip().lower()
+    if not re.match(_TEAM_SLUG_RE, slug):
+        return RedirectResponse(url="/my-team?err=bad_slug", status_code=303)
+    if not name.strip():
+        return RedirectResponse(url="/my-team?err=no_name", status_code=303)
+    chat = escalation_chat_id.strip()
+    if chat and not re.match(config.ESCALATION_CHAT_ID_RE, chat):
+        return RedirectResponse(url="/my-team?err=bad_chat", status_code=303)
+    topic_raw = escalation_topic_id.strip()
+    topic = int(topic_raw) if topic_raw.isdigit() else None
+    preset = role_preset.strip() if role_preset.strip() in config.PERSONA_PRESETS else None
+    await db.upsert_team_agent(
+        tid, slug=slug, name=name.strip()[:120], role_preset=preset,
+        system_prompt=system_prompt.strip()[: config.TENANT_AI_PROMPT_MAX],
+        escalation_chat_id=chat, escalation_topic_id=topic,
+        is_orchestrator=bool(is_orchestrator), memory_enabled=bool(memory_enabled),
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/my-team?saved=saved", status_code=303)
+
+
+@app.post("/my-team/default")
+async def my_team_default(
+    request: Request, session: auth.Session = Depends(require_session),
+    slug: str = Form(""), csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/my-team?err=no_tenant", status_code=303)
+    ok = await db.set_default_team_agent(tid, slug.strip().lower(),
+                                         actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/my-team?saved=default" if ok else "/my-team?err=not_found",
+                            status_code=303)
+
+
+@app.post("/my-team/channel")
+async def my_team_channel(
+    request: Request, session: auth.Session = Depends(require_session),
+    source: str = Form(""), slug: str = Form(""), csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/my-team?err=no_tenant", status_code=303)
+    src = source.strip()
+    if src not in config.MESSENGERS:
+        return RedirectResponse(url="/my-team?err=not_found", status_code=303)
+    target_slug = slug.strip().lower()
+    if target_slug:  # пусто = снять привязку; иначе slug должен быть среди enabled-агентов
+        valid = {r["slug"] for r in await db.list_team_agents(tid) if r["enabled"]}
+        if target_slug not in valid:
+            return RedirectResponse(url="/my-team?err=not_found", status_code=303)
+    await db.set_channel_agent(tid, src, target_slug,
+                               actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/my-team?saved=channel", status_code=303)
+
+
+@app.post("/my-team/disable")
+async def my_team_disable(
+    request: Request, session: auth.Session = Depends(require_session),
+    slug: str = Form(""), csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        return RedirectResponse(url="/my-team?err=no_tenant", status_code=303)
+    ok = await db.disable_team_agent(tid, slug.strip().lower(),
+                                     actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/my-team?saved=disabled" if ok else "/my-team?err=not_found",
+                            status_code=303)
+
+
 # =========================================================================== #
 # Обработчики исключений (§3.12) — generic-ответы, скрабинг ПДн в stdout.
 # =========================================================================== #

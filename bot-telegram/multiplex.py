@@ -199,7 +199,10 @@ async def t_text(message: Message, bot: Bot) -> None:
     # Субъект отозвал согласие → бот молчит (стоп-обработка ПДн, 152-ФЗ). Возврат — через /start + согласие.
     if await db.is_erase_requested(message.from_user.id):
         return
-    cfg = await db.get_tenant_ai_overrides(db.tenant_id())
+    # СП-1: выбор агента команды по слоям диалог>канал>дефолт (фолбэк на легаси внутри резолвера).
+    _persona = await db.get_lead_persona(message.from_user.id)
+    _source = await db.get_lead_source(message.from_user.id)
+    cfg = await db.resolve_team_agent_cfg(db.tenant_id(), source=_source, lead_agent_slug=_persona)
     if not cfg["enabled"]:
         return
     # Слой B: детерминированные триггеры тенанта (стоп-слова / кол-во сообщений) — ДО проверки
@@ -244,7 +247,10 @@ async def t_text(message: Message, bot: Bot) -> None:
     # rich=True: ответ Лии тенант-бота — markdown→Telegram-HTML с фолбэком на plain (§8.7).
     await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
     if esc is not None:
-        await escalation.escalate(bot, message.from_user.id, esc)
+        # СП-1: адрес отдела выбранного агента (если задан) перекрывает общий адрес тенанта.
+        _ec = (cfg.get("escalation_chat_id") or "").strip()
+        _ov = (int(_ec), cfg.get("escalation_topic_id")) if _ec.lstrip("-").isdigit() else None
+        await escalation.escalate(bot, message.from_user.id, esc, target_override=_ov)
     if trig_idxs:
         await triggers.fire_intent(ctx, intent_trigs, trig_idxs)
 

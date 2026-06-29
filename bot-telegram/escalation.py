@@ -146,14 +146,17 @@ def client_link(messenger: str, external_id: int) -> tuple[str, str] | None:
 
 
 async def escalate(bot, tg_user_id: int, payload: dict, *,
-                   messenger: str = "tg", raw: str | None = None) -> None:
+                   messenger: str = "tg", raw: str | None = None,
+                   target_override: "tuple[int, int | None] | None" = None) -> None:
     """Передать лида менеджерам в адрес ТЕНАНТА (дедуп: одна карточка на лид). НЕ бросает —
     эскалация не должна ронять ответ клиенту. Порядок: резолв адреса тенанта → атомарный claim →
     отправка → при сбое release. Адрес per-tenant (db.tenant_id() из contextvar). tg_user_id —
     внешний id лида в канале messenger; bot — разговорный бот (фолбэк отправки; для vk None,
     карточку шлёт единый нотификатор в TG-группу). claim/get_lead_id/release — по messenger."""
     try:
-        target = await resolve_escalation_target(db.tenant_id())
+        # СП-1: per-agent адрес отдела (из team_agents через cfg) перекрывает общий адрес тенанта;
+        # пусто → фолбэк на per-tenant resolve_escalation_target (адрес отдела не задан = общий тенанта).
+        target = target_override or await resolve_escalation_target(db.tenant_id())
         if target is None:
             return  # адрес эскалации у тенанта не задан → карточку не шлём (маркер уже вырезан в ask_ai)
         chat_id, topic_id = target

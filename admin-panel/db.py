@@ -3553,6 +3553,141 @@ async def delete_tenant_trigger(
             return True
 
 
+# ── СП-1 «Команда отделов»: CRUD team_agents (RLS). Раздел панели «ИИ-команда» (/my-team). ──
+# Паттерн tenant_triggers: каждая мутация в транзакции ПОСЛЕ set_config('app.tenant_id') + _insert_audit.
+_TEAM_AGENT_SELECT = ("id, slug, name, role_preset, system_prompt, escalation_chat_id, "
+                      "escalation_topic_id, is_default, is_orchestrator, memory_enabled, enabled, position")
+
+
+async def list_team_agents(tenant_id) -> list[asyncpg.Record]:
+    """Все агенты команды тенанта (enabled и выключенные) для раздела «ИИ-команда». Под RLS."""
+    if not tenant_id:
+        return []
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            return await c.fetch(
+                f"select {_TEAM_AGENT_SELECT} from team_agents where tenant_id = $1 "
+                "order by position, created_at", tenant_id)
+
+
+async def get_channel_agent_map(tenant_id) -> dict:
+    """Текущие привязки канал→slug (tenant_settings.agent_for_channel__<source>) для UI «ИИ-команда».
+    Возвращает {source: slug}. Под RLS (panel_rw)."""
+    if not tenant_id:
+        return {}
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            rows = await c.fetch(
+                "select key, value from tenant_settings where tenant_id = $1 "
+                "and key like 'agent_for_channel__%'", tenant_id)
+    return {r["key"].split("agent_for_channel__", 1)[1]: (r["value"] or "") for r in rows}
+
+
+async def upsert_team_agent(
+    tenant_id, *, slug: str, name: str, role_preset: str | None, system_prompt: str,
+    escalation_chat_id: str, escalation_topic_id: int | None,
+    is_orchestrator: bool, memory_enabled: bool,
+    actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Создать/обновить агента команды по (tenant_id, slug) + аудит. Валидность/длины — у вызывающего."""
+    if not tenant_id:
+        raise ValueError("upsert_team_agent: tenant_id обязателен")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            pos = int(await c.fetchval(
+                "select coalesce(max(position), 0) + 1 from team_agents where tenant_id = $1",
+                tenant_id) or 1)
+            await c.execute(
+                """
+                insert into team_agents
+                    (tenant_id, slug, name, role_preset, system_prompt,
+                     escalation_chat_id, escalation_topic_id, is_orchestrator, memory_enabled, position)
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                on conflict (tenant_id, slug) do update set
+                    name = excluded.name, role_preset = excluded.role_preset,
+                    system_prompt = excluded.system_prompt,
+                    escalation_chat_id = excluded.escalation_chat_id,
+                    escalation_topic_id = excluded.escalation_topic_id,
+                    is_orchestrator = excluded.is_orchestrator,
+                    memory_enabled = excluded.memory_enabled,
+                    enabled = true, updated_at = now()
+                """,
+                tenant_id, slug, name, role_preset, system_prompt,
+                escalation_chat_id, escalation_topic_id, is_orchestrator, memory_enabled, pos,
+            )
+            await _insert_audit(
+                c, actor=actor, action="team_agent_upsert", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "slug": slug, "role_preset": role_preset,
+                        "prompt_set": bool(system_prompt)},
+            )
+
+
+async def set_default_team_agent(
+    tenant_id, slug: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Сделать агента дефолтным (снять флаг с прочих — один is_default на тенанта). True — успех."""
+    if not tenant_id:
+        return False
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            await c.execute("update team_agents set is_default = false, updated_at = now() "
+                            "where tenant_id = $1 and is_default", tenant_id)
+            res = await c.execute(
+                "update team_agents set is_default = true, updated_at = now() "
+                "where tenant_id = $1 and slug = $2 and enabled", tenant_id, slug)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="team_agent_set_default", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "slug": slug})
+            return True
+
+
+async def set_channel_agent(
+    tenant_id, source: str, slug: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> None:
+    """Привязать канал (source) к агенту (slug) через tenant_settings.agent_for_channel__<source>.
+    slug='' → снять привязку (пустое value). Под RLS + аудит."""
+    if not tenant_id:
+        raise ValueError("set_channel_agent: tenant_id обязателен")
+    key = f"agent_for_channel__{source}"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            await c.execute(
+                """
+                insert into tenant_settings (tenant_id, key, value) values ($1,$2,$3)
+                on conflict (tenant_id, key) do update set value = excluded.value, updated_at = now()
+                """, tenant_id, key, slug)
+            await _insert_audit(
+                c, actor=actor, action="team_agent_set_channel", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "source": source, "slug": slug or None})
+
+
+async def disable_team_agent(
+    tenant_id, slug: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Soft-delete агента (enabled=false; память/аудит сохраняются). True — выключен."""
+    if not tenant_id:
+        return False
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            res = await c.execute(
+                "update team_agents set enabled = false, is_default = false, updated_at = now() "
+                "where tenant_id = $1 and slug = $2", tenant_id, slug)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="team_agent_disable", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "slug": slug})
+            return True
+
+
 # ── Reseller-платформа Wave 1: tenancy + vault (ТЗ §4.1/§4.5) ────────────────
 # RLS: tenant_secrets закрыт политикой по current_setting('app.tenant_id') —
 # каждый запрос к нему идёт в транзакции ПОСЛЕ set_config(..., is_local=true).

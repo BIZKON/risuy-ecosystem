@@ -1464,6 +1464,76 @@ async def get_tenant_ai_overrides(tid) -> dict:
     }
 
 
+# ── СП-1 «Команда отделов»: per-tenant резолвер агента (team_agents). Аддитивно поверх
+# get_tenant_ai_overrides (легаси-фолбэк). Слои: диалог(leads.ai_persona) > канал
+# (tenant_settings.agent_for_channel__<source>) > is_default-агент > легаси tenant_settings.
+# Бот ходит owner-ролью → RLS обходит, фильтрует tenant_id явно. ──
+def _pick_team_agent(rows, *, lead_agent_slug, channel_slug):
+    """Выбрать агента из набора строк team_agents по слоям диалог>канал>дефолт. Чистая (без БД).
+    rows — list[dict-like] с ключами slug/enabled/is_default. None — никто не подошёл (→ легаси-фолбэк)."""
+    by_slug = {r["slug"]: r for r in rows if r["enabled"]}
+    if lead_agent_slug and lead_agent_slug in by_slug:
+        return by_slug[lead_agent_slug]
+    if channel_slug and channel_slug in by_slug:
+        return by_slug[channel_slug]
+    for r in rows:
+        if r["enabled"] and r["is_default"]:
+            return r
+    return None
+
+
+_TEAM_AGENT_COLS = ("slug, name, role_preset, system_prompt, backend, agent_id, fallback_text, "
+                    "escalation_chat_id, escalation_topic_id, is_default, is_orchestrator, "
+                    "memory_enabled, enabled")
+
+
+async def resolve_team_agent_cfg(tid, *, source=None, lead_agent_slug=None) -> dict:
+    """Конфиг ИИ для тенант-бота с выбором агента команды (team_agents). Слои диалог>канал>дефолт;
+    если команды нет/никто не подошёл — ФОЛБЭК на легаси get_tenant_ai_overrides (поведение как раньше).
+    Бот фильтрует tenant_id явно (owner обходит RLS). Сбой → легаси-фолбэк (ИИ не молчит из-за БД)."""
+    if not tid:
+        return await get_tenant_ai_overrides(tid)
+    try:
+        async with pool.acquire() as c:
+            rows = [dict(r) for r in await c.fetch(
+                f"select {_TEAM_AGENT_COLS} from team_agents where tenant_id = $1 and enabled",
+                tid)]
+            channel_slug = None
+            if source:
+                channel_slug = await c.fetchval(
+                    "select value from tenant_settings where tenant_id = $1 and key = $2",
+                    tid, f"agent_for_channel__{source}")
+    except Exception:  # noqa: BLE001 — таблицы ещё нет / сбой → легаси
+        return await get_tenant_ai_overrides(tid)
+    if not rows:
+        return await get_tenant_ai_overrides(tid)  # тенант не мигрирован/пустая команда
+    picked = _pick_team_agent(rows, lead_agent_slug=lead_agent_slug,
+                              channel_slug=(channel_slug or "").strip() or None)
+    if picked is None:
+        return await get_tenant_ai_overrides(tid)
+    backend = (picked["backend"] or "").strip()
+    if backend not in _AI_BACKENDS:
+        backend = "cloud_ai"
+    legacy = await get_tenant_ai_overrides(tid)  # для model/gateway_base_url/enabled тенанта
+    return {
+        "enabled": legacy["enabled"],
+        "backend": backend,
+        # agent_id агента команды; если у него свой не задан (создан в панели без провижининга) —
+        # наследуем cloud-ai агента тенанта (легаси), иначе cloud_ai-ветка t_text молчала бы.
+        "agent_id": (picked["agent_id"] or "").strip() or legacy["agent_id"],
+        "model": legacy["model"],
+        "gateway_base_url": legacy["gateway_base_url"],
+        "system_prompt": picked["system_prompt"] or "",
+        "fallback": picked["fallback_text"] or legacy["fallback"],
+        "kb_enabled": False,                       # СП-2
+        "agent_slug": picked["slug"],
+        "escalation_chat_id": (picked["escalation_chat_id"] or "").strip(),
+        "escalation_topic_id": picked["escalation_topic_id"],
+        "is_orchestrator": bool(picked["is_orchestrator"]),
+        "memory_enabled": bool(picked["memory_enabled"]),
+    }
+
+
 async def get_funnel_config(tid) -> dict:
     """Пер-тенант настройки воронки выдачи лид-магнита из tenant_settings (конструктор).
 
