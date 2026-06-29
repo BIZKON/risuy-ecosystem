@@ -40,6 +40,7 @@ import db
 import escalation
 import funnel
 import funnel_channels
+import kb
 import messaging
 import selling
 import texts
@@ -229,6 +230,12 @@ async def t_text(message: Message, bot: Bot) -> None:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:  # noqa: BLE001
         pass
+    # СП-2a: RF-RAG для team-агента — справка из базы знаний ТЕНАНТА (фильтр по отделу = slug
+    # агента). Тумблер kb_enabled на агента; эмбеддер недоступен/база пуста → текст без изменений.
+    user_text = message.text
+    if cfg.get("kb_enabled"):
+        kb_context = await kb.retrieve_context(user_text, db.tenant_id(), cfg.get("agent_slug"))
+        user_text = kb.augment(user_text, kb_context)
     # Wave 5: контекст диалога тенанта — историей сообщений (tenant-scoped через contextvar
     # tenant_id, поставленный middleware). Текущее входящее исключаем по message_id.
     history = await db.get_ai_history(
@@ -243,7 +250,7 @@ async def t_text(message: Message, bot: Bot) -> None:
                + "\n\n" + triggers.build_intent_addendum(intent_trigs)}
     # A3 Слой A: ask_ai вырезает служебные маркеры (клиент тенант-бота их НЕ видит); esc != None
     # → горячий лид → карточка в адрес ТЕНАНТА; trig_idxs → сработавшие intent-триггеры.
-    answer, _msg_id, esc, trig_idxs = await ai.ask_ai(message.text, None, cfg, history=history)
+    answer, _msg_id, esc, trig_idxs = await ai.ask_ai(user_text, None, cfg, history=history)
     # rich=True: ответ Лии тенант-бота — markdown→Telegram-HTML с фолбэком на plain (§8.7).
     await messaging.send_text(bot, message.from_user.id, answer, source="liya", rich=True)
     if esc is not None:
