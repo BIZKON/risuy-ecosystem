@@ -84,3 +84,6 @@ do $$ begin
         grant select, insert, update, delete on agent_memory to panel_rw;
     end if;
 end $$;
+
+-- СП-2a: per-agent тумблер базы знаний (симметрично memory_enabled). default true. Идемпотентно.
+alter table team_agents add column if not exists kb_enabled boolean not null default true;

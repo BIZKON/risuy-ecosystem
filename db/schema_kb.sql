@@ -61,3 +61,40 @@ do $$ begin
         grant select, insert, update, delete on kb_chunks    to panel_rw;
     end if;
 end $$;
+
+-- ── СП-2a: per-tenant изоляция базы знаний ──────────────────────────────────────
+-- tenant_id NULL = платформенная/School-справка (видна owner-боту School-пути; в панели —
+-- только при ОТСУТСТВИИ активного клиента). Не-NULL = знание конкретного тенанта.
+-- Бэкфилл не нужен: существующие School-строки остаются NULL. Идемпотентно.
+alter table kb_documents add column if not exists tenant_id uuid references tenants(id) on delete cascade;
+alter table kb_chunks    add column if not exists tenant_id uuid references tenants(id) on delete cascade;
+create index if not exists kb_documents_tenant_idx on kb_documents (tenant_id);
+create index if not exists kb_chunks_tenant_idx    on kb_chunks (tenant_id);
+
+-- NULL-aware RLS: нет активного клиента (app.tenant_id пуст) → видны/пишутся ТОЛЬКО NULL-строки
+-- (платформа/School); активный клиент → ТОЛЬКО его строки. Бот (owner) обходит RLS и фильтрует явно.
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='kb_documents' and policyname='tenant_isolation') then
+    create policy tenant_isolation on kb_documents for all
+      using (case when nullif(current_setting('app.tenant_id', true), '') is null
+                  then tenant_id is null
+                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end)
+      with check (case when nullif(current_setting('app.tenant_id', true), '') is null
+                  then tenant_id is null
+                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end);
+  end if;
+end $$;
+alter table kb_documents enable row level security;
+
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='kb_chunks' and policyname='tenant_isolation') then
+    create policy tenant_isolation on kb_chunks for all
+      using (case when nullif(current_setting('app.tenant_id', true), '') is null
+                  then tenant_id is null
+                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end)
+      with check (case when nullif(current_setting('app.tenant_id', true), '') is null
+                  then tenant_id is null
+                  else tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid end);
+  end if;
+end $$;
+alter table kb_chunks enable row level security;
