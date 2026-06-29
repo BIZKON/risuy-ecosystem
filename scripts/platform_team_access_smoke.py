@@ -52,6 +52,23 @@ html_t = render(session={"is_platform": False}, has_tenant=True)
 check("nav: тенант — «ИИ-команда» без платформенной метки",
       "ИИ-команда клиента" not in html_t)
 
+# 3. no-tenant + платформа → CTA на «Клиенты», без текста «поддержка»
+html = render(session={"is_platform": True}, has_tenant=False)
+check("no-tenant платформа — CTA «Клиенты» (/tenants), без «поддержки»",
+      ("Клиент не выбран" in html) and ("/tenants" in html) and ("напишите в поддержку" not in html))
+
+# 4. no-tenant + тенант → «напишите в поддержку» (без регрессии)
+html = render(session={"is_platform": False}, has_tenant=False)
+check("no-tenant тенант — «напишите в поддержку»", "напишите в поддержку" in html)
+
+# 5. бейдж активного клиента: платформа + активный тенант
+html = render(session={"is_platform": True, "active_tenant_name": "ООО Ромашка"}, has_tenant=True)
+check("бейдж — «Клиент: ООО Ромашка»", "Клиент: ООО Ромашка" in html)
+
+# 6. у тенанта бейджа «Клиент:» нет
+html = render(session={"is_platform": False, "active_tenant_name": "X"}, has_tenant=True)
+check("тенант — без бейджа «Клиент:»", "Клиент:" not in html)
+
 
 def _summary():
     print(f"\n{'ВСЕ ОК' if not FAILS else 'ПРОВАЛЫ: ' + ', '.join(FAILS)}")
