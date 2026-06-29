@@ -1484,7 +1484,7 @@ def _pick_team_agent(rows, *, lead_agent_slug, channel_slug):
 
 _TEAM_AGENT_COLS = ("slug, name, role_preset, system_prompt, backend, agent_id, fallback_text, "
                     "escalation_chat_id, escalation_topic_id, is_default, is_orchestrator, "
-                    "memory_enabled, enabled")
+                    "memory_enabled, kb_enabled, enabled")
 
 
 async def resolve_team_agent_cfg(tid, *, source=None, lead_agent_slug=None) -> dict:
@@ -1525,7 +1525,7 @@ async def resolve_team_agent_cfg(tid, *, source=None, lead_agent_slug=None) -> d
         "gateway_base_url": legacy["gateway_base_url"],
         "system_prompt": picked["system_prompt"] or "",
         "fallback": picked["fallback_text"] or legacy["fallback"],
-        "kb_enabled": False,                       # СП-2
+        "kb_enabled": bool(picked["kb_enabled"]),  # СП-2a: per-agent тумблер базы знаний
         "agent_slug": picked["slug"],
         "escalation_chat_id": (picked["escalation_chat_id"] or "").strip(),
         "escalation_topic_id": picked["escalation_topic_id"],
@@ -1815,12 +1815,13 @@ async def set_ai_wallet_blocked(tid, on: bool, *, conn=None) -> None:
 
 
 async def kb_search(
-    embedding: list[float], persona: str | None = None,
+    embedding: list[float], tenant_id, persona: str | None = None,
     *, top_k: int = 4, max_distance: float = 0.55,
 ) -> list[str]:
-    """Top-k чанков базы знаний по косинусной близости (pgvector `<=>`) + фильтр по роли.
-    Возвращает тексты ближайших чанков. Общая справка (metadata.role_tag пуст) видна ВСЕМ
-    ролям; чанки конкретной персоны — только ей. max_distance отсекает нерелевантное
+    """Top-k чанков базы знаний ТЕНАНТА (tenant_id; None = платформенная/School-справка) по
+    косинусной близости (pgvector `<=>`) + фильтр по отделу (role_tag). Бот — owner-роль
+    (обходит RLS) → tenant фильтруем ЯВНО. Общая справка (role_tag пуст) видна ВСЕМ агентам
+    тенанта; чанк отдела — только агенту с этим slug. max_distance отсекает нерелевантное
     (косинусная дистанция: 0 — идентично, 2 — противоположно; для e5 релевантное ~0.1–0.3).
     Бот ходит под owner-ролью — грант на kb_chunks не нужен. Сбой/нет таблицы (DDL не
     применён) → исключение пробрасываем: kb.retrieve_context его ловит и отключает RAG."""
@@ -1834,12 +1835,13 @@ async def kb_search(
             select content
               from kb_chunks
              where embedding is not null
-               and (coalesce(metadata->>'role_tag', '') = '' or metadata->>'role_tag' = $2)
-               and (embedding <=> $1::vector) <= $3
+               and tenant_id is not distinct from $2
+               and (coalesce(metadata->>'role_tag', '') = '' or metadata->>'role_tag' = $3)
+               and (embedding <=> $1::vector) <= $4
              order by embedding <=> $1::vector
-             limit $4
+             limit $5
             """,
-            vec, per, max_distance, top_k,
+            vec, tenant_id, per, max_distance, top_k,
         )
     return [r["content"] for r in rows]
 

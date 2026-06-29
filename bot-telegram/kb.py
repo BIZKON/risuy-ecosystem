@@ -53,14 +53,15 @@ async def embed_query(text: str) -> list[float] | None:
     return None
 
 
-async def retrieve_context(text: str, persona: str | None = None) -> str:
+async def retrieve_context(text: str, tenant_id, persona: str | None = None) -> str:
     """Готовый блок справки для подмешивания в запрос агента (или "" — если RAG не дал
-    результата). Фильтр по роли: чанки общей справки (role_tag пуст) + чанки персоны."""
+    результата). tenant_id=None → платформенная/School-справка. Фильтр по отделу: общая
+    справка тенанта (role_tag пуст) + чанки персоны/отдела."""
     vec = await embed_query(text)
     if not vec:
         return ""
     try:
-        chunks = await db.kb_search(vec, persona)
+        chunks = await db.kb_search(vec, tenant_id, persona)
     except Exception as e:  # сбой БД/отсутствие таблицы (DDL не применён) → без справки
         logger.warning("kb_search не удался: %s", e)
         return ""
