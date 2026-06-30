@@ -17,7 +17,11 @@
 {% if not session.active_tenant_id %}
 <p class="hint hint--block">⚠️ Не выбран активный клиент — раздел «Клиенты».</p>
 {% elif not vault_enabled %}
+{% if session and session.is_platform %}
 <p class="hint hint--block">⚠️ Хранилище не настроено: задайте <code class="mono">VAULT_MASTER_KEY</code> в env панели (twc-set-env), затем передеплой.</p>
+{% else %}
+<p class="hint hint--block">⚠️ Хранилище ключей временно недоступно. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a>{% else %}Обратитесь в поддержку{% endif %} для активации.</p>
+{% endif %}
 {% else %}
 
 <section class="section" aria-label="Состояние ключей">

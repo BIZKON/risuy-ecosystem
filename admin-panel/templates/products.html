@@ -28,9 +28,9 @@
     {% if kassa.connected %}<span class="badge">настроена</span>{% else %}<span class="muted">не настроена</span>{% endif %}
   </h2>
   {% if not has_tenant %}
-  <p class="card__note muted">⚠️ Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.</p>
+  <p class="card__note muted">⚠️ Кабинет ещё не привязан к клиенту. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a>.{% else %}Обратитесь в поддержку.{% endif %}</p>
   {% elif not vault_enabled %}
-  <p class="card__note muted">⚠️ Хранилище ключей не настроено. Обратитесь в поддержку.</p>
+  <p class="card__note muted">⚠️ Хранилище ключей не настроено. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a>.{% else %}Обратитесь в поддержку.{% endif %}</p>
   {% else %}
   <p class="card__note">Подключите свой магазин ЮKassa, чтобы принимать оплату за товары из каталога <b>на свой счёт</b>. Данные ЮKassa: ЛК → Настройки → «Магазин» (shopId) и «Секретный ключ» (выпустите боевой ключ). Значения шифруются; после сохранения не показываются.</p>
   {% for f in kassa.fields %}

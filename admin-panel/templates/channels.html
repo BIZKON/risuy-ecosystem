@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import stat_card, source_badge, flash %}
+{% from "_macros.html" import stat_card, source_badge, flash, help_card %}
 
 {% block title %}Каналы{% endblock %}
 {% block body_class %}page-channels{% endblock %}
@@ -162,13 +162,15 @@
   <p class="page-head__hint">Подключите мессенджеры, в которых ваш ИИ-сотрудник будет общаться с клиентами. Токены хранятся в зашифрованном виде; после сохранения значение не показывается. Бот подхватит настройки автоматически в течение ~минуты. Если ИИ-сотрудник не отвечает спустя пару минут — проверьте, что токен действующий (а для ВК — что включён Long Poll API).</p>
 </div>
 
+{% if not help_dismissed %}{{ help_card("Как подключить канал", "Здесь подключаются мессенджеры, где ИИ-сотрудник отвечает вашим клиентам. Для Telegram нужен токен бота: создайте бота у @BotFather командой /newbot и вставьте полученный токен в карточку «Telegram».", example="токен из @BotFather", dismiss_key="help_dismissed__channels", csrf_token=csrf_token, back="/channels") }}{% endif %}
+
 {% if saved_flash %}{{ flash('Сохранено. Канал подключится автоматически в течение минуты.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 
 {% if not has_tenant %}
-<p class="hint hint--block">⚠️ Кабинет ещё не привязан к клиенту. Обратитесь в поддержку.</p>
+<p class="hint hint--block">⚠️ Кабинет ещё не привязан к клиенту. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a> — поможем привязать и подключить каналы.{% else %}Обратитесь в поддержку.{% endif %}</p>
 {% elif not vault_enabled %}
-<p class="hint hint--block">⚠️ Хранилище ключей не настроено. Обратитесь в поддержку.</p>
+<p class="hint hint--block">⚠️ Хранилище ключей не настроено. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a>.{% else %}Обратитесь в поддержку.{% endif %}</p>
 {% else %}
 
 {% include "_channel_cards.html" %}

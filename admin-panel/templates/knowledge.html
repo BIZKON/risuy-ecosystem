@@ -27,7 +27,7 @@
   {% else %}
   <div class="card__title">Кабинет ещё не привязан</div>
   <p class="card__note">База знаний ведётся в кабинете клиента. Сейчас к учётной записи кабинет не привязан — напишите в поддержку.</p>
-  {% if support_url %}<div class="acct-actions"><a class="btn btn--primary" href="{{ support_url }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a></div>{% endif %}
+  {% if support_url %}<div class="acct-actions"><a class="btn btn--primary" href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a></div>{% endif %}
   {% endif %}
 </section>
 {% else %}
@@ -43,7 +43,11 @@
 {% endif %}
 
 {% if not embedder_enabled %}
+{% if session and session.is_platform %}
 <p class="hint hint--block">⚠️ Загрузка файлов недоступна: не задан <code>EMBEDDER_URL</code> в окружении панели. Добавьте его скриптом деплоя (как у бота) — и появится форма загрузки.</p>
+{% else %}
+<p class="hint hint--block">⚠️ Загрузка файлов временно недоступна — идёт подготовка. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a>, чтобы активировать.{% else %}Обратитесь в поддержку, чтобы активировать.{% endif %}</p>
+{% endif %}
 {% else %}
 {# форма загрузки #}
 <form method="post" action="/knowledge/upload" enctype="multipart/form-data" autocomplete="off" class="card">

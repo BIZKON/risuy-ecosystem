@@ -1725,6 +1725,7 @@ async def data_protection_page(
         "session": session, "active": "data_protection",
         "csrf_token": session.csrf_token, "has_tenant": bool(tid),
         "lead_count": lead_count, "row_cap": config.EXPORT_ROW_CAP,
+        "support_url": _safe_support_url(config.SUPPORT_URL),
     })
 
 
@@ -2019,6 +2020,7 @@ async def products_list(
             # Касса (ЮKassa) — self-serve подключение, tenant-scoped.
             "has_tenant": bool(session.active_tenant_id),
             "vault_enabled": vault.enabled(),
+            "support_url": _safe_support_url(config.SUPPORT_URL),
             "kassa": _kassa_view(kassa_secrets),
             "kassa_webhook_url": f"{webhook_base}/webhooks/yookassa",
             "value_max": config.TENANT_SECRET_VALUE_MAX,
@@ -3211,6 +3213,7 @@ async def subscription_page(
             "plans": _plans_for_picker(sub.get("plan_key")),
             "invoices": invoices,
             "yookassa_enabled": config.YOOKASSA_ENABLED,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
             "receipt_required": config.SERVICE_RECEIPT_ENABLED,
             "contact_url": config.SERVICE_CONTACT_URL,
             "period_days": config.SERVICE_PLAN_PERIOD_DAYS,
@@ -3823,7 +3826,7 @@ def _present_agent(a: dict) -> dict:
 
 def _knowledge_err_text(err: str | None) -> str | None:
     return {
-        "kb_off": "Загрузка недоступна: не задан EMBEDDER_URL в окружении панели.",
+        "kb_off": "Загрузка базы знаний временно недоступна — обратитесь в поддержку.",
         "kb_nofile": "Выберите файл для загрузки.",
         "kb_ext": "Поддерживаются только файлы txt, md, csv, pdf.",
         "kb_big": f"Файл слишком большой (лимит {config.MAX_KB_FILE_BYTES // 1024 // 1024} МБ).",
@@ -4161,6 +4164,7 @@ async def channels_page(
                 "channel_cards": _channel_cards_view(secrets_meta),
                 "value_max": config.TENANT_SECRET_VALUE_MAX,
                 "support_url": _safe_support_url(config.SUPPORT_URL),
+                "help_dismissed": await _help_dismissed(session, "channels"),
                 "notifier_username": config.NOTIFIER_BOT_USERNAME,
                 "saved_flash": bool(saved),
                 "err": _channels_err_text(err),
@@ -5445,7 +5449,7 @@ def _error_page(request: Request, status_code: int, message: str) -> Response:
 def _keys_err_text(err: str | None) -> str | None:
     return {
         "no_tenant": "Сначала выберите клиента (раздел «Клиенты»).",
-        "no_vault": "Хранилище ключей не настроено: задайте VAULT_MASTER_KEY в env панели.",
+        "no_vault": "Хранилище ключей не настроено. Обратитесь в поддержку.",
         "bad_key": "Неизвестное имя ключа.",
         "empty": "Значение пустое — ключ не сохранён.",
         "too_long": f"Значение длиннее {config.TENANT_SECRET_VALUE_MAX} символов.",
@@ -5592,6 +5596,7 @@ async def keys_page(
             "known_keys": known,
             "saved_flash": bool(saved),
             "deleted_flash": bool(deleted),
+            "support_url": _safe_support_url(config.SUPPORT_URL),
             "err": _keys_err_text(err),
         },
     )

@@ -224,7 +224,11 @@
       <a class="modal__close" href="#" aria-label="Закрыть">✕</a>
     </div>
     {% if not yookassa_enabled %}
+    {% if session and session.is_platform %}
     <p class="hint hint--block">Онлайн-оплата выключена: задайте <code class="mono">YOOKASSA_SHOP_ID</code> и <code class="mono">YOOKASSA_SECRET_KEY</code> в env панели, чтобы выбор тарифа заработал.</p>
+    {% else %}
+    <p class="hint hint--block">Онлайн-оплата временно недоступна. {% if support_url %}<a href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Напишите в поддержку</a>{% else %}Обратитесь в поддержку{% endif %} — поможем оформить тариф.</p>
+    {% endif %}
     {% endif %}
     <div class="plan-grid">
       {% for p in plans %}

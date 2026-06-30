@@ -12,8 +12,15 @@
 
 {% if not has_tenant %}
 <section class="card" aria-label="Кабинет не привязан">
+  {% if session and session.is_platform %}
+  <div class="card__title">Клиент не выбран</div>
+  <p class="card__note">Выберите клиента в разделе «Клиенты», чтобы работать с его базой.</p>
+  <div class="acct-actions"><a class="btn btn--primary" href="/tenants">Перейти к «Клиентам»</a></div>
+  {% else %}
   <div class="card__title">Кабинет ещё не привязан</div>
-  <p class="card__note">Этот раздел работает с базой вашего кабинета. Сейчас кабинет к учётной записи не привязан — напишите в поддержку.</p>
+  <p class="card__note">Этот раздел работает с базой вашего кабинета. Сейчас кабинет к учётной записи не привязан.</p>
+  {% if support_url %}<div class="acct-actions"><a class="btn btn--primary" href="{{ support_url|e }}" target="_blank" rel="noopener noreferrer nofollow">Написать в поддержку</a></div>{% endif %}
+  {% endif %}
 </section>
 {% else %}
 
