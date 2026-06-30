@@ -379,6 +379,36 @@ def _fallback_due() -> bool:
     return False
 
 
+# ── СП-2-память: суммаризация диалога для долгой памяти ───────────────────────
+_SUMMARY_SYSTEM = (
+    "Ты — модуль памяти. Сожми диалог в 3-5 кратких фактов о клиенте и его задаче "
+    "(потребность, договорённости, контекст), которые помогут продолжить разговор позже. "
+    "Только факты из диалога, без выдумок. Без приветствий и воды."
+)
+
+
+async def summarize_dialog(dialog_text: str, cfg: dict) -> str | None:
+    """Сводка диалога для долгой памяти. Идёт через тот же masked-бэкенд (mask→LLM→unmask),
+    что и ответы → сырьё ПДн во внешний ИИ не уходит. None при сбое/фолбэке (память не пишется)."""
+    if not (dialog_text or "").strip():
+        return None
+    backend = (cfg.get("backend") or "").strip()
+    try:
+        if backend == "gateway":
+            ans, meta = await ask_gateway(
+                dialog_text, base_url=cfg.get("gateway_base_url"), model=cfg.get("model"),
+                system_prompt=_SUMMARY_SYSTEM, fallback=None)
+            # gateway при сбое возвращает непустой _FALLBACK с meta=None → meta как сигнал
+            # успеха (ТЗ §5.2: на реальном ответе usage всегда есть → meta != None).
+            return ans.strip() if (meta is not None and ans and ans.strip()) else None
+        msgs = _build_chat_messages(_SUMMARY_SYSTEM, None, dialog_text)
+        ans = await ask_agent_openai(msgs, agent_id=cfg.get("agent_id"))
+        return ans.strip() if (ans and ans.strip()) else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("summarize_dialog не удался: %s", e)
+        return None
+
+
 async def ask_ai(
     text: str, parent_message_id: str | None, cfg: dict,
     *, history: list[dict] | None = None,

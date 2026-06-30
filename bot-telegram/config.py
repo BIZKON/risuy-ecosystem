@@ -133,6 +133,12 @@ TIMEWEB_API_BASE = os.environ.get("TIMEWEB_API_BASE", "https://api.timeweb.cloud
 # /call). 0 → без истории (только system-промпт + текущий вопрос). Зажат снизу 0.
 AI_HISTORY_MESSAGES = _env_int("AI_HISTORY_MESSAGES", 10, minimum=0)
 
+# СП-2-память: суммаризировать диалог каждые N входящих (0 → выключить запись памяти);
+# top-k сводок и порог косинусной дистанции при ретриве памяти.
+MEMORY_SUMMARIZE_EVERY = _env_int("MEMORY_SUMMARIZE_EVERY", 10, minimum=0)
+MEMORY_TOP_K = _env_int("MEMORY_TOP_K", 3, minimum=1)
+MEMORY_MAX_DISTANCE = float(os.environ.get("MEMORY_MAX_DISTANCE", "0.55"))
+
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
 PORT = int(os.environ.get("PORT", "8080"))
 
