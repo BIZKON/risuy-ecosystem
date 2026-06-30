@@ -175,3 +175,68 @@
   </div>
   {%- endif %}
 {%- endmacro %}
+
+
+{# ── Онбординг тенанта (server-rendered, без JS) ── #}
+
+{# «Как это работает»-карточка вверху раздела. dismiss_key+csrf → крестик скрывает (флаг в
+   tenant_settings). back — путь возврата после скрытия (раздел). example/more_href опц. #}
+{% macro help_card(title, body, example='', more_href='', more_label='Подробнее', dismiss_key='', csrf_token='', back='') %}
+  <section class="help-card" role="note">
+    <div class="help-card__main">
+      <div class="help-card__title">{{ title }}</div>
+      <p class="help-card__body">{{ body }}</p>
+      {%- if example %}<p class="help-card__example"><b>Пример:</b> {{ example }}</p>{% endif %}
+      {%- if more_href %}<a class="help-card__more" href="{{ more_href }}">{{ more_label }} →</a>{% endif %}
+    </div>
+    {%- if dismiss_key and csrf_token %}
+    <form class="help-card__dismiss" method="post" action="/onboarding/dismiss-help">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="key" value="{{ dismiss_key }}">
+      <input type="hidden" name="back" value="{{ back }}">
+      <button class="help-card__x" type="submit" title="Скрыть подсказку" aria-label="Скрыть подсказку">✕</button>
+    </form>
+    {%- endif %}
+  </section>
+{%- endmacro %}
+
+
+{# Getting-started чеклист 5 шагов. state из onboarding.compute_state: {steps,done_count,total,
+   pct,complete}. Прогресс-бар — классом onb__bar--N (без inline-style, CSP-safe). #}
+{% macro onboarding_checklist(state, csrf_token) %}
+  <section class="onb" aria-label="Шаги настройки">
+    <div class="onb__head">
+      <div class="onb__title">{% if state.complete %}Настройка завершена ✓{% else %}Настройка за {{ state.total }} шагов{% endif %}</div>
+      <form method="post" action="/onboarding/dismiss">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="onb__x" type="submit" title="Скрыть чеклист" aria-label="Скрыть чеклист">✕</button>
+      </form>
+    </div>
+    <div class="onb__progress"><div class="onb__bar onb__bar--{{ state.done_count }}"></div></div>
+    <div class="onb__count">{{ state.done_count }} из {{ state.total }}</div>
+    <ol class="onb__steps">
+      {%- for s in state.steps %}
+      <li class="onb__step{% if s.done %} is-done{% endif %}">
+        <span class="onb__check" aria-hidden="true">{% if s.done %}✓{% else %}{{ loop.index }}{% endif %}</span>
+        <span class="onb__label">{{ s.label }}</span>
+        {%- if not s.done %}<a class="onb__cta" href="{{ s.href }}">{{ s.cta }} →</a>{% endif %}
+      </li>
+      {%- endfor %}
+    </ol>
+  </section>
+{%- endmacro %}
+
+
+{# Приветственная карточка первого входа (welcome_seen пусто). Обе кнопки POST /onboarding/welcome
+   → ставят welcome_seen (чеклист остаётся ниже). #}
+{% macro welcome_card(csrf_token) %}
+  <section class="onb-welcome" role="note">
+    <div class="onb-welcome__title">Добро пожаловать! Настроим вашего ИИ-сотрудника</div>
+    <p class="onb-welcome__body">Он будет отвечать вашим клиентам в Telegram, VK и MAX круглосуточно. Настройка займёт около 15 минут — ниже подсветим 5 шагов.</p>
+    <form class="onb-welcome__act" method="post" action="/onboarding/welcome">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn btn--primary" type="submit" name="start" value="1">Начать настройку</button>
+      <button class="btn btn--secondary" type="submit" name="skip" value="1">Пропустить, осмотрюсь сам</button>
+    </form>
+  </section>
+{%- endmacro %}

@@ -1,10 +1,17 @@
 {% extends "base.html" %}
-{% from "_macros.html" import stat_card, source_badge %}
+{% from "_macros.html" import stat_card, source_badge, onboarding_checklist, welcome_card %}
 
 {% block title %}Дашборд{% endblock %}
 {% block body_class %}page-dashboard{% endblock %}
 
 {% block content %}
+
+{# Онбординг тенанта: приветствие (первый вход) + getting-started чеклист 5 шагов. Только роль
+   тенанта (платформе onboarding=None). Серверный расчёт из реальных сигналов. #}
+{% if onboarding %}
+{% if onboarding.welcome %}{{ welcome_card(csrf_token) }}{% endif %}
+{{ onboarding_checklist(onboarding.state, csrf_token) }}
+{% endif %}
 
 {# Платформенная сводка по всем подключённым клиентам (тенантам) — ТОЛЬКО роль admin
    (платформенный владелец). Клиент-оператор контекст platform не получает → блок скрыт. #}

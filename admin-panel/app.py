@@ -43,6 +43,7 @@ import db
 import kb
 import knowledge_roles
 import oauth_vk
+import onboarding
 import security
 import timeweb_ai
 import yookassa
@@ -664,6 +665,17 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
     # (клиент-оператор её не видит, как и блок «Экономика сервиса»). None → шаблон скрыт.
     platform = await _platform_ctx(session.is_platform)
 
+    # Онбординг тенанта (не платформе): welcome-карточка + getting-started чеклист из реальных
+    # сигналов, пока тенант не скрыл (onboarding_dismissed). Платформе — не показываем.
+    onboarding_ctx = None
+    if not session.is_platform:
+        flags = await db.get_onboarding_flags(session.active_tenant_id)
+        if not flags.get("onboarding_dismissed"):
+            onboarding_ctx = {
+                "state": await onboarding.compute_state(session.active_tenant_id),
+                "welcome": not flags.get("welcome_seen"),
+            }
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -672,12 +684,67 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
             "conversion": conversion,
             "by_source": by_source,
             "platform": platform,
+            "onboarding": onboarding_ctx,
             "session": session,
             "csrf_token": session.csrf_token,
             "status_labels": config.STATUS_LABELS,
             "active": "dashboard",
         },
     )
+
+
+# ── Онбординг: POST-эндпоинты (CSRF + PRG); флаги в tenant_settings ──
+def _safe_back(back: str) -> str:
+    """Локальный путь возврата (анти open-redirect): только same-origin путь вида '/...'."""
+    back = (back or "").strip()
+    return back if back.startswith("/") and not back.startswith("//") else "/"
+
+
+@app.post("/onboarding/welcome")
+async def onboarding_welcome(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+    start: str = Form(""),
+    skip: str = Form(""),
+):
+    """Отметить приветствие просмотренным (welcome_seen). Обе кнопки (начать/пропустить) сюда."""
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_onboarding_flag(
+        session.active_tenant_id, "welcome_seen", "1",
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/onboarding/dismiss")
+async def onboarding_dismiss(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    """Скрыть getting-started чеклист (onboarding_dismissed)."""
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_onboarding_flag(
+        session.active_tenant_id, "onboarding_dismissed", "1",
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/onboarding/dismiss-help")
+async def onboarding_dismiss_help(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+    key: str = Form(""),
+    back: str = Form(""),
+):
+    """Скрыть «как это работает»-карточку раздела (help_dismissed__<section>); возврат в раздел.
+    Ключ валидируется allowlist'ом в db.set_onboarding_flag (произвольный app-ключ не записать)."""
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_onboarding_flag(
+        session.active_tenant_id, key.strip(), "1",
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url=_safe_back(back), status_code=303)
 
 
 async def _platform_ctx(is_platform: bool) -> dict | None:

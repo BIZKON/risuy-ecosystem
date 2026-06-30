@@ -707,6 +707,63 @@ select.field__input {
   .provision-banner__cta { width: 100%; text-align: center; }
 }
 
+/* ── Онбординг тенанта: welcome + getting-started чеклист + help-card ── */
+.onb-welcome {
+  background: var(--accent-soft); border: 1px solid #cdd9f5; border-left: 4px solid var(--accent);
+  border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px; color: var(--ink);
+}
+.onb-welcome__title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.onb-welcome__body { font-size: 13.5px; line-height: 1.45; color: var(--ink-soft); margin-bottom: 12px; }
+.onb-welcome__act { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.onb {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px 18px; margin-bottom: 22px; box-shadow: var(--shadow);
+}
+.onb__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.onb__title { font-weight: 700; font-size: 14.5px; color: var(--ink); }
+.onb__x {
+  background: none; border: none; color: var(--ink-faint); font-size: 15px; cursor: pointer;
+  padding: 2px 6px; border-radius: 6px;
+}
+.onb__x:hover { color: var(--ink); background: var(--accent-soft); }
+.onb__progress { height: 6px; background: var(--line); border-radius: 4px; overflow: hidden; margin: 10px 0 4px; }
+.onb__bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width .2s ease; }
+.onb__bar--0 { width: 0; }
+.onb__bar--1 { width: 20%; }
+.onb__bar--2 { width: 40%; }
+.onb__bar--3 { width: 60%; }
+.onb__bar--4 { width: 80%; }
+.onb__bar--5 { width: 100%; }
+.onb__count { font-size: 12px; color: var(--ink-faint); margin-bottom: 10px; }
+.onb__steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.onb__step { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--ink); }
+.onb__check {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 12px; font-weight: 700;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid #cdd9f5;
+}
+.onb__step.is-done .onb__check { background: var(--accent); color: #fff; border-color: var(--accent); }
+.onb__step.is-done .onb__label { color: var(--ink-faint); text-decoration: line-through; }
+.onb__label { flex: 1; }
+.onb__cta { flex: none; font-size: 12.5px; font-weight: 600; color: var(--accent); }
+
+.help-card {
+  display: flex; align-items: flex-start; gap: 12px;
+  background: var(--accent-soft); border: 1px solid #cdd9f5; border-left: 4px solid var(--accent);
+  border-radius: var(--radius); padding: 13px 16px; margin-bottom: 16px; color: var(--ink);
+}
+.help-card__main { flex: 1; }
+.help-card__title { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+.help-card__body { font-size: 13px; line-height: 1.45; color: var(--ink-soft); }
+.help-card__example { font-size: 12.5px; line-height: 1.4; color: var(--ink-soft); margin-top: 5px; }
+.help-card__more { display: inline-block; margin-top: 6px; font-size: 12.5px; font-weight: 600; color: var(--accent); }
+.help-card__x {
+  flex: none; background: none; border: none; color: var(--ink-faint); font-size: 14px; cursor: pointer;
+  padding: 2px 6px; border-radius: 6px;
+}
+.help-card__x:hover { color: var(--ink); }
+
 /* ── Карточки-счётчики ── */
 .stats {
   display: grid;
