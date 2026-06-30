@@ -4898,10 +4898,11 @@ async def lead_magnet_save(
     form = await request.form()
     await _enforce_csrf(request, session, str(form.get("csrf_token") or ""))
     tid = session.active_tenant_id
+    hd = await _help_dismissed(session, "lead_magnet")  # сохранить состояние help-card на ре-рендере ошибок
     if not tid:
         empty = {k: "" for k in leadmagnet.FUNNEL_KEYS}
         return _render_lead_magnet(
-            request, session, values=empty,
+            request, session, values=empty, help_dismissed=hd,
             errors=["Кабинет ещё не привязан к клиенту — обратитесь в поддержку."])
     legal_urls = await db.get_tenant_legal_urls(tid)
     # Все поля конструктора из формы (чекбоксы шлют '1' при включении, иначе отсутствуют → '';
@@ -4918,7 +4919,7 @@ async def lead_magnet_save(
         file_meta, file_err = await _read_product_file(request, upload)
         if file_err:
             return _render_lead_magnet(
-                request, session, values=fields, legal_urls=legal_urls,
+                request, session, values=fields, legal_urls=legal_urls, help_dismissed=hd,
                 errors=[f"Файл не подошёл (проверьте тип: PDF/изображение/документ, и размер ≤ "
                         f"{config.MAX_PRODUCT_FILE_MB} МБ). Код: {file_err}"])
         pid = await db.create_product_with_audit(
@@ -4932,7 +4933,8 @@ async def lead_magnet_save(
         tid, fields, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     if errs:
         # Не PRG: возвращаем форму с ошибками и введёнными значениями (не теряем ввод).
-        return _render_lead_magnet(request, session, values=fields, errors=errs, legal_urls=legal_urls)
+        return _render_lead_magnet(request, session, values=fields, errors=errs, legal_urls=legal_urls,
+                                   help_dismissed=hd)
     return RedirectResponse(url="/lead-magnet?saved=1", status_code=303)
 
 

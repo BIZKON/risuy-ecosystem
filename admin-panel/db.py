@@ -3411,13 +3411,13 @@ _ONBOARDING_KEYS = ("welcome_seen", "onboarding_dismissed")
 def _valid_onboarding_key(key: str) -> bool:
     """Allowlist ключей онбординга: фиксированные + help_dismissed__<section> (секция —
     идентификатор). Защита от записи произвольного app-ключа через эндпоинт онбординга."""
-    return key in _ONBOARDING_KEYS or (
-        key.startswith("help_dismissed__") and key[len("help_dismissed__"):].isidentifier())
+    suffix = key[len("help_dismissed__"):] if key.startswith("help_dismissed__") else ""
+    return key in _ONBOARDING_KEYS or (bool(suffix) and suffix.isascii() and suffix.isidentifier())
 
 
 async def get_onboarding_flags(tid) -> dict:
-    """Флаги онбординга тенанта из tenant_settings (welcome_seen/onboarding_niche/
-    onboarding_dismissed + help_dismissed__<section>). {} если тенант не выбран."""
+    """Флаги онбординга тенанта из tenant_settings (welcome_seen/onboarding_dismissed
+    + help_dismissed__<section>). {} если тенант не выбран."""
     if not tid:
         return {}
     async with pool.acquire() as c:
