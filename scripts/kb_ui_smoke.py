@@ -33,7 +33,7 @@ BASE_CTX = dict(
     csrf_token="csrf", err="", kb_saved=0, active="knowledge",
     has_tenant=True, kb_docs=[], kb_enabled=False, show_global_toggle=False,
     embedder_enabled=True, kb_roles={}, kb_max_mb=10,
-    support_url="https://t.me/support",
+    support_url="https://t.me/support", help_dismissed=True,
 )
 
 
@@ -80,6 +80,13 @@ check("тумблер виден при show_global_toggle", 'action="/knowledge
 # 7. nav: пункт «Базы знаний» рендерится В ОБЕИХ ветках (платформа и тенант)
 check("nav: платформа видит «Базы знаний»", KNOW_NAV in render(session={"is_platform": True}, has_tenant=True))
 check("nav: тенант видит «Базы знаний»", KNOW_NAV in render(session={"is_platform": False}, has_tenant=True))
+
+# 8. help_card «Зачем база знаний»: показан при help_dismissed=False, скрыт при True
+html = render(session={"is_platform": False}, has_tenant=True, help_dismissed=False)
+check("help_card показан (help_dismissed=False)",
+      ("Зачем база знаний" in html) and ('action="/onboarding/dismiss-help"' in html))
+html = render(session={"is_platform": False}, has_tenant=True, help_dismissed=True)
+check("help_card скрыт (help_dismissed=True)", "Зачем база знаний" not in html)
 
 
 def _summary():

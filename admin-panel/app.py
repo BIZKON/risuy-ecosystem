@@ -742,6 +742,15 @@ async def onboarding_dismiss_help(
     return RedirectResponse(url=_safe_next((back or "").strip()), status_code=303)
 
 
+async def _help_dismissed(session: auth.Session, section: str) -> bool:
+    """Скрыта ли «как это работает»-карточка раздела (help_dismissed__<section>). Платформе и
+    сессии без активного тенанта help-card не показываем (True). Лёгкий KV-чит на загрузку раздела."""
+    if session.is_platform or not session.active_tenant_id:
+        return True
+    flags = await db.get_onboarding_flags(session.active_tenant_id)
+    return bool(flags.get(f"help_dismissed__{section}"))
+
+
 async def _platform_ctx(is_platform: bool) -> dict | None:
     """Сводка по всем подключённым клиентам для дашборда — ТОЛЬКО платформенный супер
     (env-админ). Деньги из db.platform_summary (µRUB) форматируем в рубли для UI. Сбой →
@@ -3871,6 +3880,7 @@ async def knowledge_page(
             "kb_saved": kb_saved,
             "kb_max_mb": config.MAX_KB_FILE_BYTES // 1024 // 1024,
             "support_url": _safe_support_url(config.SUPPORT_URL),
+            "help_dismissed": await _help_dismissed(session, "knowledge"),
         },
     )
 
@@ -5254,6 +5264,7 @@ async def my_team_page(
             "support_url": _safe_support_url(config.SUPPORT_URL),
             "saved": _team_saved_text(saved),
             "err": _team_err_text(err),
+            "help_dismissed": await _help_dismissed(session, "my_team"),
         },
     )
 

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import flash %}
+{% from "_macros.html" import flash, help_card %}
 
 {% block title %}ИИ-команда{% endblock %}
 {% block body_class %}page-triggers{% endblock %}
@@ -12,6 +12,8 @@
   <p class="page-head__hint"><span class="pill pill--warn">Клиент: {{ session.active_tenant_name }}</span></p>
   {% endif %}
 </div>
+
+{% if not help_dismissed %}{{ help_card("Что такое ИИ-сотрудник", "Это роль (например, «Администратор салона»). В поле «Инструкции» простыми словами опишите, как он общается и что знает о вашем деле — это и задаёт его поведение.", dismiss_key="help_dismissed__my_team", csrf_token=csrf_token, back="/my-team") }}{% endif %}
 
 {% if saved %}{{ flash(saved, 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
