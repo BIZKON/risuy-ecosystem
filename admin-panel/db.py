@@ -3404,6 +3404,52 @@ async def set_funnel_config(
     return []
 
 
+# ── Онбординг тенанта: флаги в tenant_settings KV (welcome/чеклист/dismiss) — БЕЗ нового DDL ──
+_ONBOARDING_KEYS = ("welcome_seen", "onboarding_niche", "onboarding_dismissed")
+
+
+def _valid_onboarding_key(key: str) -> bool:
+    """Allowlist ключей онбординга: фиксированные + help_dismissed__<section> (секция —
+    идентификатор). Защита от записи произвольного app-ключа через эндпоинт онбординга."""
+    return key in _ONBOARDING_KEYS or (
+        key.startswith("help_dismissed__") and key[len("help_dismissed__"):].isidentifier())
+
+
+async def get_onboarding_flags(tid) -> dict:
+    """Флаги онбординга тенанта из tenant_settings (welcome_seen/onboarding_niche/
+    onboarding_dismissed + help_dismissed__<section>). {} если тенант не выбран."""
+    if not tid:
+        return {}
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tid))
+            rows = await c.fetch(
+                "select key, value from tenant_settings where tenant_id = $1 "
+                "and (key = any($2::text[]) or key like 'help_dismissed__%')",
+                tid, list(_ONBOARDING_KEYS))
+    return {r["key"]: (r["value"] or "") for r in rows}
+
+
+async def set_onboarding_flag(tid, key: str, value: str, *,
+                              actor: str, ip: str | None, user_agent: str | None) -> bool:
+    """Upsert ОДНОГО флага онбординга в tenant_settings (под RLS + аудит). True — записано.
+    key валидируется по allowlist (нельзя писать произвольный KV); value обрезается до 200."""
+    if not tid or not _valid_onboarding_key(key):
+        return False
+    value = (value or "").strip()[:200]
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tid))
+            await c.execute(
+                "insert into tenant_settings (tenant_id, key, value) values ($1, $2, $3) "
+                "on conflict (tenant_id, key) do update set value = excluded.value, updated_at = now()",
+                tid, key, value)
+            await _insert_audit(
+                c, actor=actor, action="onboarding_flag_set", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tid), "key": key, "value": value})
+    return True
+
+
 # ── Дожим (nurture): чтение для формы панели + валидирующая запись (контракт shared.nurture) ──
 async def get_tenant_nurture_panel(tid) -> dict:
     """Конфиг дожима для предзаполнения формы: {"enabled": bool, "steps": [{delay_seconds, text}]}.
