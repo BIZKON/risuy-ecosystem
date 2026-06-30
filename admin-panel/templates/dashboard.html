@@ -6,8 +6,8 @@
 
 {% block content %}
 
-{# Онбординг тенанта: приветствие (первый вход) + getting-started чеклист 5 шагов. Только роль
-   тенанта (платформе onboarding=None). Серверный расчёт из реальных сигналов. #}
+{# Онбординг: приветствие (первый вход) + getting-started чеклист 5 шагов активного тенанта.
+   Видно тенанту И платформе-под-клиента (есть active_tenant_id). Серверный расчёт из реальных сигналов. #}
 {% if onboarding %}
 {% if onboarding.welcome %}{{ welcome_card(csrf_token) }}{% endif %}
 {{ onboarding_checklist(onboarding.state, csrf_token) }}

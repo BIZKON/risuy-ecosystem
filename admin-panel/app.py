@@ -666,10 +666,11 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
     # (клиент-оператор её не видит, как и блок «Экономика сервиса»). None → шаблон скрыт.
     platform = await _platform_ctx(session.is_platform)
 
-    # Онбординг тенанта (не платформе): welcome-карточка + getting-started чеклист из реальных
-    # сигналов, пока тенант не скрыл (onboarding_dismissed). Платформе — не показываем.
+    # Онбординг: welcome-карточка + getting-started чеклист из реальных сигналов АКТИВНОГО
+    # тенанта, пока не скрыт (onboarding_dismissed). Показываем тенанту И платформе-под-клиента
+    # (есть active_tenant_id) — владелец видит то же, что клиент (A1). Без выбранного клиента — нет.
     onboarding_ctx = None
-    if not session.is_platform:
+    if session.active_tenant_id:
         flags = await db.get_onboarding_flags(session.active_tenant_id)
         if not flags.get("onboarding_dismissed"):
             onboarding_ctx = {
@@ -694,7 +695,9 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
     )
 
 
-# ── Онбординг: POST-эндпоинты (CSRF + PRG); флаги в tenant_settings ──
+# ── Онбординг: POST-эндпоинты (CSRF + PRG); флаги в tenant_settings АКТИВНОГО тенанта.
+# ⚠️ Платформа-под-клиента (A1) пишет флаги КЛИЕНТА: закрыв welcome/чеклист/help под выбранным
+# клиентом, владелец гасит их и для самого клиента — намеренно (владелец ведёт онбординг клиента). ──
 @app.post("/onboarding/welcome")
 async def onboarding_welcome(
     request: Request,
@@ -743,9 +746,10 @@ async def onboarding_dismiss_help(
 
 
 async def _help_dismissed(session: auth.Session, section: str) -> bool:
-    """Скрыта ли «как это работает»-карточка раздела (help_dismissed__<section>). Платформе и
-    сессии без активного тенанта help-card не показываем (True). Лёгкий KV-чит на загрузку раздела."""
-    if session.is_platform or not session.active_tenant_id:
+    """Скрыта ли «как это работает»-карточка раздела (help_dismissed__<section>). Без активного
+    тенанта help-card не показываем (True). Видно тенанту И платформе-под-клиента (active_tenant_id) —
+    владелец видит то же, что клиент (A1). Лёгкий KV-чит на загрузку раздела."""
+    if not session.active_tenant_id:
         return True
     flags = await db.get_onboarding_flags(session.active_tenant_id)
     return bool(flags.get(f"help_dismissed__{section}"))

@@ -75,10 +75,18 @@ check("прогресс-бар onb__bar--2", "onb__bar--2" in html)
 check("выполненный шаг is-done", "onb__step is-done" in html)
 check("CTA невыполненного (база знаний)", "Загрузить документ" in html)
 
-# 5. платформа (onboarding=None) → ни чеклиста, ни welcome
+# 5. платформа БЕЗ выбранного клиента (handler передаёт onboarding=None) → ни чеклиста, ни welcome
 html = render(session=PLAT, onboarding=None)
-check("платформа — без чеклиста", 'class="onb"' not in html)
-check("платформа — без welcome", "Добро пожаловать" not in html)
+check("платформа без клиента — без чеклиста", 'class="onb"' not in html)
+check("платформа без клиента — без welcome", "Добро пожаловать" not in html)
+
+# 6. платформа-ПОД-КЛИЕНТА (выбран клиент → handler передаёт onboarding активного тенанта):
+#    онбординг ВИДЕН владельцу вместе с платформенной сводкой (фикс видимости, A1-паттерн).
+html = render(session=PLAT, onboarding={"state": state({"bot"}), "welcome": True},
+              platform={"clients": [], "revenue_rub": "0"})
+check("платформа-с-клиентом — чеклист виден владельцу", 'class="onb"' in html)
+check("платформа-с-клиентом — welcome виден владельцу", "Добро пожаловать" in html)
+check("платформа-с-клиентом — платформенная сводка тоже на месте", "Платформа · клиенты" in html)
 
 print("\n" + ("ВСЕ ОК" if not FAILS else "ПРОВАЛЫ: " + ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)
