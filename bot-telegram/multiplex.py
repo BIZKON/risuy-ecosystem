@@ -41,6 +41,7 @@ import escalation
 import funnel
 import funnel_channels
 import kb
+import memory
 import messaging
 import selling
 import texts
@@ -230,12 +231,22 @@ async def t_text(message: Message, bot: Bot) -> None:
         await bot.send_chat_action(message.chat.id, "typing")
     except Exception:  # noqa: BLE001
         pass
-    # СП-2a: RF-RAG для team-агента — справка из базы знаний ТЕНАНТА (фильтр по отделу = slug
-    # агента). Тумблер kb_enabled на агента; эмбеддер недоступен/база пуста → текст без изменений.
+    # СП-2a RAG (база знаний тенанта, фильтр по отделу=slug) + СП-2-память (сводки прошлых
+    # диалогов С ЭТИМ клиентом, per-lead). Собираем оба блока контекста и подмешиваем ОДНИМ
+    # augment (порядок: знание → память → вопрос). Тумблеры на агента; пусто/сбой → без изменений.
     user_text = message.text
+    contexts: list[str] = []
     if cfg.get("kb_enabled"):
-        kb_context = await kb.retrieve_context(user_text, db.tenant_id(), cfg.get("agent_slug"))
-        user_text = kb.augment(user_text, kb_context)
+        kb_context = await kb.retrieve_context(message.text, db.tenant_id(), cfg.get("agent_slug"))
+        if kb_context:
+            contexts.append(kb_context)
+    if cfg.get("memory_enabled") and cfg.get("team_agent_id"):
+        mem_context = await memory.retrieve(
+            message.text, db.tenant_id(), cfg["team_agent_id"], str(message.from_user.id))
+        if mem_context:
+            contexts.append(mem_context)
+    if contexts:
+        user_text = kb.augment(message.text, "\n\n".join(contexts))
     # Wave 5: контекст диалога тенанта — историей сообщений (tenant-scoped через contextvar
     # tenant_id, поставленный middleware). Текущее входящее исключаем по message_id.
     history = await db.get_ai_history(
@@ -260,6 +271,14 @@ async def t_text(message: Message, bot: Bot) -> None:
         await escalation.escalate(bot, message.from_user.id, esc, target_override=_ov)
     if trig_idxs:
         await triggers.fire_intent(ctx, intent_trigs, trig_idxs)
+    # СП-2-память: каждые N ходов — суммаризировать диалог в долгую память (best-effort, ПОСЛЕ
+    # ответа клиенту — не тормозит). Абсолютный счётчик ходов (не окно истории) → порог раз в N.
+    if cfg.get("memory_enabled") and cfg.get("team_agent_id"):
+        _mem_hist = await db.get_ai_history(message.from_user.id, limit=config.AI_HISTORY_MESSAGES)
+        await memory.maybe_summarize(
+            external_id=message.from_user.id, tenant_id=db.tenant_id(), cfg=cfg,
+            history=_mem_hist, msg_count=await db.count_ai_messages(message.from_user.id),
+            lead_key=str(message.from_user.id))
 
 
 @tenant_router.message(F.document)

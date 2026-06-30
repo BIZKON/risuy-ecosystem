@@ -49,7 +49,7 @@
     <label class="field"><span class="field__label">ID чата менеджеров отдела <span class="field__hint">необязательно</span></span>
       <input class="field__input" type="text" name="escalation_chat_id" inputmode="numeric" value="{{ a.escalation_chat_id|e }}" placeholder="-1002576119452" maxlength="32"></label>
     <label class="field field--check"><input type="checkbox" name="kb_enabled" value="1"{% if a.kb_enabled %} checked{% endif %}><span class="field__label">База знаний компании</span></label>
-    <label class="field field--check"><input type="checkbox" name="memory_enabled" value="1"{% if a.memory_enabled %} checked{% endif %}><span class="field__label">Долгая память (готовится)</span></label>
+    <label class="field field--check"><input type="checkbox" name="memory_enabled" value="1"{% if a.memory_enabled %} checked{% endif %}><span class="field__label">Долгая память</span></label>
     <div class="form-actions">
       <button class="btn btn--primary" type="submit">Сохранить</button>
     </div>

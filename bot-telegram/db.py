@@ -1373,6 +1373,29 @@ async def get_ai_history(
     return out
 
 
+async def count_ai_messages(tg_user_id: int, *, messenger: str = "tg") -> int:
+    """Абсолютное число ходов диалога лида (in + liya/manual) — порог суммаризации памяти
+    (СП-2-память). tenant-scoped (бот=owner, фильтр явный). Сбой → 0 (память не триггерится)."""
+    if messenger == "tg":
+        lead_match = "tg_user_id = $1 and tenant_id = $2"
+    else:
+        col = _user_col(messenger)
+        lead_match = f"lead_id = (select id from leads where {col} = $1 and tenant_id = $2)"
+    try:
+        async with pool.acquire() as c:
+            return int(await c.fetchval(
+                f"""
+                select count(*) from messages
+                where {lead_match}
+                  and kind = 'text' and text is not null and text <> ''
+                  and (direction = 'in' or source in ('liya', 'manual'))
+                """,
+                tg_user_id, tenant_id(),
+            ) or 0)
+    except Exception:  # noqa: BLE001 — память не должна ломать ответ
+        return 0
+
+
 # ── Мультиплекс (Wave 3, ТЗ §5.4): реестр тенантов + секреты + настройки ──────
 async def list_active_tenants() -> list[dict]:
     """Живые тенанты для реестра мультиплекса (бот — owner, RLS обходит)."""
