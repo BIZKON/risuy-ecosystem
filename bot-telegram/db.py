@@ -1482,7 +1482,7 @@ def _pick_team_agent(rows, *, lead_agent_slug, channel_slug):
     return None
 
 
-_TEAM_AGENT_COLS = ("slug, name, role_preset, system_prompt, backend, agent_id, fallback_text, "
+_TEAM_AGENT_COLS = ("id, slug, name, role_preset, system_prompt, backend, agent_id, fallback_text, "
                     "escalation_chat_id, escalation_topic_id, is_default, is_orchestrator, "
                     "memory_enabled, kb_enabled, enabled")
 
@@ -1531,6 +1531,7 @@ async def resolve_team_agent_cfg(tid, *, source=None, lead_agent_slug=None) -> d
         "escalation_topic_id": picked["escalation_topic_id"],
         "is_orchestrator": bool(picked["is_orchestrator"]),
         "memory_enabled": bool(picked["memory_enabled"]),
+        "team_agent_id": str(picked["id"]),  # PK team_agents — FK agent_memory.agent_id (СП-2-память)
     }
 
 
@@ -1842,6 +1843,48 @@ async def kb_search(
              limit $5
             """,
             vec, tenant_id, per, max_distance, top_k,
+        )
+    return [r["content"] for r in rows]
+
+
+# ── СП-2-память: долгая память team-агента (agent_memory, pgvector). Бот=owner → tenant/agent явно ──
+async def memory_insert(tenant_id, agent_id, content: str, embedding, *,
+                        kind: str = "summary", metadata: dict | None = None) -> None:
+    """Записать сводку в долгую память агента. embedding — list[float] vector(768) (kb.embed_passage).
+    metadata.lead — ключ лида (per-lead изоляция). Пустой контент/нет пула → no-op."""
+    import json as _json
+    if pool is None or not (content or "").strip():
+        return
+    vec = "[" + ",".join(f"{x:.6f}" for x in embedding) + "]" if embedding else None
+    async with pool.acquire() as c:
+        await c.execute(
+            "insert into agent_memory (tenant_id, agent_id, kind, content, embedding, metadata) "
+            "values ($1,$2,$3,$4,$5::vector,$6::jsonb)",
+            tenant_id, agent_id, kind, content.strip(), vec, _json.dumps(metadata or {}),
+        )
+
+
+async def memory_search(embedding, tenant_id, agent_id, lead_key: str | None = None, *,
+                        top_k: int = 3, max_distance: float = 0.55) -> list[str]:
+    """Top-k сводок памяти агента по косинусной близости. tenant_id+agent_id фильтруем ЯВНО
+    (бот=owner). v1 per-lead: только сводки ЭТОГО лида (metadata->>'lead'=$4) → нет
+    кросс-клиентской утечки контекста. Сбой/нет таблицы → исключение (ловит memory.retrieve)."""
+    if not embedding or pool is None:
+        return []
+    vec = "[" + ",".join(f"{x:.6f}" for x in embedding) + "]"
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select content
+              from agent_memory
+             where embedding is not null
+               and tenant_id = $2 and agent_id = $3
+               and ($4::text is null or metadata->>'lead' = $4)
+               and (embedding <=> $1::vector) <= $5
+             order by embedding <=> $1::vector
+             limit $6
+            """,
+            vec, tenant_id, agent_id, lead_key, max_distance, top_k,
         )
     return [r["content"] for r in rows]
 

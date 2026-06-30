@@ -22,6 +22,7 @@ import db
 logger = logging.getLogger(__name__)
 
 _QUERY_PREFIX = "query: "          # обязательный префикс e5 для запроса
+_PASSAGE_PREFIX = "passage: "      # обязательный префикс e5 для ХРАНИМОГО документа/сводки (СП-2-память)
 _EMBED_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
@@ -50,6 +51,33 @@ async def embed_query(text: str) -> list[float] | None:
     if isinstance(data, list) and data and isinstance(data[0], list):
         return data[0]
     logger.warning("TEI embed неожиданный ответ: %s", str(data)[:200])
+    return None
+
+
+async def embed_passage(text: str) -> list[float] | None:
+    """Эмбеддинг ХРАНИМОГО текста (сводка памяти, СП-2-память) через TEI с passage-префиксом e5.
+    None — если эмбеддер не настроен/недоступен (тогда запись памяти пропускаем)."""
+    base = (config.EMBEDDER_URL or "").strip().rstrip("/")
+    if not base:
+        return None
+    url = f"{base}/embed"
+    headers = {"content-type": "application/json"}
+    if config.EMBEDDER_TOKEN:
+        headers["authorization"] = f"Bearer {config.EMBEDDER_TOKEN}"
+    payload = {"inputs": [_PASSAGE_PREFIX + text], "normalize": True}
+    try:
+        async with aiohttp.ClientSession(timeout=_EMBED_TIMEOUT) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.warning("TEI embed(passage) HTTP %s: %s", resp.status, (await resp.text())[:200])
+                    return None
+                data = await resp.json()
+    except Exception as e:  # noqa: BLE001 — таймаут/сеть/не-JSON → память молча не пишется
+        logger.warning("TEI embed(passage) недоступен: %s", e)
+        return None
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        return data[0]
+    logger.warning("TEI embed(passage) неожиданный ответ: %s", str(data)[:200])
     return None
 
 
