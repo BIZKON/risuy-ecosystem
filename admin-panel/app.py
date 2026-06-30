@@ -4833,7 +4833,7 @@ async def my_agent_escalation(
 # свободный ввод текста согласия не предусмотрен. Бот читает get_funnel_config в мультиплексе.
 # =========================================================================== #
 def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: bool = False,
-                        legal_urls: dict | None = None):
+                        legal_urls: dict | None = None, help_dismissed: bool = False):
     # Из тех же реквизитов, что и согласие, собираем предпросмотр Политики — тенант видит оба
     # документа прямо в панели, ничего «скрытого». Гейт един: оператор+ИНН+email заполнены.
     preview = ""
@@ -4871,6 +4871,7 @@ def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: boo
             "errors": list(errors),
             "saved": saved,
             "support_url": _safe_support_url(config.SUPPORT_URL),
+            "help_dismissed": help_dismissed,
         },
     )
 
@@ -4885,7 +4886,8 @@ async def lead_magnet_page(
     values = (await db.get_funnel_config_panel(tid) if tid
               else {k: "" for k in leadmagnet.FUNNEL_KEYS})
     legal_urls = await db.get_tenant_legal_urls(tid)
-    return _render_lead_magnet(request, session, values=values, saved=bool(saved), legal_urls=legal_urls)
+    return _render_lead_magnet(request, session, values=values, saved=bool(saved), legal_urls=legal_urls,
+                              help_dismissed=await _help_dismissed(session, "lead_magnet"))
 
 
 @app.post("/lead-magnet")

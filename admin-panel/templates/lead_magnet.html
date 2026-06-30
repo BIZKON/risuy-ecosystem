@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import flash %}
+{% from "_macros.html" import flash, help_card %}
 
 {% block title %}Лид-магнит{% endblock %}
 {% block body_class %}page-my-agent{% endblock %}
@@ -9,6 +9,8 @@
   <h1 class="page-head__title">Конструктор выдачи лид-магнита</h1>
   <p class="page-head__hint">Настройте, как ваш бот встречает клиента, берёт согласие на обработку данных и выдаёт лид-магнит. Применяется сразу, без перезапуска.</p>
 </div>
+
+{% if not help_dismissed %}{{ help_card("Что такое воронка лид-магнита", "Это то, что бот присылает человеку после команды /start: приветствие, согласие на обработку данных (обязательно по закону РФ) и выдача вашего материала.", dismiss_key="help_dismissed__lead_magnet", csrf_token=csrf_token, back="/lead-magnet") }}{% endif %}
 
 {% if saved %}{{ flash('Настройки воронки сохранены.', 'ok') }}{% endif %}
 {% for e in errors %}{{ flash(e, 'error') }}{% endfor %}
