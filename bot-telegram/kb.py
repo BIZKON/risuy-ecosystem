@@ -81,11 +81,14 @@ async def embed_passage(text: str) -> list[float] | None:
     return None
 
 
-async def retrieve_context(text: str, tenant_id, persona: str | None = None) -> str:
+async def retrieve_context(text: str, tenant_id, persona: str | None = None,
+                           *, vec: list[float] | None = None) -> str:
     """Готовый блок справки для подмешивания в запрос агента (или "" — если RAG не дал
     результата). tenant_id — тенант вызывающего (School-бот = lesov-school; team-агент = его
-    тенант). Фильтр по отделу: общая справка тенанта (role_tag пуст) + чанки отдела (= slug)."""
-    vec = await embed_query(text)
+    тенант). Фильтр по отделу: общая справка тенанта (role_tag пуст) + чанки отдела (= slug).
+    vec — предвычисленный эмбеддинг запроса (переиспользование на пути ответа); None → считаем сами."""
+    if vec is None:
+        vec = await embed_query(text)
     if not vec:
         return ""
     try:

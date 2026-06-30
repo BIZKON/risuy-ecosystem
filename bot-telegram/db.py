@@ -1912,6 +1912,30 @@ async def memory_search(embedding, tenant_id, agent_id, lead_key: str | None = N
     return [r["content"] for r in rows]
 
 
+async def memory_last_up_to(tenant_id, agent_id, lead_key: str | None) -> int:
+    """Последний msg_count, на котором писалась сводка этого лида (metadata.up_to) — база для
+    ДЕЛЬТА-порога суммаризации (устойчив к дрейфу чётности счётчика). 0, если сводок нет/сбой."""
+    if pool is None:
+        return 0
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval(
+                """
+                select (metadata->>'up_to')::int
+                  from agent_memory
+                 where tenant_id = $1 and agent_id = $2
+                   and ($3::text is null or metadata->>'lead' = $3)
+                   and metadata ? 'up_to'
+                 order by created_at desc
+                 limit 1
+                """,
+                tenant_id, agent_id, lead_key,
+            )
+        return int(v or 0)
+    except Exception:  # noqa: BLE001 — порог не должен ломать ответ
+        return 0
+
+
 # ── app_settings: НЕ-секретный снимок конфигурации бота (бот ПИШЕТ owner-ролью) ──
 # Ключи статуса рантайма (бот пишет, панель ЧИТАЕТ — разделы «Интеграции»/«Каналы»).
 # ДОЛЖНЫ совпадать с admin-panel/config.py::RUNTIME_STATUS_*_KEY. У панели и бота РАЗНОЕ

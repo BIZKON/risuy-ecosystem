@@ -236,15 +236,20 @@ async def t_text(message: Message, bot: Bot) -> None:
     # augment (порядок: знание → память → вопрос). Тумблеры на агента; пусто/сбой → без изменений.
     user_text = message.text
     contexts: list[str] = []
-    if cfg.get("kb_enabled"):
-        kb_context = await kb.retrieve_context(message.text, db.tenant_id(), cfg.get("agent_slug"))
-        if kb_context:
-            contexts.append(kb_context)
-    if cfg.get("memory_enabled") and cfg.get("team_agent_id"):
-        mem_context = await memory.retrieve(
-            message.text, db.tenant_id(), cfg["team_agent_id"], str(message.from_user.id))
-        if mem_context:
-            contexts.append(mem_context)
+    # Один эмбеддинг запроса на ОБА ретрива (KB + память) — не гоняем TEI дважды на пути ответа.
+    _need_rag = cfg.get("kb_enabled") or (cfg.get("memory_enabled") and cfg.get("team_agent_id"))
+    qvec = await kb.embed_query(message.text) if _need_rag else None
+    if qvec:
+        if cfg.get("kb_enabled"):
+            kb_context = await kb.retrieve_context(
+                message.text, db.tenant_id(), cfg.get("agent_slug"), vec=qvec)
+            if kb_context:
+                contexts.append(kb_context)
+        if cfg.get("memory_enabled") and cfg.get("team_agent_id"):
+            mem_context = await memory.retrieve(
+                message.text, db.tenant_id(), cfg["team_agent_id"], str(message.from_user.id), vec=qvec)
+            if mem_context:
+                contexts.append(mem_context)
     if contexts:
         user_text = kb.augment(message.text, "\n\n".join(contexts))
     # Wave 5: контекст диалога тенанта — историей сообщений (tenant-scoped через contextvar

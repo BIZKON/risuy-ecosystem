@@ -11,11 +11,14 @@ import kb
 logger = logging.getLogger(__name__)
 
 
-async def retrieve(text: str, tenant_id, agent_id, lead_key: str | None) -> str:
-    """Блок «контекст прошлых диалогов с этим клиентом» для подмешивания (или "")."""
+async def retrieve(text: str, tenant_id, agent_id, lead_key: str | None,
+                   *, vec: list[float] | None = None) -> str:
+    """Блок «контекст прошлых диалогов с этим клиентом» для подмешивания (или "").
+    vec — предвычисленный эмбеддинг запроса (переиспользование на пути ответа); None → считаем сами."""
     if not agent_id:
         return ""
-    vec = await kb.embed_query(text)
+    if vec is None:
+        vec = await kb.embed_query(text)
     if not vec:
         return ""
     try:
@@ -50,7 +53,13 @@ async def maybe_summarize(*, external_id, tenant_id, cfg: dict, history: list[di
     import ai  # ленивый импорт (ai тянет многое)
     agent_id = cfg.get("team_agent_id")
     every = config.MEMORY_SUMMARIZE_EVERY
-    if not agent_id or every <= 0 or msg_count <= 0 or msg_count % every != 0:
+    if not agent_id or every <= 0 or msg_count <= 0:
+        return
+    # Дельта-порог (устойчив к дрейфу чётности счётчика): суммируем, когда накопилось ≥ every
+    # новых ходов с последней сводки (metadata.up_to). Точный %-modulo мог бы НАВСЕГДА промахнуться
+    # при нечётном сбое (operator-manual без парного in / не залогированный out).
+    last_up_to = await db.memory_last_up_to(tenant_id, agent_id, lead_key)
+    if msg_count - last_up_to < every:
         return
     dialog = _dialog_text(history)
     if not dialog:
