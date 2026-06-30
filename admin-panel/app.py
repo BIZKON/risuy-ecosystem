@@ -3843,6 +3843,10 @@ async def knowledge_upload(
     """Файл (txt/md/csv/pdf) → текст → чанки → эмбеддинг (TEI) → pgvector. role '' = общая
     справка (все роли). Эмбеддер должен быть задан в env панели (EMBEDDER_URL)."""
     await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        # Клиент не выбран (платформа без активного тенанта) → наполнять нечего; страница
+        # покажет «Клиент не выбран». Без гарда вставка в tenant_id NOT NULL упала бы 500.
+        return RedirectResponse(url="/knowledge", status_code=303)
     if not config.EMBEDDER_ENABLED:
         return RedirectResponse(url="/knowledge?err=kb_off", status_code=303)
     if file is None or not (file.filename or ""):

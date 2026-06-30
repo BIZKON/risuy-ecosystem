@@ -1830,7 +1830,9 @@ async def set_kb_enabled(enabled: bool, *, actor: str, ip: str | None, user_agen
 
 
 async def kb_list_documents() -> list[asyncpg.Record]:
-    """Документы базы знаний + число чанков (для списка с удалением)."""
+    """Документы базы знаний активного тенанта + число чанков (для списка с удалением).
+    СП-2b: явный фильтр tenant_id (app.tenant_id из pool-хука) как in-query backstop к RLS —
+    при случайном снятии RLS отдаёт 0 строк, а не базу всех тенантов."""
     async with pool.acquire() as c:
         return await c.fetch(
             """
@@ -1839,6 +1841,7 @@ async def kb_list_documents() -> list[asyncpg.Record]:
                    count(ch.id) as chunks
               from kb_documents d
               left join kb_chunks ch on ch.document_id = d.id
+             where d.tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
              group by d.id
              order by d.created_at desc
             """
@@ -1882,11 +1885,15 @@ async def kb_insert_document(
 
 
 async def kb_delete_document(doc_id: str, *, actor: str, ip: str | None, user_agent: str | None) -> bool:
-    """Удалить документ (каскад чистит чанки) + аудит. Возвращает True, если что-то удалено."""
+    """Удалить документ активного тенанта (каскад чистит чанки) + аудит. Возвращает True, если
+    что-то удалено. СП-2b: явный фильтр tenant_id (app.tenant_id) как in-query backstop к RLS —
+    чужой документ по id не удалить даже при случайном снятии RLS."""
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
-                "delete from kb_documents where id = $1::uuid returning title", doc_id
+                "delete from kb_documents where id = $1::uuid "
+                "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid "
+                "returning title", doc_id
             )
             if row:
                 await _insert_audit(
