@@ -39,16 +39,16 @@ async def main():
             "insert into tenants(slug,name,status) values('onb-smoke','ONB','active') returning id")
     try:
         ok1 = await db.set_onboarding_flag(tid, "welcome_seen", "1", actor="smoke", ip=None, user_agent=None)
-        ok2 = await db.set_onboarding_flag(tid, "onboarding_niche", "салон", actor="smoke", ip=None, user_agent=None)
         ok3 = await db.set_onboarding_flag(tid, "help_dismissed__dialogs", "1", actor="smoke", ip=None, user_agent=None)
         bad = await db.set_onboarding_flag(tid, "funnel_enabled", "1", actor="smoke", ip=None, user_agent=None)
+        niche = await db.set_onboarding_flag(tid, "onboarding_niche", "салон", actor="smoke", ip=None, user_agent=None)
         flags = await db.get_onboarding_flags(tid)
-        check("валидные флаги записаны (True)", ok1 and ok2 and ok3)
-        check("произвольный ключ ОТКЛОНЁН (allowlist)", bad is False)
+        check("валидные флаги записаны (True)", ok1 and ok3)
+        check("произвольный app-ключ ОТКЛОНЁН (allowlist)", bad is False)
+        check("неиспользуемый onboarding_niche ОТКЛОНЁН", niche is False)
         check("round-trip welcome_seen=1", flags.get("welcome_seen") == "1")
-        check("round-trip niche=салон", flags.get("onboarding_niche") == "салон")
         check("round-trip help_dismissed__dialogs=1", flags.get("help_dismissed__dialogs") == "1")
-        check("отклонённый ключ НЕ записан", "funnel_enabled" not in flags)
+        check("отклонённые ключи НЕ записаны", "funnel_enabled" not in flags and "onboarding_niche" not in flags)
         check("get для None тенанта → {}", await db.get_onboarding_flags(None) == {})
     finally:
         async with db.pool.acquire() as c:

@@ -206,8 +206,9 @@ async def require_session(request: Request) -> auth.Session:
 
 
 def _safe_next(path: str) -> str:
-    """Только локальный путь (без схемы/хоста) — иначе open-redirect через ?next=."""
-    if not path or not path.startswith("/") or path.startswith("//"):
+    """Только локальный путь (без схемы/хоста/бэкслеша) — иначе open-redirect через ?next=
+    (бэкслеш некоторые браузеры нормализуют в '/', превращая '/\\evil' в protocol-relative)."""
+    if not path or not path.startswith("/") or path.startswith("//") or "\\" in path:
         return "/"
     return path
 
@@ -694,12 +695,6 @@ async def dashboard(request: Request, session: auth.Session = Depends(require_se
 
 
 # ── Онбординг: POST-эндпоинты (CSRF + PRG); флаги в tenant_settings ──
-def _safe_back(back: str) -> str:
-    """Локальный путь возврата (анти open-redirect): только same-origin путь вида '/...'."""
-    back = (back or "").strip()
-    return back if back.startswith("/") and not back.startswith("//") else "/"
-
-
 @app.post("/onboarding/welcome")
 async def onboarding_welcome(
     request: Request,
@@ -744,7 +739,7 @@ async def onboarding_dismiss_help(
     await db.set_onboarding_flag(
         session.active_tenant_id, key.strip(), "1",
         actor=session.actor, ip=_ip(request), user_agent=_ua(request))
-    return RedirectResponse(url=_safe_back(back), status_code=303)
+    return RedirectResponse(url=_safe_next((back or "").strip()), status_code=303)
 
 
 async def _platform_ctx(is_platform: bool) -> dict | None:

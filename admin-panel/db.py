@@ -3405,7 +3405,7 @@ async def set_funnel_config(
 
 
 # ── Онбординг тенанта: флаги в tenant_settings KV (welcome/чеклист/dismiss) — БЕЗ нового DDL ──
-_ONBOARDING_KEYS = ("welcome_seen", "onboarding_niche", "onboarding_dismissed")
+_ONBOARDING_KEYS = ("welcome_seen", "onboarding_dismissed")
 
 
 def _valid_onboarding_key(key: str) -> bool:
