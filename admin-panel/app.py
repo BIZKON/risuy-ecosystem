@@ -5466,6 +5466,8 @@ async def tenants_page(
     request: Request,
     session: auth.Session = Depends(require_session),
     switched: int = 0,
+    created: int = 0,
+    err: str | None = None,
 ):
     rows = await db.list_tenants_for(session.actor, session.role)
     return templates.TemplateResponse(
@@ -5477,6 +5479,8 @@ async def tenants_page(
             "active": "tenants",
             "tenants": rows,
             "switched_flash": bool(switched),
+            "created_flash": bool(created),
+            "create_err": {"noname": "Введите название клиента."}.get(err or ""),
         },
     )
 
@@ -5499,6 +5503,27 @@ async def tenants_switch(
         ip=_ip(request), user_agent=_ua(request), detail={"tenant_id": tenant_id},
     )
     return RedirectResponse(url="/tenants?switched=1", status_code=303)
+
+
+@app.post("/tenants/create")
+async def tenants_create(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    name: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Создать нового клиента (пустой изолированный тенант-кабинет) — ТОЛЬКО платформа. Сразу делаем
+    его активным, чтобы владелец попал в свежий кабинет и увидел онбординг с нуля. БЕЗ admin_user/
+    membership (env-админ владельцем тенанта быть не может — _require_admin по личности, не по role)."""
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    name = name.strip()
+    if not name:
+        return RedirectResponse(url="/tenants?err=noname", status_code=303)
+    _slug, tid = await db.create_tenant_admin(
+        name, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    await db.set_session_tenant(session.sid, tid)  # авто-переключение в созданный кабинет
+    return RedirectResponse(url="/tenants?created=1", status_code=303)
 
 
 # ---- /usage — «Расход»: лента списаний ИИ из кошелька (Wave 3, ТЗ §6) ------- #

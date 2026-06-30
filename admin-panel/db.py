@@ -2371,6 +2371,34 @@ async def create_client_account(
     return username, str(tenant_id)
 
 
+async def create_tenant_admin(
+    name: str, *, actor: str, ip: str | None = None, user_agent: str | None = None,
+) -> tuple[str, str]:
+    """Создать ПУСТОЙ тенант-кабинет ПЛАТФОРМОЙ (админ-онбординг клиента): только строка tenants
+    (status='active', slug=client-<token>) + аудит. БЕЗ admin_user/membership — env-админ владельцем
+    тенанта быть не может (он вне admin_users; membership ему = захват платформы/межтенантная утечка,
+    см. create_client_account). Реальный владелец-оператор приглашается отдельным потоком позже;
+    платформа оперирует тенантом как надзиратель (list_tenants_for отдаёт env-админу все живые).
+    status='active' (НЕ 'provisioning' как у self-serve create_client_account): иначе сработал бы
+    provision-banner «Выберите тариф и оплатите» (base.html, по статусу, НЕ по роли) — неуместный для
+    кабинета, заводимого платформой руками. Реальное состояние настройки показывает онбординг-чеклист.
+    Возврат (slug, tenant_id)."""
+    token = secrets.token_hex(10)            # уникальный ^[a-z0-9-]+$ slug, как у create_client_account
+    slug = f"client-{token}"
+    safe_name = (name or "").strip()[:120] or "Новый клиент"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            tenant_id = await c.fetchval(
+                "insert into tenants (slug, name, status) values ($1, $2, 'active') returning id",
+                slug, safe_name,
+            )
+            await _insert_audit(
+                c, actor=actor, action="tenant_create_admin", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "slug": slug, "name": safe_name},
+            )
+    return slug, str(tenant_id)
+
+
 async def set_admin_user_role_with_audit(
     username: str, role: str, *, actor: str, ip: str | None, user_agent: str | None,
 ) -> bool:

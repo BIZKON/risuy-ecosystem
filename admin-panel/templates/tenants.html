@@ -11,6 +11,8 @@
 </div>
 
 {% if switched_flash %}{{ flash('Активный клиент переключён.', 'ok') }}{% endif %}
+{% if created_flash %}{{ flash('Клиент создан и сделан активным — разделы панели теперь показывают его данные.', 'ok') }}{% endif %}
+{% if create_err %}{{ flash(create_err, 'error') }}{% endif %}
 
 {% if tenants %}
 <div class="table-wrap">
@@ -40,9 +42,23 @@
 </div>
 {% else %}
 <div class="empty">
-  <p class="empty__title">Доступных клиентов нет</p>
-  <p class="empty__text">Попросите администратора платформы выдать доступ (раздел «Команда» у клиента).</p>
+  <p class="empty__title">{% if session.is_platform %}Клиентов пока нет{% else %}Доступных клиентов нет{% endif %}</p>
+  <p class="empty__text">{% if session.is_platform %}Создайте первый кабинет формой ниже.{% else %}Попросите администратора платформы выдать доступ (раздел «Команда» у клиента).{% endif %}</p>
 </div>
 {% endif %}
-<p class="hint hint--block">Создание нового клиента (онбординг) появится на следующем этапе платформы — Wave 2/3 дорожной карты.</p>
+{% if session.is_platform %}
+<section class="section" aria-label="Создать клиента">
+  <h2 class="section__title section__title--lg">Создать клиента</h2>
+  <p class="hint hint--block">Заведите новый изолированный кабинет (для теста или будущего клиента). После создания он станет активным и сразу выбранным — <b>вы управляете им как платформа</b>: онбординг, ИИ-команда, базы знаний, лид-магнит, каналы. Подключение бота и наполнение — внутри кабинета. <i>Вход самого клиента (приглашение владельца-оператора) — отдельный шаг, появится позже.</i></p>
+  <form method="post" action="/tenants/create" class="inline-form" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Название клиента</span>
+      <input class="field__input" type="text" name="name" maxlength="120" required
+             placeholder="Напр.: Кабинет владельца / ООО Ромашка">
+    </label>
+    <button class="btn btn--dark" type="submit">Создать</button>
+  </form>
+</section>
+{% endif %}
 {% endblock %}
