@@ -372,6 +372,8 @@ SMTP_PORT = _opt_int("SMTP_PORT", 587)
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", "")
+# Имя отправителя (клиент видит его крупно; латинский адрес — второстепенно).
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "ИИ-Агент Про")
 SMTP_STARTTLS = _opt_bool("SMTP_STARTTLS", True)
 RESET_TOKEN_TTL_MIN = _opt_int("RESET_TOKEN_TTL_MIN", 30)
 RESET_WINDOW_MIN = _opt_int("RESET_WINDOW_MIN", 15)

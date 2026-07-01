@@ -5,6 +5,7 @@ dry-run: логируем ссылку вместо отправки (локал
 Письмо минимальное, на русском, без маркетинга (спам-safe / 152-ФЗ)."""
 import logging
 from email.message import EmailMessage
+from email.utils import formataddr
 
 import aiosmtplib
 
@@ -37,7 +38,8 @@ async def send_password_reset(to_email: str, reset_url: str, *, ttl_min: int) ->
         return
 
     msg = EmailMessage()
-    msg["From"] = config.SMTP_FROM
+    # Русское имя отправителя (клиент видит его крупно), латинский адрес — второстепенно.
+    msg["From"] = formataddr((config.SMTP_FROM_NAME, config.SMTP_FROM))
     msg["To"] = to_email
     msg["Subject"] = "Восстановление доступа"
     msg.set_content(text)
