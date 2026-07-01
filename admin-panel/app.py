@@ -41,6 +41,7 @@ from starlette.responses import StreamingResponse
 
 import auth
 import config
+import dadata
 import db
 import kb
 import knowledge_roles
@@ -4056,6 +4057,43 @@ def _present_agent(a: dict) -> dict:
         "web_search": bool(a.get("is_web_search_enabled")),
         "used_tokens": a.get("used_tokens"),
     }
+
+
+def _companies_err_text(err: str | None) -> str | None:
+    return {
+        "bad_inn": "Неверный ИНН/ОГРН — введите 10, 12, 13 или 15 цифр.",
+        "not_found": "Компания по такому ИНН не найдена.",
+        "provider_off": "Источник ЕГРЮЛ не подключён.",
+        "quota": "Дневной лимит запросов к источнику исчерпан. Попробуйте завтра.",
+    }.get(err or "")
+
+
+@app.get("/companies", response_class=HTMLResponse)
+async def companies_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    saved: int = 0,
+    err: str | None = None,
+):
+    tid = session.active_tenant_id
+    prospects = await db.prospect_list() if tid else []
+    return templates.TemplateResponse(
+        request, "companies.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "companies",
+            "has_tenant": bool(tid),
+            "provider_on": dadata.is_configured(),
+            "prospects": prospects,
+            "suggestions": [],
+            "search_q": "",
+            "err": _companies_err_text(err),
+            "saved": saved,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+            "help_dismissed": await _help_dismissed(session, "companies"),
+        },
+    )
 
 
 def _knowledge_err_text(err: str | None) -> str | None:

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% from "_macros.html" import help_card %}
+{% block content %}
+<h1 class="page-title">База компаний</h1>
+
+{% if not has_tenant %}
+  <p class="empty-state">Выберите клиента в разделе «Клиенты» — база компаний ведётся в кабинете клиента.</p>
+{% else %}
+
+  {% if not help_dismissed %}
+    {{ help_card("Зачем «База компаний»",
+        "Обогащайте карточки согласившихся лидов данными из ЕГРЮЛ по ИНН: форма, ОКВЭД, адрес, статус. Это аналитика и обогащение — не список для обзвона. Первый контакт с бизнесом — только через воронку согласия.",
+        dismiss_key="help_dismissed__companies", csrf_token=csrf_token, back="/companies") }}
+  {% endif %}
+
+  {% if not provider_on %}
+    <p class="notice notice--muted">Источник ЕГРЮЛ (DaData) не подключён. Задайте DADATA_API_KEY / DADATA_SECRET_KEY.</p>
+  {% else %}
+    {% if err %}<p class="notice notice--err">{{ err }}</p>{% endif %}
+    {% if saved %}<p class="notice notice--ok">Карточка сохранена.</p>{% endif %}
+
+    <form method="post" action="/companies/lookup" class="row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="back" value="/companies">
+      <input class="mono" type="text" name="inn" inputmode="numeric" maxlength="15"
+             placeholder="ИНН или ОГРН" required>
+      <button type="submit">Найти по ИНН</button>
+    </form>
+
+    <form method="post" action="/companies/search" class="row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="text" name="q" maxlength="300" value="{{ search_q }}" placeholder="Название компании">
+      <button type="submit">Поиск по названию</button>
+    </form>
+
+    {% if suggestions %}
+      <ul class="suggest-list">
+        {% for s in suggestions %}
+          <li>
+            <span>{{ s.name }} <span class="mono muted">{{ s.inn }}</span>{% if s.city %}, {{ s.city }}{% endif %}</span>
+            <form method="post" action="/companies/lookup" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="inn" value="{{ s.inn }}">
+              <input type="hidden" name="back" value="/companies">
+              <button type="submit">Подтянуть</button>
+            </form>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endif %}
+
+  <h2>Сохранённые компании</h2>
+  {% if prospects %}
+    <table class="tbl">
+      <thead><tr><th>Компания</th><th>ИНН</th><th>ОКВЭД</th><th>Город</th><th>Статус</th><th>Лид</th><th></th></tr></thead>
+      <tbody>
+      {% for p in prospects %}
+        <tr>
+          <td>{{ p.name_short or "—" }}{% if p.subject_type == 'individual' %} <span class="pill pill--muted">ИП</span>{% endif %}</td>
+          <td class="mono">{{ p.inn }}</td>
+          <td>{{ p.okved_name or "—" }}</td>
+          <td>{{ p.city or "—" }}</td>
+          <td>{{ p.status or "—" }}</td>
+          <td>{{ "да" if p.lead_id else "—" }}</td>
+          <td>
+            <form method="post" action="/companies/{{ p.id }}/archive" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn-link">В архив</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">Пока нет сохранённых компаний. Найдите по ИНН выше.</p>
+  {% endif %}
+
+  {% if support_url %}<p class="muted"><a href="{{ support_url }}">Нужна помощь?</a></p>{% endif %}
+{% endif %}
+{% endblock %}

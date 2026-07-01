@@ -1,0 +1,20 @@
+{# Карточка компании ЕГРЮЛ. p — строка prospects или ProspectCard. БЕЗ телефонов/email. #}
+<div class="company-card">
+  <div class="company-card__head">
+    <b>{{ p.name_short or p.name_full or "—" }}</b>
+    {% if p.status %}<span class="pill pill--{{ 'ok' if p.status == 'ACTIVE' else 'muted' }}">{{ p.status }}</span>{% endif %}
+  </div>
+  <dl class="company-card__grid">
+    <dt>ИНН</dt><dd class="mono">{{ p.inn }}</dd>
+    {% if p.kpp %}<dt>КПП</dt><dd class="mono">{{ p.kpp }}</dd>{% endif %}
+    {% if p.ogrn %}<dt>ОГРН</dt><dd class="mono">{{ p.ogrn }}</dd>{% endif %}
+    {% if p.opf %}<dt>ОПФ</dt><dd>{{ p.opf }}</dd>{% endif %}
+    {% if p.okved %}<dt>ОКВЭД</dt><dd>{{ p.okved }}{% if p.okved_name %} — {{ p.okved_name }}{% endif %}</dd>{% endif %}
+    {% if p.address %}<dt>Адрес</dt><dd>{{ p.address }}</dd>{% endif %}
+    {% if p.registration_date %}<dt>Регистрация</dt><dd>{{ p.registration_date }}</dd>{% endif %}
+    {% if p.subject_type == 'legal' and p.management and p.management.name %}
+      <dt>Руководитель</dt><dd>{{ p.management.name }}{% if p.management.post %}, {{ p.management.post }}{% endif %}</dd>
+    {% endif %}
+    {% if p.subject_type == 'individual' %}<dt>Форма</dt><dd>ИП (персональные данные — режим 152-ФЗ)</dd>{% endif %}
+  </dl>
+</div>
