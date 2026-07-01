@@ -4525,3 +4525,114 @@ async def detach_payment_method(
                     detail={"tenant_id": str(tenant_id), "subscriptions": n},
                 )
             return n > 0
+
+
+# ── prospects: карточки компаний ЕГРЮЛ (обогащение по ИНН, per-lookup) ───────
+def _jsonb(v):
+    """Python → jsonb-строка (или None для SQL NULL)."""
+    return json.dumps(v, ensure_ascii=False, default=_json_default) if v else None
+
+
+async def prospect_upsert(*, card, tenant_id, actor, ip, user_agent, lead_id=None) -> str:
+    """Upsert карточки по (tenant_id, inn). card — dadata.ProspectCard (контакты уже вырезаны).
+    Повторный lookup обновляет реквизиты; ранее привязанный lead_id сохраняется. Возвращает id (str)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            pid = await c.fetchval(
+                """
+                insert into prospects (tenant_id, inn, kpp, ogrn, subject_type, name_short, name_full,
+                    opf, okved, okved_name, okveds, address, region, city, status,
+                    registration_date, liquidation_date, management, source, raw, fetched_at,
+                    lead_id, created_by)
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16::date,$17::date,
+                    $18::jsonb,'dadata',$19::jsonb, now(), $20, $21)
+                on conflict (tenant_id, inn) do update set
+                    kpp=excluded.kpp, ogrn=excluded.ogrn, subject_type=excluded.subject_type,
+                    name_short=excluded.name_short, name_full=excluded.name_full, opf=excluded.opf,
+                    okved=excluded.okved, okved_name=excluded.okved_name, okveds=excluded.okveds,
+                    address=excluded.address, region=excluded.region, city=excluded.city,
+                    status=excluded.status, registration_date=excluded.registration_date,
+                    liquidation_date=excluded.liquidation_date, management=excluded.management,
+                    raw=excluded.raw, fetched_at=now(), updated_at=now(),
+                    lead_id=coalesce(prospects.lead_id, excluded.lead_id)
+                returning id
+                """,
+                tenant_id, card.inn, card.kpp, card.ogrn, card.subject_type, card.name_short,
+                card.name_full, card.opf, card.okved, card.okved_name, _jsonb(card.okveds),
+                card.address, card.region, card.city, card.status,
+                card.registration_date, card.liquidation_date, _jsonb(card.management),
+                _jsonb(card.raw), lead_id, actor,
+            )
+            await _insert_audit(c, actor=actor, action="prospect_upsert", lead_id=lead_id,
+                                ip=ip, user_agent=user_agent,
+                                detail={"inn": card.inn, "subject_type": card.subject_type})
+    return str(pid)
+
+
+async def prospect_list(include_archived: bool = False) -> list[asyncpg.Record]:
+    async with pool.acquire() as c:
+        return await c.fetch(
+            """
+            select id, inn, subject_type, name_short, okved_name, city, status, lead_id, archived,
+                   to_char(fetched_at,'YYYY-MM-DD HH24:MI') as fetched
+              from prospects
+             where tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
+               and ($1 or not archived)
+             order by created_at desc
+            """, include_archived)
+
+
+async def prospect_get(pid) -> asyncpg.Record | None:
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select * from prospects where id = $1 "
+            "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid", pid)
+
+
+async def prospect_for_lead(lead_id) -> asyncpg.Record | None:
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select * from prospects where lead_id = $1 "
+            "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid "
+            "and not archived order by updated_at desc limit 1", lead_id)
+
+
+async def prospect_link_lead(pid, lead_id, *, actor, ip, user_agent) -> bool:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "update prospects set lead_id = $2, updated_at = now() where id = $1 "
+                "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid returning id",
+                pid, lead_id)
+            if row is None:
+                return False
+            await _insert_audit(c, actor=actor, action="prospect_link_lead", lead_id=lead_id,
+                                ip=ip, user_agent=user_agent, detail={"prospect_id": str(pid)})
+            return True
+
+
+async def prospect_archive(pid, *, actor, ip, user_agent) -> bool:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "update prospects set archived = true, updated_at = now() where id = $1 "
+                "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid returning id", pid)
+            if row is None:
+                return False
+            await _insert_audit(c, actor=actor, action="prospect_archive",
+                                ip=ip, user_agent=user_agent, detail={"prospect_id": str(pid)})
+            return True
+
+
+async def dadata_quota_take(limit: int) -> bool:
+    """Атомарный инкремент глобального суточного счётчика запросов DaData (app_settings, value text).
+    True — в пределах лимита; False — исчерпан. Ключ dadata_quota__<YYYY-MM-DD> (UTC)."""
+    from datetime import datetime, timezone
+    key = "dadata_quota__" + datetime.now(timezone.utc).date().isoformat()
+    async with pool.acquire() as c:
+        cur = await c.fetchval(
+            "insert into app_settings (key, value) values ($1, '1') "
+            "on conflict (key) do update set value = (app_settings.value::int + 1)::text, "
+            "                                updated_at = now() "
+            "returning value::int", key)
+        return cur <= limit
