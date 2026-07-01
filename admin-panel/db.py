@@ -1756,8 +1756,10 @@ async def get_ai_settings() -> dict:
         "system_prompt": kv.get(config.AI_SYSTEM_PROMPT_SETTING_KEY) or "",
         "fallback": kv.get(config.AI_FALLBACK_SETTING_KEY) or "",
         # Slug активной «должности» (бейдж в UI; бот ключ не читает). Неизвестный → "".
+        # Whitelist = пресеты + динамический реестр (роли сверх 4 хардкод-пресетов).
         "persona": (kv.get(config.AI_PERSONA_SETTING_KEY) or "").strip()
-                   if (kv.get(config.AI_PERSONA_SETTING_KEY) or "").strip() in config.PERSONA_PRESETS
+                   if (kv.get(config.AI_PERSONA_SETTING_KEY) or "").strip()
+                   in {**config.PERSONA_PRESETS, **(await list_dynamic_personas())}
                    else "",
     }
 
@@ -1906,9 +1908,11 @@ async def kb_delete_document(doc_id: str, *, actor: str, ip: str | None, user_ag
 # ── «ИИ-сотрудник на канал» (страница «Каналы») ──────────────────────────────
 async def get_channel_personas(sources: tuple[str, ...]) -> dict:
     """{source: persona_slug} назначений «ИИ-сотрудника» по каналам + реестр агентов
-    персон {slug: access_id}. Одним запросом. Неизвестные слуги отфильтрованы."""
+    персон {slug: access_id}. Одним запросом. Неизвестные слуги отфильтрованы.
+    Whitelist персон = пресеты + динамический реестр (роли сверх 4 хардкод-пресетов)."""
+    merged = {**config.PERSONA_PRESETS, **(await list_dynamic_personas())}
     keys = [config.CHANNEL_PERSONA_KEY.format(source=s) for s in sources]
-    keys += [config.PERSONA_AGENT_REGISTRY_KEY.format(slug=p) for p in config.PERSONA_PRESETS]
+    keys += [config.PERSONA_AGENT_REGISTRY_KEY.format(slug=p) for p in merged]
     async with pool.acquire() as c:
         rows = await c.fetch(
             "select key, value from app_settings where key = any($1::text[])", keys
@@ -1917,10 +1921,10 @@ async def get_channel_personas(sources: tuple[str, ...]) -> dict:
     personas = {}
     for s in sources:
         v = kv.get(config.CHANNEL_PERSONA_KEY.format(source=s), "")
-        personas[s] = v if v in config.PERSONA_PRESETS else ""
+        personas[s] = v if v in merged else ""
     agents = {
         p: kv.get(config.PERSONA_AGENT_REGISTRY_KEY.format(slug=p), "")
-        for p in config.PERSONA_PRESETS
+        for p in merged
     }
     return {"personas": personas, "agents": agents}
 
@@ -1955,7 +1959,9 @@ async def get_persona_role(slug: str) -> dict:
             list(keys.values()),
         )
     kv = {r["key"]: (r["value"] or "") for r in rows}
-    preset = config.PERSONA_PRESETS.get(slug) or {}
+    # Каркас «поведения» по умолчанию: из пресета ИЛИ из динамического реестра (новые роли).
+    merged = {**config.PERSONA_PRESETS, **(await list_dynamic_personas())}
+    preset = merged.get(slug) or {}
     role = kv.get(keys["role"], "")
     tasks = kv.get(keys["tasks"], "")
     behavior_saved = kv.get(keys["behavior"], "") or kv.get(keys["instruction"], "")  # миграция legacy
@@ -2020,6 +2026,77 @@ async def set_persona_role(
                 detail={"persona": slug, "role_len": len(role), "tasks_len": len(tasks),
                         "behavior_len": len(behavior), "knowledge_len": len(knowledge)},
             )
+
+
+# ── Динамический реестр персон (Вариант A: KV app_settings['persona_registry']) ──
+async def list_dynamic_personas() -> dict:
+    """Динамические роли сверх 4 пресетов: {slug: {name, role, prompt}} из app_settings
+    ['persona_registry'] (JSON). Реестр НЕ должен ронять /agents — любой сбой (нет строки,
+    битый JSON, не-dict) → {}. Мерджится вызывающим поверх config.PERSONA_PRESETS."""
+    async with pool.acquire() as c:
+        raw = await c.fetchval(
+            "select value from app_settings where key = $1", config.PERSONA_REGISTRY_KEY
+        )
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+async def add_dynamic_persona(
+    slug: str, name: str, role: str, prompt: str,
+    *, actor: str, ip: str | None = None, user_agent: str | None = None,
+) -> bool:
+    """Добавить роль в реестр (read-modify-write одного KV-ключа в транзакции, select … for
+    update против гонки параллельных созданий). Если slug уже есть в реестре — НЕ перезаписываем,
+    возвращаем False. Иначе reg[slug]={name,role,prompt}, пишем json (ensure_ascii=False, чтобы
+    кириллица читалась) + аудит. Возврат True."""
+    # Defense-in-depth: обрезаем в db-слое (вдобавок к панели), на случай будущего второго
+    # вызывающего, который пришлёт необрезанные значения.
+    name = name[: config.PERSONA_NAME_MAX]
+    role = role[: config.PERSONA_ROLE_TITLE_MAX]
+    prompt = prompt[: config.PERSONA_BEHAVIOR_MAX]
+    async with pool.acquire() as c:
+        async with c.transaction():
+            # FOR UPDATE на НЕсуществующей строке ничего не блокирует → два параллельных
+            # ПЕРВЫХ создания могли бы оба прочитать пусто и затереть чужой slug. Сначала
+            # гарантируем наличие строки-реестра (no-op, если уже есть) — тогда блокировка
+            # ниже сериализует конкурентные create'ы корректно.
+            await c.execute(
+                """
+                insert into app_settings (key, value) values ($1, '{}')
+                on conflict (key) do nothing
+                """,
+                config.PERSONA_REGISTRY_KEY,
+            )
+            raw = await c.fetchval(
+                "select value from app_settings where key = $1 for update",
+                config.PERSONA_REGISTRY_KEY,
+            )
+            try:
+                reg = json.loads(raw) if raw else {}
+            except (ValueError, TypeError):
+                reg = {}
+            if not isinstance(reg, dict):
+                reg = {}
+            if slug in reg:
+                return False
+            reg[slug] = {"name": name, "role": role, "prompt": prompt}
+            await c.execute(
+                """
+                insert into app_settings (key, value) values ($1, $2)
+                on conflict (key) do update set value = excluded.value
+                """,
+                config.PERSONA_REGISTRY_KEY, json.dumps(reg, ensure_ascii=False),
+            )
+            await _insert_audit(
+                c, actor=actor, action="persona_create", ip=ip, user_agent=user_agent,
+                detail={"slug": slug, "name": name, "role": role},
+            )
+    return True
 
 
 async def set_lead_persona(

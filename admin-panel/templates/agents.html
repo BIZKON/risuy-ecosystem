@@ -11,6 +11,12 @@
 </div>
 
 {% if saved %}{{ flash('Настройки ИИ сохранены. Бот применит их со следующего сообщения.', 'ok') }}{% endif %}
+{% if created_slug %}
+  {# Флеш со ССЫЛКОЙ «настроить роль» — обычная ссылка (CSP-safe, без JS); slug эскейпится. #}
+  <div class="flash flash--ok" role="status">
+    Роль создана. <a href="/agents/role/{{ created_slug|e }}">Настроить роль →</a> (инструкция, база знаний), затем назначьте на канал или диалог.
+  </div>
+{% elif persona_created %}{{ flash('Роль создана. Откройте её карточку, чтобы дообучить (инструкция, база знаний), и назначьте на канал или диалог.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 {% if preset_applied %}{{ flash('Шаблон должности подставлен в системный промпт (НЕ сохранён). Проверьте текст, заполните данные в [скобках] и нажмите «Сохранить».', 'ok') }}{% endif %}
 
@@ -35,6 +41,36 @@
     </a>
     {% endfor %}
   </div>
+
+  {# ── Создать роль: платформа заводит ПРОИЗВОЛЬНУЮ роль сверх пресетов (динамический реестр) ── #}
+  {% if session.is_platform %}
+  <details class="card card--soft" style="margin-top:16px;">
+    <summary class="card__title" style="cursor:pointer;">+ Создать роль</summary>
+    <p class="card__note">Заведите ИИ-сотрудника под любую должность — он добавится к карточкам выше. После создания откройте карточку, чтобы дообучить (инструкция, база знаний), и назначьте на канал или диалог.</p>
+    <form method="post" action="/agents/persona/create" autocomplete="off">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field">
+        <span class="field__label">Имя <span class="field__hint">имя роли, не реального человека (напр. «Анна-методист»)</span></span>
+        <input class="field__input" type="text" name="name" maxlength="{{ name_max }}"
+               placeholder="например, Анна-методист" required>
+      </label>
+      <label class="field">
+        <span class="field__label">Должность / роль <span class="field__hint">кто это</span></span>
+        <input class="field__input" type="text" name="role" maxlength="{{ role_title_max }}"
+               placeholder="например, ИИ-методист">
+      </label>
+      <label class="field">
+        <span class="field__label">Инструкция <span class="field__hint">характер и правила</span></span>
+        <textarea class="field__input field__textarea field__textarea--lg" name="prompt"
+                  maxlength="{{ behavior_max }}" rows="5"
+                  placeholder="Кто этот сотрудник, тон общения, что можно и чего нельзя…"></textarea>
+      </label>
+      <div class="form-actions">
+        <button class="btn btn--dark" type="submit">Создать роль</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
 </section>
 
 {# ── Статус-карточки ── #}

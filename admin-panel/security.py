@@ -106,26 +106,37 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     путь не выписать заранее: напр. POST /leads/{uuid}/reply (вложение в личный ответ)
     оканчивается на '/reply'. Точный per_path_limits для него не сработал бы (uuid в
     середине), поэтому отдельный суффикс-матч. Точное совпадение приоритетнее суффикса.
+
+    per_path_prefix_limits — префикс-исключения для путей, где переменная часть В КОНЦЕ:
+    напр. POST /agents/role/<slug> (большой промпт роли) — slug в конце, суффикс не выписать,
+    а перечислять точные пути нельзя (slug'и динамические, сверх 4 пресетов). Префикс
+    '/agents/role/' покрывает и пресеты, и любые созданные роли. Приоритет проверки:
+    точное > суффикс > префикс > дефолт.
     Для chunked-без-Content-Length глобальный лимит здесь не срабатывает (как и
     раньше) — streaming-обрыв на превышении делает сам хендлер при чтении UploadFile.
     """
 
     def __init__(self, app, max_bytes: int,
                  per_path_limits: dict[str, int] | None = None,
-                 per_path_suffix_limits: dict[str, int] | None = None) -> None:
+                 per_path_suffix_limits: dict[str, int] | None = None,
+                 per_path_prefix_limits: dict[str, int] | None = None) -> None:
         super().__init__(app)
         self.max_bytes = max_bytes
         self.per_path_limits = per_path_limits or {}
-        # tuple для стабильного порядка проверки суффиксов (первый матч выигрывает).
+        # tuple для стабильного порядка проверки суффиксов/префиксов (первый матч выигрывает).
         self.per_path_suffix_limits = tuple((per_path_suffix_limits or {}).items())
+        self.per_path_prefix_limits = tuple((per_path_prefix_limits or {}).items())
 
     def _limit_for(self, path: str) -> int:
-        # 1) точное совпадение пути (приоритет); 2) суффикс динамического пути; 3) дефолт.
+        # 1) точное совпадение; 2) суффикс; 3) префикс динамического пути; 4) дефолт.
         exact = self.per_path_limits.get(path)
         if exact is not None:
             return exact
         for suffix, lim in self.per_path_suffix_limits:
             if path.endswith(suffix):
+                return lim
+        for prefix, lim in self.per_path_prefix_limits:
+            if path.startswith(prefix):
                 return lim
         return self.max_bytes
 

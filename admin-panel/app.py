@@ -103,11 +103,8 @@ app.add_middleware(
     per_path_limits={
         "/broadcasts": config.MAX_UPLOAD_BYTES,
         "/products": config.MAX_PRODUCT_FILE_BYTES,
-        # Загрузка файла в базу знаний (≤10 МБ) и большой промпт роли (роль/задачи/поведение)
-        # не должны упираться в глобальные 64 КБ. /agents/role/<slug> — динамический, поэтому
-        # точечные записи на каждый известный слаг персоны.
+        # Загрузка файла в базу знаний (≤10 МБ) не должна упираться в глобальные 64 КБ.
         "/knowledge/upload": config.MAX_KB_FILE_BYTES,
-        **{f"/agents/role/{slug}": config.PERSONA_POST_MAX_BYTES for slug in config.PERSONA_PRESETS},
     },
     # Динамический путь вложения личного ответа POST /leads/{uuid}/reply — точный
     # per_path не выписать (uuid в середине), поэтому суффикс-матч. Лимит = потолок
@@ -116,6 +113,11 @@ app.add_middleware(
         # /reply несёт НЕСКОЛЬКО вложений суммарно → лимит выше пофайлового; каждый файл
         # всё равно ≤ MAX_PRODUCT_FILE_BYTES (read_upload_capped) и ≤50 МБ у бота.
         "/reply": config.MAX_REPLY_BODY_BYTES,
+    },
+    # POST /agents/role/<slug> — большой промпт роли (роль/задачи/поведение), slug В КОНЦЕ
+    # и динамический (4 пресета + созданные роли), точный/суффикс-матч не выписать → префикс.
+    per_path_prefix_limits={
+        "/agents/role/": config.PERSONA_POST_MAX_BYTES,
     },
 )
 
@@ -919,17 +921,35 @@ def _present_dialog_row(r) -> dict:
     }
 
 
-def _persona_label(slug: str) -> str:
-    p = config.PERSONA_PRESETS.get(slug)
+async def _all_personas() -> dict:
+    """Все персоны = 4 хардкод-пресета (config) + динамический реестр (роли сверх пресетов,
+    созданные платформой кнопкой «Создать роль»). Мердж: пресеты — основа, динамика поверх.
+    Единый источник правды whitelist'а персон в панели."""
+    return {**config.PERSONA_PRESETS, **(await db.list_dynamic_personas())}
+
+
+async def _all_persona_order() -> tuple:
+    """Порядок персон для UI: сначала фиксированный config.PERSONA_ORDER (4 пресета), затем
+    динамические slug'и, которых нет в пресетах (в порядке реестра)."""
+    dyn = await db.list_dynamic_personas()
+    extra = tuple(s for s in dyn if s not in config.PERSONA_PRESETS)
+    return config.PERSONA_ORDER + extra
+
+
+async def _persona_label(slug: str) -> str:
+    p = (await _all_personas()).get(slug)
     return f'{p["name"]} — {p["role"]}' if p else ""
 
 
-def _effective_persona(lead_ai_persona, source, channel_map: dict, global_persona: str) -> str:
+async def _effective_persona(lead_ai_persona, source, channel_map: dict, global_persona: str,
+                             all_personas: dict) -> str:
     """Какой ИИ-сотрудник РЕАЛЬНО ведёт лида (та же лестница приоритетов, что у бота):
-    диалог (leads.ai_persona) > канал > глобальная настройка > дефолтный агент (Лия)."""
+    диалог (leads.ai_persona) > канал > глобальная настройка > дефолтный агент (Лия).
+    all_personas — заранее посчитанный мердж пресетов+динамики (вызывающий цикл не дёргает БД
+    на каждую строку)."""
     for cand in (lead_ai_persona, channel_map.get(source or "", ""), global_persona):
         c = (cand or "").strip()
-        if c in config.PERSONA_PRESETS:
+        if c in all_personas:
             return c
     return "liya"  # без назначения лида ведёт дефолтный агент — Лия (администратор)
 
@@ -942,9 +962,11 @@ async def _persona_stats() -> dict:
     rows = await db.persona_dialog_stats()
     channel_map = (await db.get_channel_personas(tuple(config.SOURCES)))["personas"]
     global_persona = (await db.get_ai_settings()).get("persona") or ""
+    all_personas = await _all_personas()  # один раз — не дёргаем БД на каждую строку
     agg: dict[str, list[int]] = {}
     for r in rows:
-        eff = _effective_persona(r["ai_persona"], r["source"], channel_map, global_persona)
+        eff = await _effective_persona(r["ai_persona"], r["source"], channel_map,
+                                       global_persona, all_personas)
         b = agg.setdefault(eff, [0, 0])
         b[0] += r["leads"]
         b[1] += r["converted"]
@@ -955,14 +977,20 @@ async def _persona_stats() -> dict:
     }
 
 
-async def _resolve_dialog_staff(lead: dict) -> dict:
+async def _resolve_dialog_staff(lead: dict, *, is_platform: bool = False) -> dict:
     """Кто СЕЙЧАС отвечает этому диалогу + что выбрать в селекте. Приоритет:
     leads.ai_persona (ручной выбор диалога) > канал (ai_persona__<source>) > глобальная
     настройка (раздел «ИИ-агенты») > дефолтный агент (Лия). Возвращает текущий ручной slug
-    (для select), имя эффективной персоны и область её действия (для подписи)."""
+    (для select), имя эффективной персоны и область её действия (для подписи).
+    ⚠️ Динамические роли — ПЛАТФОРМЕННЫЕ (создаются только под _require_admin): тенант-оператору
+    в селекте /dialogs показываем и принимаем ТОЛЬКО 4 пресета (без утечки платформенных ролей).
+    Платформа (вкл. под-клиента) видит пресеты+динамику."""
+    # Whitelist/порядок персон: динамика — только для платформы, тенант — статус-кво (пресеты).
+    whitelist = (await _all_personas()) if is_platform else config.PERSONA_PRESETS
+    order = (await _all_persona_order()) if is_platform else config.PERSONA_ORDER
     source = lead.get("source") or "other"
     lead_persona = (lead.get("ai_persona") or "").strip()
-    lead_persona = lead_persona if lead_persona in config.PERSONA_PRESETS else ""
+    lead_persona = lead_persona if lead_persona in whitelist else ""
     if lead_persona:
         eff, scope = lead_persona, "выбран для этого диалога"
     else:
@@ -976,9 +1004,9 @@ async def _resolve_dialog_staff(lead: dict) -> dict:
             eff, scope = "", "по умолчанию"
     return {
         "current": lead_persona,
-        "effective_name": _persona_label(eff) if eff else "Лия — ИИ-администратор",
+        "effective_name": (await _persona_label(eff)) if eff else "Лия — ИИ-администратор",
         "scope": scope,
-        "options": [{"key": k, "label": _persona_label(k)} for k in config.PERSONA_ORDER],
+        "options": [{"key": k, "label": await _persona_label(k)} for k in order],
     }
 
 
@@ -1053,7 +1081,7 @@ async def _render_dialogs(
             "invoice_products": invoice_products,
             "invoiced": invoiced,
             "invoice_err": _invoice_err_text(invoice_err),
-            "dialog_staff": await _resolve_dialog_staff(lead),
+            "dialog_staff": await _resolve_dialog_staff(lead, is_platform=session.is_platform),
             "staff_flash": staff_flash,
         })
     return templates.TemplateResponse(request, template, ctx)
@@ -1155,7 +1183,10 @@ async def dialog_set_persona(
     access_id) — переиспользуем общий с «Каналами» реестр (один агент на персону)."""
     await _enforce_csrf(request, session, csrf_token)
     persona = persona.strip()
-    if persona and persona not in config.PERSONA_PRESETS:
+    # Динамические роли — платформенные: тенант-оператор может назначить ТОЛЬКО 4 пресета
+    # (без утечки/назначения платформенных ролей). Платформа — пресеты+динамика.
+    whitelist = (await _all_personas()) if session.is_platform else config.PERSONA_PRESETS
+    if persona and persona not in whitelist:
         return _chat_return(lead_id, from_, err="bad_persona")
     if persona:
         try:
@@ -1688,10 +1719,14 @@ async def _csv_anon_rows():
     # (база изменилась между count и стримом) усечение всё равно не уйдёт регулятору молча. Коллизия
     # subject_code (астрономически маловероятна на 64 битах) → fail-closed, как в map (единый инвариант).
     yield _csv_line(anon.ANON_HEADER, bom=True)
+    # Allow-list ai_persona для обезличенной выгрузки = пресеты + динамический реестр.
+    # Динамический slug — это РОЛЬ (не ПДн лида), поэтому он легитимно попадает в выгрузку;
+    # без мерджа ai_persona динамической персоны отфильтровался бы (валиден только пресет).
+    allowed_personas = await _all_personas()
     seen: set[str] = set()
     n = 0
     async for r in db.stream_leads_anon(row_cap=config.EXPORT_ROW_CAP):
-        row = anon.anon_row(dict(r), config.PERSONA_PRESETS)
+        row = anon.anon_row(dict(r), allowed_personas)
         if row[0] in seen:
             raise RuntimeError(f"stream_leads_anon: коллизия subject_code {row[0]} — выгрузка прервана")
         seen.add(row[0])
@@ -3586,6 +3621,8 @@ def _agents_err_text(err: str | None) -> str | None:
                      "Возьмите его из списка моделей вашего шлюза.",
         "bad_gateway_url": "Базовый URL шлюза должен начинаться с http:// или https:// и "
                            "не содержать пробелов (напр. https://api.timeweb.ai/v1).",
+        "persona_name": "Укажите имя роли — без него сотрудника не создать.",
+        "persona_dup": "Не удалось создать роль (конфликт идентификатора). Попробуйте ещё раз.",
     }.get(err or "")
 
 
@@ -3596,6 +3633,8 @@ async def agents_page(
     saved: int = 0,
     err: str | None = None,
     preset: str | None = None,
+    persona_created: int = 0,
+    created_slug: str | None = None,
 ):
     _require_admin(session)  # глобальные настройки Школы (app_settings) — только платформе; клиент → /my-agent
     ai = await db.get_ai_settings()
@@ -3609,24 +3648,29 @@ async def agents_page(
     # «Должности» (пресеты): ?preset=<slug> предзаполняет промпт каркасом ДО сохранения
     # (PRG-чисто, без JS — клик по ссылке-шаблону перерисовывает форму). Невалидный slug
     # тихо игнорируем. Выбранная persona уезжает в форму и сохранится обычным POST.
-    preset_key = preset if preset in config.PERSONA_PRESETS else None
+    all_personas = await _all_personas()      # пресеты + динамический реестр
+    persona_order = await _all_persona_order()
+    # created_slug из PRG после создания роли: показываем флеш-ссылку «настроить роль» только
+    # если slug реально в реестре (иначе ?created_slug=... — мусор/инъекция → игнор).
+    created_slug = created_slug if (created_slug and created_slug in all_personas) else None
+    preset_key = preset if preset in all_personas else None
     if preset_key:
         ai = {**ai,
-              "system_prompt": config.PERSONA_PRESETS[preset_key]["prompt"],
+              "system_prompt": all_personas[preset_key]["prompt"],
               "persona": preset_key}
     personas = [
-        {"key": k, "label": f'{config.PERSONA_PRESETS[k]["name"]} — {config.PERSONA_PRESETS[k]["role"]}',
+        {"key": k, "label": f'{all_personas[k]["name"]} — {all_personas[k]["role"]}',
          "is_current": k == ai["persona"]}
-        for k in config.PERSONA_ORDER
+        for k in persona_order
     ]
     persona_label = next((p["label"] for p in personas if p["is_current"]), "")
     # Обзор ИИ-сотрудников по ролям: статус (агент создан? кастомизирован? есть знания?)
     # + нагрузка/конверсия (счётчик диалогов на сотрудника — для решений «кого развивать»).
     stats = await _persona_stats()
     role_cards = []
-    for k in config.PERSONA_ORDER:
+    for k in persona_order:
         r = await db.get_persona_role(k)
-        p = config.PERSONA_PRESETS[k]
+        p = all_personas[k]
         s = stats.get(k, {"leads": 0, "converted": 0, "conv_pct": 0})
         role_cards.append({
             "slug": k, "name": p["name"], "role": p["role"],
@@ -3661,6 +3705,11 @@ async def agents_page(
             "session": session,
             "active": "agents",
             "saved": bool(saved),
+            "persona_created": bool(persona_created),
+            "created_slug": created_slug,
+            "name_max": config.PERSONA_NAME_MAX,
+            "role_title_max": config.PERSONA_ROLE_TITLE_MAX,
+            "behavior_max": config.PERSONA_BEHAVIOR_MAX,
             "err": _agents_err_text(err),
         },
     )
@@ -3707,13 +3756,56 @@ async def agents_save(
     ):
         return RedirectResponse(url="/agents?err=bad_gateway_url", status_code=303)
     # Persona — метка-«должность» из белого списка ("" = своя настройка); мусор молча в "".
-    persona = persona.strip() if persona.strip() in config.PERSONA_PRESETS else ""
+    # Whitelist = пресеты + динамический реестр (роль сверх пресетов тоже можно сделать общей).
+    persona = persona.strip() if persona.strip() in await _all_personas() else ""
     await db.set_ai_settings(
         enabled=bool(enabled), backend=backend, agent_id=agent_id, model=model,
         gateway_base_url=gateway_base_url, system_prompt=system_prompt, fallback=fallback,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request), persona=persona,
     )
     return RedirectResponse(url="/agents?saved=1", status_code=303)
+
+
+# ---- /agents/persona/create — платформа заводит ПРОИЗВОЛЬНУЮ роль (динамический реестр) ---- #
+@app.post("/agents/persona/create")
+async def persona_create(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    name: str = Form(""),
+    role: str = Form(""),
+    prompt: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Создать новую роль сверх 4 пресетов (Вариант A: app_settings['persona_registry']).
+    Slug = непредсказуемый токен (role-<8hex>) — надёжнее транслитерации имени: гарантированно
+    уникален и валиден; имя — только для отображения. После записи реестра сразу настраиваем
+    стартовую конфигурацию роли (ai_persona_role__<slug>/…), чтобы бот при назначении её каналу
+    подхватил промпт. Бот slug-агностичен — новый slug «просто работает» по своим app_settings-ключам."""
+    _require_admin(session)  # запись глобального реестра персон Школы — только платформе
+    await _enforce_csrf(request, session, csrf_token)
+    name = name.strip()[: config.PERSONA_NAME_MAX]
+    role = role.strip()[: config.PERSONA_ROLE_TITLE_MAX]
+    prompt = prompt.strip()[: config.PERSONA_BEHAVIOR_MAX]
+    if not name:
+        return RedirectResponse(url="/agents?err=persona_name", status_code=303)
+    slug = f"role-{secrets.token_hex(4)}"
+    created = await db.add_dynamic_persona(
+        slug, name, role, prompt,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    if not created:
+        # Коллизия slug (астрономически маловероятна) — не теряем ввод молча.
+        return RedirectResponse(url="/agents?err=persona_dup", status_code=303)
+    # Стартовая конфигурация роли: «поведение» = введённый промпт, эффективный промпт — склейка.
+    # set_persona_role пишет ai_persona_role__<slug>/…/ai_persona_prompt__<slug> — контракт с ботом.
+    eff_prompt = _persona_effective_prompt(role, "", prompt, "")
+    await db.set_persona_role(
+        slug, role=role, tasks="", behavior=prompt, knowledge="", prompt=eff_prompt,
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    # created_slug → флеш со ссылкой «настроить роль» (переход к дообучению). Slug — наш
+    # токен role-<8hex> (не пользовательский ввод), в шаблоне всё равно эскейпится |e.
+    return RedirectResponse(url=f"/agents?created_slug={slug}", status_code=303)
 
 
 # ---- /agents/role/{slug} — управление ИИ-сотрудником роли (промпт + знания + RAG) ---- #
@@ -3727,9 +3819,10 @@ async def agent_role_page(
     err: str | None = None,
 ):
     _require_admin(session)  # «ИИ-сотрудники» Школы (глобальный реестр персон) — только платформе
-    if slug not in config.PERSONA_PRESETS:
+    all_personas = await _all_personas()  # пресеты + динамический реестр
+    if slug not in all_personas:
         raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
-    preset = config.PERSONA_PRESETS[slug]
+    preset = all_personas[slug]
     role = await db.get_persona_role(slug)
     s = (await _persona_stats()).get(slug, {"leads": 0, "converted": 0, "conv_pct": 0})
     # Статус векторных баз знаний агента (read-only): только если токен ИИ есть И агент создан.
@@ -3781,7 +3874,7 @@ async def agent_role_save(
     уже создан, пушится на живого cloud-ai агента (PATCH). Сбой пуша не теряет сохранённое → warn."""
     _require_admin(session)  # запись глобального реестра персон Школы — только платформе
     await _enforce_csrf(request, session, csrf_token)
-    if slug not in config.PERSONA_PRESETS:
+    if slug not in await _all_personas():
         raise StarletteHTTPException(status_code=404, detail="Роль не найдена")
     role = role.strip()[: config.PERSONA_ROLE_MAX]
     tasks = tasks.strip()[: config.PERSONA_TASKS_MAX]
@@ -3842,12 +3935,14 @@ def _knowledge_err_text(err: str | None) -> str | None:
 
 async def _kb_roles_for(session: auth.Session) -> tuple[dict, bool]:
     """Карта отделов для дропдауна KB активного клиента + признак School-тенанта.
-    School (DEFAULT_TENANT_SLUG) → PERSONA_PRESETS (ретрив School ходит по lead_persona);
-    остальные тенанты → их team-агенты (slug→название). Вид {slug: {'name','role'}} —
-    совместим с knowledge.html (kb_roles.items() и kb_roles.get(role_tag).name)."""
+    School (DEFAULT_TENANT_SLUG) → пресеты + динамический реестр персон (чтобы базу знаний
+    можно было привязать и к созданной роли; иначе normalize_role фильтрует её в ''); ретрив
+    School ходит по lead_persona. Остальные тенанты → их team-агенты (slug→название). Вид
+    {slug: {'name','role'}} — совместим с knowledge.html (kb_roles.items() и .get(role_tag).name).
+    School-only ветка — динамика тут НЕ кросс-контур (реестр глобальный, как и пресеты)."""
     is_school = bool(session.active_tenant_slug) and session.active_tenant_slug == config.DEFAULT_TENANT_SLUG
     if is_school:
-        return config.PERSONA_PRESETS, True
+        return {**config.PERSONA_PRESETS, **(await db.list_dynamic_personas())}, True
     tid = session.active_tenant_id
     rows = await db.list_team_agents(tid) if tid else []
     roles = {r["slug"]: {"name": r["name"], "role": (r["role_preset"] or "")} for r in rows}
@@ -4186,9 +4281,10 @@ async def channels_page(
     ] if username else []
     # «ИИ-сотрудник на канал»: назначения по ВСЕМ источникам (вкл. 'other' — лиды без метки).
     cp = await db.get_channel_personas(tuple(config.SOURCES))
+    all_personas = await _all_personas()  # пресеты + динамический реестр
     persona_options = [
-        {"key": k, "label": f'{config.PERSONA_PRESETS[k]["name"]} — {config.PERSONA_PRESETS[k]["role"]}'}
-        for k in config.PERSONA_ORDER
+        {"key": k, "label": f'{all_personas[k]["name"]} — {all_personas[k]["role"]}'}
+        for k in await _all_persona_order()
     ]
     channel_staff = [
         {"source": s, "label": config.SOURCE_LABELS.get(s, s),
@@ -4245,13 +4341,14 @@ async def channels_set_persona(
     if source not in config.SOURCES:
         return RedirectResponse(url="/channels?err=bad_source", status_code=303)
     persona = persona.strip()
-    if persona and persona not in config.PERSONA_PRESETS:
+    all_personas = await _all_personas()  # пресеты + динамический реестр
+    if persona and persona not in all_personas:
         return RedirectResponse(url="/channels?err=bad_persona", status_code=303)
 
     agent_access_id = ""
     prompt = ""
     if persona:
-        prompt = config.PERSONA_PRESETS[persona]["prompt"]
+        prompt = all_personas[persona]["prompt"]
         try:
             agent_access_id = await _ensure_persona_agent(persona)
         except timeweb_ai.TimewebAIError:
@@ -4356,7 +4453,9 @@ async def _ensure_persona_agent(slug: str) -> str:
         return ""
     role = await db.get_persona_role(slug)
     prompt = _persona_effective_prompt(role["role"], role["tasks"], role["behavior"], role["knowledge"])
-    preset = config.PERSONA_PRESETS[slug]
+    # Имя агента — из мерджа пресетов+динамики (НЕ из config.PERSONA_PRESETS: на новом
+    # динамическом слаге был бы KeyError). Фолбэк по слагу — на случай отсутствия записи.
+    preset = (await _all_personas()).get(slug) or {"name": slug, "role": ""}
     created = await timeweb_ai.create_agent(
         f'{preset["name"]} — {preset["role"]}', prompt, model_id=config.PERSONA_AGENT_MODEL_ID,
     )

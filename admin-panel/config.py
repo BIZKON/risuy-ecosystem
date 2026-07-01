@@ -511,6 +511,14 @@ PERSONA_PRESETS = {
     },
 }
 PERSONA_ORDER = ("liya", "mark", "sofia", "gleb")
+# Динамический реестр персон (Вариант A): один KV-ключ app_settings со СВЕРХ-ПРЕСЕТНЫМИ
+# ролями, которые платформа (is_platform) заводит кнопкой «Создать роль» в /agents.
+# Значение — JSON {slug: {name, role, prompt}}. В рантайме мерджится поверх PERSONA_PRESETS
+# (пресеты остаются в коде). НЕ таблица, НЕ DDL — KV хватает. Бот slug-агностичен и
+# подхватывает любую роль по ключам ai_persona_agent__<slug>/ai_persona_prompt__<slug>.
+PERSONA_REGISTRY_KEY = "persona_registry"
+PERSONA_NAME_MAX = 80               # потолок поля «Имя» динамической роли
+PERSONA_ROLE_TITLE_MAX = 120        # потолок поля «Должность/роль» динамической роли
 
 # «ИИ-сотрудник на канал»: разные персоны на разные источники лидов (страница «Каналы»).
 # Панель ПИШЕТ per-канальные ключи, бот ЧИТАЕТ их поверх глобальных (get_ai_overrides(source)):
