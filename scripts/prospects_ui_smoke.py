@@ -54,5 +54,19 @@ card = render("_company_card.html", p={"inn": "7707083893", "subject_type": "leg
               "management": {"name": "Иванов И.И.", "post": "Директор"}}, csrf_token="T", back="/companies")
 check("партиал: реквизиты ЮЛ", "7707083893" in card and "62.01" in card and "ACTIVE" in card)
 
+# блок «Компания» в карточке лида (dialogs.html)
+_dctx = dict(filters={}, statuses=[], status_labels={}, source_labels={}, messenger_labels={},
+             dialogs=[], list_base="/dialogs", session={}, active="dialogs", csrf_token="T",
+             selected_id="abc-123", thread=[], dialog_staff={}, invoice_products=[])
+_lead = {"id": "abc-123", "name": "Иван", "source": "reels", "messenger": "tg",
+         "can_reply": True, "bot_paused": False}
+dnone = render("dialogs.html", lead=_lead, lead_company=None, **_dctx)
+check("лид без компании → форма «Привязать по ИНН»",
+      'action="/companies/lookup"' in dnone and 'name="lead_id"' in dnone and 'value="abc-123"' in dnone)
+dcard = render("dialogs.html", lead=_lead,
+               lead_company={"inn": "7707083893", "subject_type": "legal", "name_short": "ООО А",
+                             "okved": "62.01", "status": "ACTIVE"}, **_dctx)
+check("лид с компанией → карточка ЕГРЮЛ", "7707083893" in dcard and "62.01" in dcard)
+
 print(("\nFAIL: " + ", ".join(FAILS)) if FAILS else "\nВсе render-проверки OK")
 sys.exit(1 if FAILS else 0)

@@ -127,6 +127,22 @@
     </div>
     {% endif %}
 
+    <section class="lead-company">
+      <h3>Компания</h3>
+      {% if lead_company %}
+        {% with p = lead_company %}{% include "_company_card.html" %}{% endwith %}
+      {% else %}
+        <form method="post" action="/companies/lookup" class="row">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="lead_id" value="{{ lead.id }}">
+          <input type="hidden" name="back" value="/dialogs">
+          <input class="mono" type="text" name="inn" inputmode="numeric" maxlength="15" placeholder="ИНН компании" required>
+          <button type="submit">Привязать по ИНН</button>
+        </form>
+        <p class="muted">Данные ЕГРЮЛ — для обогащения карточки, не для обзвона.</p>
+      {% endif %}
+    </section>
+
     <div class="dchat__surface">
       {% include "_chat.html" %}
     </div>

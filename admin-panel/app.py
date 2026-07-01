@@ -1221,6 +1221,7 @@ async def _render_dialogs(
             "invoice_err": _invoice_err_text(invoice_err),
             "dialog_staff": await _resolve_dialog_staff(lead, is_platform=session.is_platform),
             "staff_flash": staff_flash,
+            "lead_company": await db.prospect_for_lead(lead["id"]),  # привязанная карточка ЕГРЮЛ (или None)
         })
     return templates.TemplateResponse(request, template, ctx)
 
