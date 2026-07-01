@@ -4096,6 +4096,96 @@ async def companies_page(
     )
 
 
+_INN_LENGTHS = frozenset({10, 12, 13, 15})  # ИНН ЮЛ 10 / ИП 12 / ОГРН 13 / ОГРНИП 15
+
+
+@app.post("/companies/lookup")
+async def companies_lookup(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    inn: str = Form(""),
+    lead_id: str = Form(""),
+    back: str = Form("/companies"),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    dest = _safe_next(back)
+    if not tid:
+        return RedirectResponse(url="/companies", status_code=303)
+    if not dadata.is_configured():
+        return RedirectResponse(url=f"{dest}?err=provider_off", status_code=303)
+    q = (inn or "").strip()
+    if not q.isdigit() or len(q) not in _INN_LENGTHS:
+        return RedirectResponse(url=f"{dest}?err=bad_inn", status_code=303)
+    if not await db.dadata_quota_take(config.DADATA_DAILY_LIMIT):
+        return RedirectResponse(url=f"{dest}?err=quota", status_code=303)
+    card = await dadata.find_party(q)
+    if card is None:
+        return RedirectResponse(url=f"{dest}?err=not_found", status_code=303)
+    lid = lead_id.strip() or None
+    await db.prospect_upsert(card=card, tenant_id=tid, actor=session.actor,
+                             ip=_ip(request), user_agent=_ua(request), lead_id=lid)
+    return RedirectResponse(url=f"{dest}?saved=1", status_code=303)
+
+
+@app.post("/companies/search")
+async def companies_search(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    q: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    suggestions = []
+    if tid and dadata.is_configured() and (q or "").strip():
+        if await db.dadata_quota_take(config.DADATA_DAILY_LIMIT):
+            suggestions = await dadata.suggest_party(q)
+    prospects = await db.prospect_list() if tid else []
+    return templates.TemplateResponse(
+        request, "companies.html",
+        {
+            "csrf_token": session.csrf_token, "session": session, "active": "companies",
+            "has_tenant": bool(tid), "provider_on": dadata.is_configured(),
+            "prospects": prospects, "suggestions": suggestions, "search_q": q,
+            "err": "", "saved": 0, "support_url": _safe_support_url(config.SUPPORT_URL),
+            "help_dismissed": await _help_dismissed(session, "companies"),
+        },
+    )
+
+
+@app.post("/companies/{pid}/link-lead")
+async def companies_link_lead(
+    pid: str,
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    lead_id: str = Form(""),
+    back: str = Form("/companies"),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.active_tenant_id:
+        return RedirectResponse(url="/companies", status_code=303)
+    lid = lead_id.strip() or None
+    if lid:
+        await db.prospect_link_lead(pid, lid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url=f"{_safe_next(back)}?saved=1", status_code=303)
+
+
+@app.post("/companies/{pid}/archive")
+async def companies_archive(
+    pid: str,
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    if session.active_tenant_id:
+        await db.prospect_archive(pid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/companies", status_code=303)
+
+
 def _knowledge_err_text(err: str | None) -> str | None:
     return {
         "kb_off": "Загрузка базы знаний временно недоступна — обратитесь в поддержку.",
