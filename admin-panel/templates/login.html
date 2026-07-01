@@ -38,6 +38,7 @@
       {{ flash(error, 'error') }}
       {{ flash(social_error, 'error') }}
       {% if registered_ok %}{{ flash('Аккаунт создан — добро пожаловать!', 'info') }}{% endif %}
+      {% if reset_ok %}{{ flash('Пароль обновлён. Войдите с новым паролем.', 'info') }}{% endif %}
 
       {# ВХОД #}
       <div class="auth-pane auth-pane--signin">
@@ -56,6 +57,7 @@
           </label>
           <button class="btn btn--primary btn--block" type="submit">Войти</button>
         </form>
+        <p class="auth-switch"><a class="linklike" href="/forgot-password">Забыли пароль?</a></p>
         {% if signup_enabled %}
         <p class="auth-switch">Нет аккаунта?
           <a class="linklike" href="/login?tab=signup" data-auth-go="signup">Зарегистрироваться</a></p>

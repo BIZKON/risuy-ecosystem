@@ -2395,6 +2395,84 @@ async def resolve_username_by_email(email: str) -> str | None:
         )
 
 
+async def get_active_username_by_email(email: str) -> str | None:
+    """email → username АКТИВНОЙ учётки (для сброса пароля). None — нет такой/неактивна.
+    Анти-enumeration: вызывающий отвечает одинаково независимо от результата."""
+    e = (email or "").strip().lower()
+    if not e:
+        return None
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select ai.username from account_identities ai "
+            "join admin_users au on au.username = ai.username "
+            "where ai.provider = 'email' and ai.external_id = $1 and au.active = true",
+            e,
+        )
+
+
+async def recent_reset_counts(
+    username: str, request_ip: str | None, *, window_min: int,
+) -> tuple[int, int]:
+    """(по username, по ip) число токенов сброса за окно window_min минут — для rate-limit."""
+    async with pool.acquire() as c:
+        by_user = await c.fetchval(
+            "select count(*) from password_reset_tokens "
+            "where username = $1 and created_at > now() - make_interval(mins => $2::int)",
+            username, window_min,
+        )
+        by_ip = 0
+        if request_ip:
+            by_ip = await c.fetchval(
+                "select count(*) from password_reset_tokens "
+                "where request_ip = $1 and created_at > now() - make_interval(mins => $2::int)",
+                request_ip, window_min,
+            )
+    return int(by_user or 0), int(by_ip or 0)
+
+
+async def create_reset_token(
+    username: str, token_hash: str, *, ttl_min: int, request_ip: str | None,
+) -> None:
+    """Создать токен сброса. Хранится хеш; сам токен уходит в письмо. Прежние
+    неиспользованные токены того же юзера гасятся (единственный активный токен)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "update password_reset_tokens set used_at = now() "
+                "where username = $1 and used_at is null",
+                username,
+            )
+            await c.execute(
+                "insert into password_reset_tokens (token_hash, username, expires_at, request_ip) "
+                "values ($1, $2, now() + make_interval(mins => $3::int), $4)",
+                token_hash, username, ttl_min, request_ip,
+            )
+
+
+async def peek_reset_token(token_hash: str) -> bool:
+    """Валиден ли токен (не использован, не истёк) БЕЗ погашения — для показа формы сброса."""
+    async with pool.acquire() as c:
+        row = await c.fetchval(
+            "select 1 from password_reset_tokens "
+            "where token_hash = $1 and used_at is null and expires_at > now()",
+            token_hash,
+        )
+    return row is not None
+
+
+async def consume_reset_token(token_hash: str) -> str | None:
+    """Проверить и ПОГАСИТЬ токен атомарно (one-use). Возврат username при успехе, иначе None.
+    Успех = существует, не использован, не истёк. used_at ставится тем же UPDATE →
+    конкурентный второй consume получит 0 строк → None."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "update password_reset_tokens set used_at = now() "
+            "where token_hash = $1 and used_at is null and expires_at > now() "
+            "returning username",
+            token_hash,
+        )
+
+
 async def touch_identity_login(identity_id: int) -> None:
     """Отметить факт входа через эту идентичность (last_login_at). Не критично к гонке."""
     async with pool.acquire() as c:

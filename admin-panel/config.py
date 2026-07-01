@@ -365,6 +365,19 @@ PANEL_PUBLIC_BASE_URL = os.environ.get("PANEL_PUBLIC_BASE_URL", "").rstrip("/")
 SIGNUP_PASSWORD_MIN = _opt_int("SIGNUP_PASSWORD_MIN", 10)
 SIGNUP_PASSWORD_MAX = _opt_int("SIGNUP_PASSWORD_MAX", 200)
 
+# --- SMTP + сброс пароля (self-service восстановление по email) ---
+# SMTP не настроен (пустой SMTP_HOST) → mailer работает в dry-run (логирует ссылку, не шлёт).
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = _opt_int("SMTP_PORT", 587)
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "")
+SMTP_STARTTLS = _opt_bool("SMTP_STARTTLS", True)
+RESET_TOKEN_TTL_MIN = _opt_int("RESET_TOKEN_TTL_MIN", 30)
+RESET_WINDOW_MIN = _opt_int("RESET_WINDOW_MIN", 15)
+RESET_MAX_PER_WINDOW = _opt_int("RESET_MAX_PER_WINDOW", 3)
+RESET_MAX_PER_IP = _opt_int("RESET_MAX_PER_IP", 10)
+
 SERVICE_INVOICE_STATUSES = ("pending", "paid", "canceled")
 SERVICE_INVOICE_STATUS_LABELS = {
     "pending": "Ожидает оплаты",

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import re
@@ -42,6 +43,7 @@ import config
 import db
 import kb
 import knowledge_roles
+import mailer
 import oauth_vk
 import onboarding
 import security
@@ -298,7 +300,7 @@ async def healthz() -> JSONResponse:
 async def login_form(
     request: Request, error: str | None = None, next: str = "/",
     signup_error: str | None = None, social_error: str | None = None,
-    registered: int = 0, tab: str = "signin",
+    registered: int = 0, tab: str = "signin", reset: int = 0,
 ):
     # Если уже есть валидная сессия — на дашборд (не показываем логин повторно).
     sid = auth.unsign_sid(request.cookies.get(config.COOKIE_NAME))
@@ -330,6 +332,7 @@ async def login_form(
             "signup_error": _signup_error_text(signup_error),
             "social_error": _social_error_text(social_error),
             "registered_ok": bool(registered),
+            "reset_ok": bool(reset),
             # Какую вкладку показать первой (после ошибки регистрации — «Регистрация»).
             "tab": "signup" if (signup_enabled and (signup_error or tab == "signup")) else "signin",
         },
@@ -341,6 +344,110 @@ async def login_form(
         resp.set_cookie(TG_OAUTH_COOKIE, auth.seal_tg_state(tg_state), max_age=600,
                         httponly=True, secure=config.COOKIE_SECURE, samesite="lax", path="/")
     return resp
+
+
+def _reset_token_hash(raw: str) -> str:
+    """sha256(hex) сырого токена — то, что хранится в password_reset_tokens."""
+    return hashlib.sha256((raw or "").encode()).hexdigest()
+
+
+def _reset_error_text(code: str | None) -> str:
+    """Текст ошибки формы сброса пароля."""
+    return {
+        "csrf": "Сессия формы устарела. Откройте ссылку из письма заново.",
+        "bad_password": f"Пароль — от {config.ACCOUNT_PASSWORD_MIN} до {config.ACCOUNT_PASSWORD_MAX} символов.",
+        "mismatch": "Пароли не совпадают.",
+        "expired": "Ссылка истекла или уже использована. Запросите новую.",
+    }.get(code or "", "")
+
+
+# ---- /forgot-password ----------------------------------------------------- #
+@app.get("/forgot-password", response_class=HTMLResponse)
+async def forgot_password_form(request: Request, sent: int = 0):
+    # Уже вошёл — на дашборд.
+    sid = auth.unsign_sid(request.cookies.get(config.COOKIE_NAME))
+    if sid and await auth.load_session(sid):
+        return RedirectResponse(url="/", status_code=303)
+    token = secrets.token_urlsafe(32)
+    resp = templates.TemplateResponse(
+        request, "forgot_password.html", {"csrf_token": token, "sent": bool(sent)},
+    )
+    auth.set_login_csrf_cookie(resp, token)
+    return resp
+
+
+@app.post("/forgot-password")
+async def forgot_password_submit(
+    request: Request,
+    email: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    # Невалидный CSRF → тот же обобщённый ответ (без утечки существования email).
+    if not auth.verify_login_csrf(request.cookies.get(auth.LOGIN_CSRF_COOKIE), csrf_token):
+        return RedirectResponse(url="/forgot-password?sent=1", status_code=303)
+    ip = _ip(request)
+    email_norm = (email or "").strip().lower()
+    # Timing-floor против enumeration/брута (глобальный тарпит логина, read-only).
+    await auth.apply_tarpit(email_norm or "__reset__", bypass=False)
+    username = (await db.get_active_username_by_email(email_norm)) if _valid_email(email_norm) else None
+    if username:
+        by_user, by_ip = await db.recent_reset_counts(username, ip, window_min=config.RESET_WINDOW_MIN)
+        if by_user < config.RESET_MAX_PER_WINDOW and by_ip < config.RESET_MAX_PER_IP:
+            raw = secrets.token_urlsafe(32)
+            await db.create_reset_token(
+                username, _reset_token_hash(raw),
+                ttl_min=config.RESET_TOKEN_TTL_MIN, request_ip=ip,
+            )
+            base = config.PANEL_PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+            reset_url = f"{base}/reset-password?token={raw}"
+            await mailer.send_password_reset(email_norm, reset_url, ttl_min=config.RESET_TOKEN_TTL_MIN)
+            await db.audit(actor=username, action="password_reset_request",
+                           ip=ip, user_agent=_ua(request), detail={})
+    # ВСЕГДА одинаковый ответ (anti-enumeration).
+    return RedirectResponse(url="/forgot-password?sent=1", status_code=303)
+
+
+# ---- /reset-password ------------------------------------------------------ #
+@app.get("/reset-password", response_class=HTMLResponse)
+async def reset_password_form(request: Request, token: str = "", err: str = ""):
+    valid = bool(token) and await db.peek_reset_token(_reset_token_hash(token))
+    csrf = secrets.token_urlsafe(32)
+    resp = templates.TemplateResponse(
+        request, "reset_password.html",
+        {"csrf_token": csrf, "token": token, "valid": bool(valid),
+         "err": _reset_error_text(err), "password_min": config.ACCOUNT_PASSWORD_MIN},
+    )
+    auth.set_login_csrf_cookie(resp, csrf)
+    return resp
+
+
+@app.post("/reset-password")
+async def reset_password_submit(
+    request: Request,
+    token: str = Form(""),
+    new_password: str = Form(""),
+    confirm_password: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    if not auth.verify_login_csrf(request.cookies.get(auth.LOGIN_CSRF_COOKIE), csrf_token):
+        return RedirectResponse(url=f"/reset-password?token={token}&err=csrf", status_code=303)
+    if not (config.ACCOUNT_PASSWORD_MIN <= len(new_password) <= config.ACCOUNT_PASSWORD_MAX):
+        return RedirectResponse(url=f"/reset-password?token={token}&err=bad_password", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse(url=f"/reset-password?token={token}&err=mismatch", status_code=303)
+    ip = _ip(request)
+    ua = _ua(request)
+    # Атомарно проверяем+гасим токен (one-use). Только теперь узнаём username.
+    username = await db.consume_reset_token(_reset_token_hash(token))
+    if not username:
+        return RedirectResponse(url="/reset-password?err=expired", status_code=303)
+    await db.set_admin_user_password_with_audit(
+        username, auth.hash_password(new_password), actor=username, ip=ip, user_agent=ua,
+    )
+    # Выкидываем возможного угонщика: отзыв всех сессий учётки.
+    await db.revoke_all_sessions_with_audit(username, keep_sid=None, ip=ip, user_agent=ua)
+    await db.audit(actor=username, action="password_reset_done", ip=ip, user_agent=ua, detail={})
+    return RedirectResponse(url="/login?reset=1", status_code=303)
 
 
 def _login_error_text(error: str | None) -> str | None:
