@@ -67,6 +67,16 @@ check("ИП: город есть", ind.city == "Казань")
 check("ИП: адрес места жительства НЕ сохранён (address=None)", ind.address is None)
 check("ИП: fio/address ВЫРЕЗАНЫ из raw", "fio" not in ind.raw and "address" not in ind.raw)
 check("ИП: дом/улица/квартира НЕ утекли в raw", "Баумана" not in str(ind.raw) and "кв 12" not in str(ind.raw))
+check("ИП: наименование (ФИО) НЕ дублируется в raw['name']", "name" not in ind.raw)
+check("ЮЛ: наименование в raw (не ПДн)", "name" in leg.raw)
+
+# fail-safe классификатора: type не 'LEGAL' (иной регистр / отсутствует / вариант) → individual
+for _bad in ({"type": "individual", "inn": "1", "address": {"value": "г X, ул Y, д 1, кв 2"}},
+             {"inn": "1", "address": {"value": "г X, ул Y, д 1, кв 2"}},
+             {"type": "INDIVIDUAL_ENTREPRENEUR", "inn": "1", "address": {"value": "г X, ул Y, д 1"}}):
+    _c = dadata._parse_party(_bad)
+    check(f"type={_bad.get('type')!r} → individual (fail-safe)", _c.subject_type == "individual")
+    check(f"type={_bad.get('type')!r} → адрес НЕ сохранён", _c.address is None and "address" not in _c.raw)
 
 print(("\nFAIL: " + ", ".join(FAILS)) if FAILS else "\nВсе проверки dadata OK")
 sys.exit(1 if FAILS else 0)

@@ -27,7 +27,9 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 CARD_A = dadata.ProspectCard(inn="7707083893", subject_type="legal", name_short="ООО А",
-                             city="Москва", status="ACTIVE", raw={"inn": "7707083893"})
+                             city="Москва", status="ACTIVE",
+                             management={"name": "Иванов И.И.", "post": "Директор"},
+                             raw={"inn": "7707083893"})
 CARD_B = dadata.ProspectCard(inn="7707083893", subject_type="legal", name_short="ООО Б (тенант B)",
                              city="Казань", status="ACTIVE", raw={"inn": "7707083893"})
 
@@ -49,6 +51,8 @@ async def main():
         check("A видит свою карточку", len(rows_a) == 1 and rows_a[0]["inn"] == "7707083893")
         p_for_lead = await db.prospect_for_lead(lead_a)
         check("A: карточка привязана к лиду", p_for_lead is not None and str(p_for_lead["id"]) == pid_a)
+        check("management распарсен из jsonb (dict, не строка)",
+              isinstance(p_for_lead["management"], dict) and p_for_lead["management"].get("name") == "Иванов И.И.")
 
         db.set_active_tenant(tb)
         pid_b = await db.prospect_upsert(card=CARD_B, tenant_id=tb, actor="smoke", ip=None, user_agent=None)

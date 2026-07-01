@@ -4533,6 +4533,22 @@ def _jsonb(v):
     return json.dumps(v, ensure_ascii=False, default=_json_default) if v else None
 
 
+def _prospect_dict(rec):
+    """prospects-строка → dict с распарсенным management. asyncpg отдаёт jsonb СТРОКОЙ
+    (кодек не зарегистрирован) → без парсинга p.management.name в шаблоне = Undefined
+    (руководитель ЮЛ не отрендерится). Остальные jsonb (okveds/raw) в карточке не рендерятся."""
+    if rec is None:
+        return None
+    d = dict(rec)
+    m = d.get("management")
+    if isinstance(m, str):
+        try:
+            d["management"] = json.loads(m)
+        except (ValueError, TypeError):
+            d["management"] = None
+    return d
+
+
 async def prospect_upsert(*, card, tenant_id, actor, ip, user_agent, lead_id=None) -> str:
     """Upsert карточки по (tenant_id, inn). card — dadata.ProspectCard (контакты уже вырезаны).
     Повторный lookup обновляет реквизиты; ранее привязанный lead_id сохраняется. Возвращает id (str)."""
@@ -4584,19 +4600,19 @@ async def prospect_list(include_archived: bool = False) -> list[asyncpg.Record]:
             """, include_archived)
 
 
-async def prospect_get(pid) -> asyncpg.Record | None:
+async def prospect_get(pid) -> dict | None:
     async with pool.acquire() as c:
-        return await c.fetchrow(
+        return _prospect_dict(await c.fetchrow(
             "select * from prospects where id = $1 "
-            "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid", pid)
+            "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid", pid))
 
 
-async def prospect_for_lead(lead_id) -> asyncpg.Record | None:
+async def prospect_for_lead(lead_id) -> dict | None:
     async with pool.acquire() as c:
-        return await c.fetchrow(
+        return _prospect_dict(await c.fetchrow(
             "select * from prospects where lead_id = $1 "
             "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid "
-            "and not archived order by updated_at desc limit 1", lead_id)
+            "and not archived order by updated_at desc limit 1", lead_id))
 
 
 async def prospect_link_lead(pid, lead_id, *, actor, ip, user_agent) -> bool:

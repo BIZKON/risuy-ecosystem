@@ -21,8 +21,8 @@ _FIND_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party
 _SUGGEST_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party"
 # Аллоулист безопасных реестровых полей для raw. Минимизация ПДн (152-ФЗ): НЕ храним
 # phones/emails/fio/founders/managers/management; для ИП — и адрес места жительства.
-_RAW_ALLOWED = ("inn", "kpp", "ogrn", "ogrn_date", "opf", "name", "type",
-                "okved", "okveds", "state")
+_RAW_ALLOWED = ("inn", "kpp", "ogrn", "ogrn_date", "opf", "type",
+                "okved", "okveds", "state")  # name/address добавляются в raw ТОЛЬКО для ЮЛ
 
 
 def is_configured() -> bool:
@@ -54,11 +54,15 @@ class ProspectCard:
 
 def _sanitize(data: dict, stype: str) -> dict:
     """raw ТОЛЬКО из безопасных реестровых полей (аллоулист). Вырезаются phones/emails/
-    fio/founders/managers/management (ПДн физлиц). Для ИП адрес места жительства исключаем
-    целиком (в address.data — улица/дом); в карточке храним лишь город (колонка city)."""
+    fio/founders/managers/management (ПДн физлиц). Для ИП в raw НЕ кладём ни адрес места
+    жительства, ни наименование (=ФИО ИП): ФИО хранится лишь в колонке name_full как
+    наименование субъекта, дублировать его в jsonb-raw не нужно (минимизация ПДн)."""
     raw = {k: data[k] for k in _RAW_ALLOWED if k in data}
-    if stype == "legal" and isinstance(data.get("address"), dict):
-        raw["address"] = data["address"]  # юр.адрес ЮЛ — не ПДн
+    if stype == "legal":
+        if "name" in data:
+            raw["name"] = data["name"]          # наименование ЮЛ — не ПДн
+        if isinstance(data.get("address"), dict):
+            raw["address"] = data["address"]    # юр.адрес ЮЛ — не ПДн
     return raw
 
 
@@ -87,7 +91,9 @@ def _parse_party(data: dict) -> ProspectCard:
     addr = data.get("address") if isinstance(data.get("address"), dict) else {}
     addr_data = addr.get("data") or {}
     state = data.get("state") or {}
-    stype = "individual" if data.get("type") == "INDIVIDUAL" else "legal"
+    # fail-safe: ЮЛ-режим (хранение адреса) ТОЛЬКО при явном type='LEGAL'; всё иное
+    # (INDIVIDUAL / неизвестный / отсутствует / иной регистр) → individual (минимум ПДн).
+    stype = "legal" if str(data.get("type") or "").upper() == "LEGAL" else "individual"
     return ProspectCard(
         inn=data.get("inn") or "",
         subject_type=stype,
