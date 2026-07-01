@@ -27,7 +27,13 @@ async def send_password_reset(to_email: str, reset_url: str, *, ttl_min: int) ->
         "Если вы этого не запрашивали — просто проигнорируйте письмо. Пароль не изменится."
     )
     if not is_configured():
-        log.warning("SMTP не настроен (dry-run). Ссылка сброса для %s: %s", to_email, reset_url)
+        # Fail-safe: по умолчанию НЕ логируем рабочий токен/email (утечка секрета в логи прода
+        # при пустом SMTP). Полную ссылку показываем только при явном MAILER_DEBUG_LOG_URL (локаль).
+        if config.MAILER_DEBUG_LOG_URL:
+            log.warning("SMTP не настроен (dry-run). Ссылка сброса для %s: %s", to_email, reset_url)
+        else:
+            log.error("SMTP не настроен — письмо сброса НЕ отправлено (email/ссылка скрыты). "
+                      "Задайте SMTP_HOST/SMTP_FROM.")
         return
 
     msg = EmailMessage()

@@ -377,6 +377,10 @@ RESET_TOKEN_TTL_MIN = _opt_int("RESET_TOKEN_TTL_MIN", 30)
 RESET_WINDOW_MIN = _opt_int("RESET_WINDOW_MIN", 15)
 RESET_MAX_PER_WINDOW = _opt_int("RESET_MAX_PER_WINDOW", 3)
 RESET_MAX_PER_IP = _opt_int("RESET_MAX_PER_IP", 10)
+RESET_TIMING_FLOOR_MS = _opt_int("RESET_TIMING_FLOOR_MS", 500)
+# По умолчанию НЕ логировать рабочую ссылку/email при ненастроенном SMTP (dry-run) —
+# иначе пустой SMTP на проде = утечка рабочего токена сброса в логи. Включать только на локали.
+MAILER_DEBUG_LOG_URL = _opt_bool("MAILER_DEBUG_LOG_URL", False)
 
 SERVICE_INVOICE_STATUSES = ("pending", "paid", "canceled")
 SERVICE_INVOICE_STATUS_LABELS = {

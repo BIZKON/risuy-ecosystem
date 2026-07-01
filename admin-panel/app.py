@@ -21,6 +21,7 @@ import io
 import json
 import re
 import secrets
+import time
 import uuid
 
 import asyncpg
@@ -30,7 +31,7 @@ from decimal import Decimal, InvalidOperation
 from math import ceil
 from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -362,6 +363,15 @@ def _reset_error_text(code: str | None) -> str:
 
 
 # ---- /forgot-password ----------------------------------------------------- #
+async def _send_reset_email_bg(to_email: str, reset_url: str, ttl_min: int) -> None:
+    """Фоновая отправка письма сброса: изолирует SMTP-латентность/сбой от цикла ответа
+    (не 500, без timing/status-code enumeration-оракула)."""
+    try:
+        await mailer.send_password_reset(to_email, reset_url, ttl_min=ttl_min)
+    except Exception:
+        mailer.log.exception("Не удалось отправить письмо сброса (фон)")
+
+
 @app.get("/forgot-password", response_class=HTMLResponse)
 async def forgot_password_form(request: Request, sent: int = 0):
     # Уже вошёл — на дашборд.
@@ -379,15 +389,28 @@ async def forgot_password_form(request: Request, sent: int = 0):
 @app.post("/forgot-password")
 async def forgot_password_submit(
     request: Request,
+    background_tasks: BackgroundTasks,
     email: str = Form(""),
     csrf_token: str = Form(""),
 ):
+    # Фиксированный timing-floor: время ответа ~константа независимо от ветки (валидный/
+    # невалидный email) — против enumeration по времени. Отправка письма — в фон (см. ниже),
+    # поэтому SMTP-латентность/сбой на время и код ответа не влияют.
+    t0 = time.monotonic()
+
+    async def _floor() -> None:
+        elapsed = time.monotonic() - t0
+        floor = config.RESET_TIMING_FLOOR_MS / 1000
+        if elapsed < floor:
+            await asyncio.sleep(floor - elapsed)
+
     # Невалидный CSRF → тот же обобщённый ответ (без утечки существования email).
     if not auth.verify_login_csrf(request.cookies.get(auth.LOGIN_CSRF_COOKIE), csrf_token):
+        await _floor()
         return RedirectResponse(url="/forgot-password?sent=1", status_code=303)
     ip = _ip(request)
     email_norm = (email or "").strip().lower()
-    # Timing-floor против enumeration/брута (глобальный тарпит логина, read-only).
+    # Тарпит-пол (глобальная составляющая логина) ДО резолва.
     await auth.apply_tarpit(email_norm or "__reset__", bypass=False)
     username = (await db.get_active_username_by_email(email_norm)) if _valid_email(email_norm) else None
     if username:
@@ -400,10 +423,14 @@ async def forgot_password_submit(
             )
             base = config.PANEL_PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
             reset_url = f"{base}/reset-password?token={raw}"
-            await mailer.send_password_reset(email_norm, reset_url, ttl_min=config.RESET_TOKEN_TTL_MIN)
+            # Аудит — СИНХРОННО и независимо от результата отправки (журнал не теряется при SMTP-сбое).
             await db.audit(actor=username, action="password_reset_request",
                            ip=ip, user_agent=_ua(request), detail={})
-    # ВСЕГДА одинаковый ответ (anti-enumeration).
+            # Письмо — в фон (после ответа): SMTP не влияет на время/код ответа.
+            background_tasks.add_task(
+                _send_reset_email_bg, email_norm, reset_url, config.RESET_TOKEN_TTL_MIN)
+    # ВСЕГДА одинаковый ответ (anti-enumeration) + фиксированный timing-floor.
+    await _floor()
     return RedirectResponse(url="/forgot-password?sent=1", status_code=303)
 
 
@@ -441,9 +468,12 @@ async def reset_password_submit(
     username = await db.consume_reset_token(_reset_token_hash(token))
     if not username:
         return RedirectResponse(url="/reset-password?err=expired", status_code=303)
-    await db.set_admin_user_password_with_audit(
+    ok = await db.set_admin_user_password_with_audit(
         username, auth.hash_password(new_password), actor=username, ip=ip, user_agent=ua,
     )
+    if not ok:
+        # Учётка исчезла между consume и апдейтом (orphan-токен) — токен погашен, нужен новый.
+        return RedirectResponse(url="/reset-password?err=expired", status_code=303)
     # Выкидываем возможного угонщика: отзыв всех сессий учётки.
     await db.revoke_all_sessions_with_audit(username, keep_sid=None, ip=ip, user_agent=ua)
     await db.audit(actor=username, action="password_reset_done", ip=ip, user_agent=ua, detail={})
