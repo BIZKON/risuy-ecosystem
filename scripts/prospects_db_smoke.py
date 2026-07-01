@@ -40,6 +40,7 @@ async def main():
         tb = await c.fetchval("insert into tenants (slug, name, status) values "
                               "('smoke-prospect-b-'||substr(md5(random()::text),1,8),'SMOKE B','active') returning id")
         lead_a = await c.fetchval("insert into leads (tenant_id, name, consent) values ($1,'Лид A',true) returning id", ta)
+        lead_b = await c.fetchval("insert into leads (tenant_id, name, consent) values ($1,'Лид B',true) returning id", tb)
     try:
         db.set_active_tenant(ta)
         pid_a = await db.prospect_upsert(card=CARD_A, tenant_id=ta, actor="smoke", ip=None,
@@ -58,6 +59,15 @@ async def main():
         db.set_active_tenant(ta)
         got_b = await db.prospect_get(pid_b)
         check("A НЕ видит карточку B (RLS)", got_b is None)
+
+        # CRITICAL-2 фикс: чужой лид (тенант B) НЕ привязывается к карточке тенанта A (tenant-scoped подзапрос → NULL)
+        pid_x = await db.prospect_upsert(
+            card=dadata.ProspectCard(inn="7800000000", subject_type="legal", name_short="ООО X",
+                                     raw={"inn": "7800000000"}),
+            tenant_id=ta, actor="smoke", ip=None, user_agent=None, lead_id=lead_b)
+        px = await db.prospect_get(pid_x)
+        check("чужой лид тенанта B НЕ привязан к карточке тенанта A (lead_id=NULL)",
+              px is not None and px["lead_id"] is None)
 
         async with db.pool.acquire() as c:
             await c.execute("delete from leads where id=$1", lead_a)

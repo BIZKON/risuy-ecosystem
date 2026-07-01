@@ -4066,6 +4066,7 @@ def _companies_err_text(err: str | None) -> str | None:
         "not_found": "Компания по такому ИНН не найдена.",
         "provider_off": "Источник ЕГРЮЛ не подключён.",
         "quota": "Дневной лимит запросов к источнику исчерпан. Попробуйте завтра.",
+        "bad_lead": "Лид не найден или недоступен.",
     }.get(err or "")
 
 
@@ -4119,12 +4120,21 @@ async def companies_lookup(
     q = (inn or "").strip()
     if not q.isdigit() or len(q) not in _INN_LENGTHS:
         return RedirectResponse(url=f"{dest}?err=bad_inn", status_code=303)
+    # lead_id (скрытое поле формы) — типобезопасно + принадлежность активному тенанту
+    # (RLS-скоупленный get_lead) ДО платного find_party/квоты.
+    lid = None
+    if lead_id.strip():
+        try:
+            lid = uuid.UUID(lead_id.strip())
+        except ValueError:
+            return RedirectResponse(url=f"{dest}?err=bad_lead", status_code=303)
+        if await db.get_lead(lid) is None:
+            return RedirectResponse(url=f"{dest}?err=bad_lead", status_code=303)
     if not await db.dadata_quota_take(config.DADATA_DAILY_LIMIT):
         return RedirectResponse(url=f"{dest}?err=quota", status_code=303)
     card = await dadata.find_party(q)
     if card is None:
         return RedirectResponse(url=f"{dest}?err=not_found", status_code=303)
-    lid = lead_id.strip() or None
     await db.prospect_upsert(card=card, tenant_id=tid, actor=session.actor,
                              ip=_ip(request), user_agent=_ua(request), lead_id=lid)
     return RedirectResponse(url=f"{dest}?saved=1", status_code=303)
@@ -4158,7 +4168,7 @@ async def companies_search(
 
 @app.post("/companies/{pid}/link-lead")
 async def companies_link_lead(
-    pid: str,
+    pid: uuid.UUID,
     request: Request,
     session: auth.Session = Depends(require_session),
     lead_id: str = Form(""),
@@ -4166,17 +4176,25 @@ async def companies_link_lead(
     csrf_token: str = Form(""),
 ):
     await _enforce_csrf(request, session, csrf_token)
+    dest = _safe_next(back)
     if not session.active_tenant_id:
         return RedirectResponse(url="/companies", status_code=303)
-    lid = lead_id.strip() or None
+    lid = None
+    if lead_id.strip():
+        try:
+            lid = uuid.UUID(lead_id.strip())
+        except ValueError:
+            return RedirectResponse(url=f"{dest}?err=bad_lead", status_code=303)
+        if await db.get_lead(lid) is None:
+            return RedirectResponse(url=f"{dest}?err=bad_lead", status_code=303)
     if lid:
         await db.prospect_link_lead(pid, lid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
-    return RedirectResponse(url=f"{_safe_next(back)}?saved=1", status_code=303)
+    return RedirectResponse(url=f"{dest}?saved=1", status_code=303)
 
 
 @app.post("/companies/{pid}/archive")
 async def companies_archive(
-    pid: str,
+    pid: uuid.UUID,
     request: Request,
     session: auth.Session = Depends(require_session),
     csrf_token: str = Form(""),

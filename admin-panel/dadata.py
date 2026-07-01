@@ -19,7 +19,10 @@ log = logging.getLogger("dadata")
 
 _FIND_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party"
 _SUGGEST_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party"
-_STRIP_KEYS = ("phones", "emails")  # контакты — НЕ храним/не показываем
+# Аллоулист безопасных реестровых полей для raw. Минимизация ПДн (152-ФЗ): НЕ храним
+# phones/emails/fio/founders/managers/management; для ИП — и адрес места жительства.
+_RAW_ALLOWED = ("inn", "kpp", "ogrn", "ogrn_date", "opf", "name", "type",
+                "okved", "okveds", "state")
 
 
 def is_configured() -> bool:
@@ -49,9 +52,14 @@ class ProspectCard:
     raw: dict = field(default_factory=dict)  # санитизированный (без контактов)
 
 
-def _sanitize(data: dict) -> dict:
-    """Копия data без контактов/закрытых категорий (защита до записи)."""
-    return {k: v for k, v in data.items() if k not in _STRIP_KEYS}
+def _sanitize(data: dict, stype: str) -> dict:
+    """raw ТОЛЬКО из безопасных реестровых полей (аллоулист). Вырезаются phones/emails/
+    fio/founders/managers/management (ПДн физлиц). Для ИП адрес места жительства исключаем
+    целиком (в address.data — улица/дом); в карточке храним лишь город (колонка city)."""
+    raw = {k: data[k] for k in _RAW_ALLOWED if k in data}
+    if stype == "legal" and isinstance(data.get("address"), dict):
+        raw["address"] = data["address"]  # юр.адрес ЮЛ — не ПДн
+    return raw
 
 
 def _epoch_ms_to_date(v) -> str | None:
@@ -91,14 +99,14 @@ def _parse_party(data: dict) -> ProspectCard:
         okved=data.get("okved"),
         okved_name=_main_okved_name(data.get("okveds")),
         okveds=data.get("okveds"),
-        address=addr.get("value"),
+        address=(addr.get("value") if stype == "legal" else None),  # ИП: адрес места жительства НЕ храним
         region=addr_data.get("region"),
         city=addr_data.get("city") or addr_data.get("settlement"),
         status=state.get("status"),
         registration_date=_epoch_ms_to_date(state.get("registration_date")),
         liquidation_date=_epoch_ms_to_date(state.get("liquidation_date")),
         management=(data.get("management") if stype == "legal" else None),
-        raw=_sanitize(data),
+        raw=_sanitize(data, stype),
     )
 
 

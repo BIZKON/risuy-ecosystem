@@ -4545,7 +4545,9 @@ async def prospect_upsert(*, card, tenant_id, actor, ip, user_agent, lead_id=Non
                     registration_date, liquidation_date, management, source, raw, fetched_at,
                     lead_id, created_by)
                 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16::date,$17::date,
-                    $18::jsonb,'dadata',$19::jsonb, now(), $20, $21)
+                    $18::jsonb,'dadata',$19::jsonb, now(),
+                    (select id from leads where id = $20::uuid
+                       and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid), $21)
                 on conflict (tenant_id, inn) do update set
                     kpp=excluded.kpp, ogrn=excluded.ogrn, subject_type=excluded.subject_type,
                     name_short=excluded.name_short, name_full=excluded.name_full, opf=excluded.opf,
@@ -4601,7 +4603,10 @@ async def prospect_link_lead(pid, lead_id, *, actor, ip, user_agent) -> bool:
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
-                "update prospects set lead_id = $2, updated_at = now() where id = $1 "
+                "update prospects set "
+                "lead_id = (select id from leads where id = $2::uuid "
+                "           and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid), "
+                "updated_at = now() where id = $1 "
                 "and tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid returning id",
                 pid, lead_id)
             if row is None:

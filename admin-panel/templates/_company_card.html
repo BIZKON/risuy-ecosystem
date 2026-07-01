@@ -10,7 +10,8 @@
     {% if p.ogrn %}<dt>ОГРН</dt><dd class="mono">{{ p.ogrn }}</dd>{% endif %}
     {% if p.opf %}<dt>ОПФ</dt><dd>{{ p.opf }}</dd>{% endif %}
     {% if p.okved %}<dt>ОКВЭД</dt><dd>{{ p.okved }}{% if p.okved_name %} — {{ p.okved_name }}{% endif %}</dd>{% endif %}
-    {% if p.address %}<dt>Адрес</dt><dd>{{ p.address }}</dd>{% endif %}
+    {% if p.subject_type == 'legal' and p.address %}<dt>Адрес</dt><dd>{{ p.address }}</dd>{% endif %}
+    {% if p.subject_type == 'individual' and p.city %}<dt>Город</dt><dd>{{ p.city }}</dd>{% endif %}
     {% if p.registration_date %}<dt>Регистрация</dt><dd>{{ p.registration_date }}</dd>{% endif %}
     {% if p.subject_type == 'legal' and p.management and p.management.name %}
       <dt>Руководитель</dt><dd>{{ p.management.name }}{% if p.management.post %}, {{ p.management.post }}{% endif %}</dd>
