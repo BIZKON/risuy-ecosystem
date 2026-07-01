@@ -813,3 +813,10 @@ ACCOUNT_PROVIDER_LABELS = {
     "telegram": "Telegram",
     "vk": "ВКонтакте",
 }
+
+# ── DaData (обогащение по ЕГРЮЛ, per-lookup; тариф «Лёгкий») ─────────────────
+DADATA_API_KEY = os.environ.get("DADATA_API_KEY", "")
+DADATA_SECRET_KEY = os.environ.get("DADATA_SECRET_KEY", "")
+DADATA_TIMEOUT_SEC = _opt_int("DADATA_TIMEOUT_SEC", 5)
+DADATA_DAILY_LIMIT = _opt_int("DADATA_DAILY_LIMIT", 50000)   # суточный лимит тарифа «Лёгкий»
+PROSPECT_TTL_DAYS = _opt_int("PROSPECT_TTL_DAYS", 60)        # TTL карточки (рефреш при показе; задел)
