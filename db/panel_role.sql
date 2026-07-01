@@ -261,6 +261,7 @@ grant select, insert, update, delete on tenant_agents         to panel_rw;  -- W
 grant select, insert, update, delete on tenant_triggers       to panel_rw;  -- Слой B: CRUD триггеров клиента
 grant select, insert                 on consent_events        to panel_rw;  -- 152-ФЗ ст.9: реестр согласий (append-only — читает + пишет 'revoked')
 revoke update, delete                on consent_events        from panel_rw; -- доказательная база неизменна (зеркало admin_audit / migrate_consent_events.sql:44)
+grant select, insert, update         on prospects             to panel_rw;  -- карточки ЕГРЮЛ: панель пишет; без delete (archived-флаг). Зеркало migrate_prospects.sql
 -- Парадная: внешние идентичности клиентских учёток (object — db/schema_account_identities.sql).
 -- Self-serve регистрация (за флагом PUBLIC_SIGNUP_ENABLED) пишет identity + создаёт tenant/
 -- membership (insert на них уже выдан выше). Резолв логина (email/ВК/ТГ→username) — select.
