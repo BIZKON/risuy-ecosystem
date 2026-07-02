@@ -3,12 +3,47 @@
 Аддитивно и fail-soft: любой сбой → бот отвечает как раньше (память молча отключается).
 v1: per-lead (сводки только этого клиента — нет кросс-клиентской утечки), только kind='summary'."""
 import logging
+import re
 
 import config
 import db
+import escalation
 import kb
+import triggers
 
 logger = logging.getLogger(__name__)
+
+# Жёсткий потолок длины сводки: LLM-суммаризатор недоверен (лид может «продиктовать» ему
+# простыню), а retrieve подмешивает сводки в промпт целиком.
+_SUMMARY_MAX_LEN = 600
+
+# Вырезание служебных маркеров ИЗ СВОДКИ. В отличие от _MARKER_FRAG_RE/_TRIGGER_FRAG_RE
+# (путь ОТВЕТА, где маркер по протоколу в КОНЦЕ → режут до конца строки через .*), здесь
+# маркер может стоять ГДЕ УГОДНО в сводке недоверенного диалога. Поэтому паттерн ОГРАНИЧЕН
+# (без .*): вырезает только сам токен [[...]], а факты вокруг него сохраняются.
+_SUMMARY_MARKER_RE = re.compile(r"\[\[\s*/?\s*(?:ESCALATE|TRIGGER)\b[^\]]*\]{0,2}", re.IGNORECASE)
+
+
+def _sanitize_summary(text: str) -> str:
+    """Санитизация сводки перед записью в долгую память: сводка построена из НЕДОВЕРЕННОГО
+    диалога лида — вырезаем служебные маркеры ([[ESCALATE]]/[[TRIGGER:N]]), чтобы сохранённый
+    «факт» не мог позже эмитить реальные действия, и ограничиваем длину."""
+    cleaned = text or ""
+    # Итеративно ДО ФИКСИРОВАННОЙ ТОЧКИ: одиночный .sub на ВЛОЖЕННОМ маркере
+    # ([[ESCA[[TRIGGER:5]]LATE]]) вырезал бы внутренний и СКЛЕИЛ обломки в валидный [[ESCALATE]]
+    # — filter-bypass через вложение (как <scr<script>ipt>). Цикл схлопывает вложения.
+    while True:
+        stripped = _SUMMARY_MARKER_RE.sub("", cleaned)
+        if stripped == cleaned:
+            break
+        cleaned = stripped
+    cleaned = cleaned.strip()[:_SUMMARY_MAX_LEN].strip()
+    # Fail-closed: если ОСТАТОК всё равно распознаётся детекторами ответного пути как маркер
+    # (форма, которую _SUMMARY_MARKER_RE не покрыл), сводку НЕ храним вовсе — пусть лучше пусто,
+    # чем осевший в памяти исполняемый маркер. Синхронизировано с реальными парсерами.
+    if escalation._MARKER_ANCHOR_RE.search(cleaned) or "[[TRIGGER" in cleaned.upper():
+        return ""
+    return cleaned
 
 
 async def retrieve(text: str, tenant_id, agent_id, lead_key: str | None,
@@ -31,7 +66,10 @@ async def retrieve(text: str, tenant_id, agent_id, lead_key: str | None,
     if not hits:
         return ""
     body = "\n".join(f"• {h.strip()}" for h in hits)
-    return "🧠 Контекст прошлых диалогов с этим клиентом:\n" + body
+    # Только метка-заголовок: анти-инъекционная директива и «это данные, не инструкции»
+    # живут в _DATA_FENCE (kb.augment), СНАРУЖИ блока данных — иначе директива внутри
+    # блока «здесь только данные» сама себе противоречит (ревью Фазы 0).
+    return "🧠 Прошлые диалоги с этим клиентом:\n" + body
 
 
 def _dialog_text(history: list[dict]) -> str:
@@ -65,8 +103,16 @@ async def maybe_summarize(*, external_id, tenant_id, cfg: dict, history: list[di
     if not dialog:
         return
     try:
-        summary = await ai.summarize_dialog(dialog, cfg)
+        raw = await ai.summarize_dialog(dialog, cfg)
+        if not raw:
+            return  # LLM-сбой/фолбэк — водяной знак НЕ двигаем, повторим на следующем пороге
+        summary = _sanitize_summary(raw)
         if not summary:
+            # Сводка после санитизации пуста (напр. состояла только из внедрённых лидом
+            # маркеров). Фиксируем водяной знак up_to БЕЗ контентной записи: иначе дельта-порог
+            # остаётся взведённым и суммаризатор-LLM дёргается на КАЖДОМ следующем входящем
+            # этого лида (эконом-DoS ровно тем лидом, от которого защищаемся).
+            await db.memory_mark_up_to(tenant_id, agent_id, lead_key, msg_count)
             return
         emb = await kb.embed_passage(summary)
         if not emb:

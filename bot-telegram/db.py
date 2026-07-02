@@ -1848,8 +1848,9 @@ async def kb_search(
     тенанта; чанк отдела — только агенту с этим slug. max_distance отсекает нерелевантное
     (косинусная дистанция: 0 — идентично, 2 — противоположно; для e5 релевантное ~0.1–0.3).
     Бот ходит под owner-ролью — грант на kb_chunks не нужен. Сбой/нет таблицы (DDL не
-    применён) → исключение пробрасываем: kb.retrieve_context его ловит и отключает RAG."""
-    if not embedding or pool is None:
+    применён) → исключение пробрасываем: kb.retrieve_context его ловит и отключает RAG.
+    NULL-тенант → fail-closed [] (как memory_search): легитимного вызова без тенанта нет."""
+    if not embedding or pool is None or tenant_id is None:
         return []
     vec = "[" + ",".join(f"{x:.6f}" for x in embedding) + "]"
     per = (persona or "").strip()
@@ -1859,7 +1860,7 @@ async def kb_search(
             select content
               from kb_chunks
              where embedding is not null
-               and tenant_id is not distinct from $2
+               and tenant_id = $2
                and (coalesce(metadata->>'role_tag', '') = '' or metadata->>'role_tag' = $3)
                and (embedding <=> $1::vector) <= $4
              order by embedding <=> $1::vector
@@ -1884,6 +1885,22 @@ async def memory_insert(tenant_id, agent_id, content: str, embedding, *,
             "insert into agent_memory (tenant_id, agent_id, kind, content, embedding, metadata) "
             "values ($1,$2,$3,$4,$5::vector,$6::jsonb)",
             tenant_id, agent_id, kind, content.strip(), vec, _json.dumps(metadata or {}),
+        )
+
+
+async def memory_mark_up_to(tenant_id, agent_id, lead_key: str | None, up_to: int) -> None:
+    """Зафиксировать водяной знак up_to БЕЗ контентной записи (kind='watermark', embedding NULL),
+    когда сводка после санитизации пуста. memory_last_up_to подхватит up_to → дельта-порог
+    суммаризации не остаётся взведённым; memory_search такую строку не вернёт (фильтр
+    `embedding is not null`). Нет пула → no-op."""
+    import json as _json
+    if pool is None:
+        return
+    async with pool.acquire() as c:
+        await c.execute(
+            "insert into agent_memory (tenant_id, agent_id, kind, content, embedding, metadata) "
+            "values ($1,$2,'watermark','',null,$3::jsonb)",
+            tenant_id, agent_id, _json.dumps({"lead": lead_key, "up_to": up_to}),
         )
 
 
