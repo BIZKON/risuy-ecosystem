@@ -193,13 +193,29 @@ async def db_part():
         await c.execute(
             "insert into kb_chunks(tenant_id,document_id,chunk_index,content,embedding) "
             "values($1,$2,0,'СЕК0-ФАКТ-A',$3::vector)", ta, da, veclit)
+        agent = await c.fetchval(
+            "insert into team_agents(tenant_id,slug,name) values($1,'sales','S') returning id", ta)
     try:
         a = await bdb.kb_search(VEC, ta, top_k=10, max_distance=2.0)
         none_res = await bdb.kb_search(VEC, None, top_k=10, max_distance=2.0)
         check("тенант видит свой чанк (регрессия)", "СЕК0-ФАКТ-A" in a)
         check("tenant=None → строго [] (fail-closed)", none_res == [])
+
+        # Watermark-путь (антизацикливание, Task 0.2): mark_up_to фиксирует up_to БЕЗ
+        # контентной строки; memory_last_up_to подхватывает, memory_search не возвращает.
+        print("— watermark memory_mark_up_to (Task 0.2, risuy_dev)")
+        check("baseline last_up_to=0", await bdb.memory_last_up_to(ta, agent, "L1") == 0)
+        await bdb.memory_mark_up_to(ta, agent, "L1", 42)
+        check("mark_up_to → last_up_to=42 (порог разомкнут)",
+              await bdb.memory_last_up_to(ta, agent, "L1") == 42)
+        check("per-lead: другой лид watermark не видит", await bdb.memory_last_up_to(ta, agent, "L2") == 0)
+        await bdb.memory_insert(ta, agent, "РЕАЛ-сводка", VEC, metadata={"lead": "L1", "up_to": 50})
+        hits = await bdb.memory_search(VEC, ta, agent, "L1", top_k=10, max_distance=2.0)
+        check("memory_search видит реальную сводку, НЕ watermark",
+              hits == ["РЕАЛ-сводка"])
     finally:
         async with bdb.pool.acquire() as c:
+            # tenant delete каскадит team_agents+agent_memory; kb_* чистим явно (без cascade).
             sub = "select id from tenants where slug = 'sec0-smoke-a'"
             await c.execute(f"delete from kb_chunks    where tenant_id in ({sub})")
             await c.execute(f"delete from kb_documents where tenant_id in ({sub})")

@@ -84,7 +84,10 @@ async def main():
         check("нет колонок под телефоны/email/паспорт", not (cols & {"phones", "emails", "phone", "passport"}))
     finally:
         async with db.pool.acquire() as c:
+            # Порядок FK (leads_tenant_id_fkey без CASCADE): prospects → leads → tenants.
+            # lead_b в тесте не удаляется → чистим leads тенантов явно, иначе delete tenants падает.
             await c.execute("delete from prospects where tenant_id = any($1::uuid[])", [ta, tb])
+            await c.execute("delete from leads where tenant_id = any($1::uuid[])", [ta, tb])
             await c.execute("delete from tenants where id = any($1::uuid[])", [ta, tb])
         await db.pool.close()
     print(("\nFAIL: " + ", ".join(FAILS)) if FAILS else "\nВсе проверки prospects OK")
