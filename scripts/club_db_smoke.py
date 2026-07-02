@@ -86,11 +86,11 @@ async def main():
 
         db.set_active_tenant(ta)
         list_a = await db.club_member_list(ta)
-        check("list(A) содержит mid", any(m["id"] == mid for m in list_a))
+        check("list(A) содержит mid", any(str(m["id"]) == mid for m in list_a))
 
         db.set_active_tenant(tb)
         list_b = await db.club_member_list(tb)
-        check("RLS: list(B) НЕ содержит mid", all(m["id"] != mid for m in list_b))
+        check("RLS: list(B) НЕ содержит mid", all(str(m["id"]) != mid for m in list_b))
 
         # ── согласие пишется в consent_events ────────────────────────────────
         db.set_active_tenant(ta)
