@@ -26,8 +26,11 @@ _RAW_ALLOWED = ("inn", "kpp", "ogrn", "ogrn_date", "opf", "type",
 
 
 def is_configured() -> bool:
-    """DaData настроен для реальных запросов (нужны токен + секрет для find-party)?"""
-    return bool(config.DADATA_API_KEY and config.DADATA_SECRET_KEY)
+    """DaData настроен И включён для реальных запросов. Три условия: токен + секрет (для
+    find-party) + ЯВНЫЙ мастер-флаг DADATA_ENABLED. Наличие токена в env само по себе НЕ
+    открывает живой lookup тенантам — включение отдельным осознанным шагом после legal gate
+    (спека prospects §14). До включения панель показывает degrade «источник не подключён»."""
+    return bool(config.DADATA_ENABLED and config.DADATA_API_KEY and config.DADATA_SECRET_KEY)
 
 
 @dataclass

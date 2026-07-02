@@ -815,6 +815,10 @@ ACCOUNT_PROVIDER_LABELS = {
 }
 
 # ── DaData (обогащение по ЕГРЮЛ, per-lookup; тариф «Лёгкий») ─────────────────
+# Мастер-гейт живого lookup: НАЛИЧИЯ токена в env НЕДОСТАТОЧНО для боевого включения тенантам —
+# нужен ещё явный DADATA_ENABLED=true. Это pre-launch legal gate (спека prospects §14: юр-заключение
+# 152-ФЗ/ГК гл.71, оферта DaData, Политика/уведомление субъекта) — включать ТОЛЬКО после его прохождения.
+DADATA_ENABLED = _opt_bool("DADATA_ENABLED", False)
 DADATA_API_KEY = os.environ.get("DADATA_API_KEY", "")
 DADATA_SECRET_KEY = os.environ.get("DADATA_SECRET_KEY", "")
 DADATA_TIMEOUT_SEC = _opt_int("DADATA_TIMEOUT_SEC", 5)
