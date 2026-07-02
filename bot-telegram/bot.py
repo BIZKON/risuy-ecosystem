@@ -363,12 +363,14 @@ async def _legal_page(request: web.Request) -> web.StreamResponse:
     from shared.leadmagnet import build_consent_text, build_privacy_policy
     phone = bool((kv.get("phone_step_enabled") or "").strip())
     if doc_type == "privacy":
+        rf = await db.get_ai_inference_rf()
         title = "Политика обработки персональных данных"
         body = build_privacy_policy(
             kv["operator_name"], kv["operator_inn"], kv["operator_email"],
             operator_ogrn=kv.get("operator_ogrn") or None,
             operator_address=kv.get("operator_address") or None,
-            data_purpose=kv.get("data_purpose") or None, phone_step=phone)
+            data_purpose=kv.get("data_purpose") or None, phone_step=phone,
+            transborder=not rf)
     else:
         title = "Согласие на обработку персональных данных"
         body = build_consent_text(

@@ -5223,7 +5223,7 @@ async def my_agent_escalation(
 # как /channels). Текст согласия 152-ФЗ генерится из структурных полей (shared/leadmagnet),
 # свободный ввод текста согласия не предусмотрен. Бот читает get_funnel_config в мультиплексе.
 # =========================================================================== #
-def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: bool = False,
+async def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: bool = False,
                         legal_urls: dict | None = None, help_dismissed: bool = False):
     # Из тех же реквизитов, что и согласие, собираем предпросмотр Политики — тенант видит оба
     # документа прямо в панели, ничего «скрытого». Гейт един: оператор+ИНН+email заполнены.
@@ -5237,12 +5237,14 @@ def _render_lead_magnet(request, session, *, values: dict, errors=(), saved: boo
             privacy_url=values.get("privacy_url") or None,
             phone_step=phone_step,
         )
+        rf = await db.get_ai_inference_rf()
         policy = leadmagnet.build_privacy_policy(
             values["operator_name"], values["operator_inn"], values["operator_email"],
             operator_ogrn=values.get("operator_ogrn") or None,
             operator_address=values.get("operator_address") or None,
             data_purpose=values.get("data_purpose") or None,
             phone_step=phone_step,
+            transborder=not rf,
         )
     return templates.TemplateResponse(
         request,
@@ -5277,7 +5279,7 @@ async def lead_magnet_page(
     values = (await db.get_funnel_config_panel(tid) if tid
               else {k: "" for k in leadmagnet.FUNNEL_KEYS})
     legal_urls = await db.get_tenant_legal_urls(tid)
-    return _render_lead_magnet(request, session, values=values, saved=bool(saved), legal_urls=legal_urls,
+    return await _render_lead_magnet(request, session, values=values, saved=bool(saved), legal_urls=legal_urls,
                               help_dismissed=await _help_dismissed(session, "lead_magnet"))
 
 
@@ -5292,7 +5294,7 @@ async def lead_magnet_save(
     hd = await _help_dismissed(session, "lead_magnet")  # сохранить состояние help-card на ре-рендере ошибок
     if not tid:
         empty = {k: "" for k in leadmagnet.FUNNEL_KEYS}
-        return _render_lead_magnet(
+        return await _render_lead_magnet(
             request, session, values=empty, help_dismissed=hd,
             errors=["Кабинет ещё не привязан к клиенту — обратитесь в поддержку."])
     legal_urls = await db.get_tenant_legal_urls(tid)
@@ -5309,7 +5311,7 @@ async def lead_magnet_save(
     if upload is not None and getattr(upload, "filename", ""):
         file_meta, file_err = await _read_product_file(request, upload)
         if file_err:
-            return _render_lead_magnet(
+            return await _render_lead_magnet(
                 request, session, values=fields, legal_urls=legal_urls, help_dismissed=hd,
                 errors=[f"Файл не подошёл (проверьте тип: PDF/изображение/документ, и размер ≤ "
                         f"{config.MAX_PRODUCT_FILE_MB} МБ). Код: {file_err}"])
@@ -5324,7 +5326,7 @@ async def lead_magnet_save(
         tid, fields, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     if errs:
         # Не PRG: возвращаем форму с ошибками и введёнными значениями (не теряем ввод).
-        return _render_lead_magnet(request, session, values=fields, errors=errs, legal_urls=legal_urls,
+        return await _render_lead_magnet(request, session, values=fields, errors=errs, legal_urls=legal_urls,
                                    help_dismissed=hd)
     return RedirectResponse(url="/lead-magnet?saved=1", status_code=303)
 
