@@ -262,6 +262,14 @@ grant select, insert, update, delete on tenant_triggers       to panel_rw;  -- �
 grant select, insert                 on consent_events        to panel_rw;  -- 152-ФЗ ст.9: реестр согласий (append-only — читает + пишет 'revoked')
 revoke update, delete                on consent_events        from panel_rw; -- доказательная база неизменна (зеркало admin_audit / migrate_consent_events.sql:44)
 grant select, insert, update         on prospects             to panel_rw;  -- карточки ЕГРЮЛ: панель пишет; без delete (archived-флаг). Зеркало migrate_prospects.sql
+
+-- Клуб предпринимателей (Фаза 1, Уровень 1) — объекты в db/migrate_club.sql. Зеркало его грантов.
+-- Без delete: «уход» участника = status='left', а не удаление строки.
+grant select, insert, update on club_members  to panel_rw;  -- update: status/network_opt_in/профильные поля
+grant select, insert, update on club_profiles to panel_rw;
+grant select, insert, update on club_intros   to panel_rw;  -- update: status/decided_at
+-- consent_events уже покрыт выше (append-only); member_id — существующий table-level select/insert грант
+
 -- Парадная: внешние идентичности клиентских учёток (object — db/schema_account_identities.sql).
 -- Self-serve регистрация (за флагом PUBLIC_SIGNUP_ENABLED) пишет identity + создаёт tenant/
 -- membership (insert на них уже выдан выше). Резолв логина (email/ВК/ТГ→username) — select.
