@@ -470,7 +470,7 @@ async def reset_password_submit(
     if not username:
         return RedirectResponse(url="/reset-password?err=expired", status_code=303)
     ok = await db.set_admin_user_password_with_audit(
-        username, auth.hash_password(new_password), actor=username, ip=ip, user_agent=ua,
+        username, await auth.hash_password(new_password), actor=username, ip=ip, user_agent=ua,
     )
     if not ok:
         # Учётка исчезла между consume и апдейтом (orphan-токен) — токен погашен, нужен новый.
@@ -645,7 +645,7 @@ async def signup_register(
     try:
         username, _tenant = await db.create_client_account(
             provider="email", external_id=email, name=email,
-            password_hash=auth.hash_password(password), verified=False, ip=ip, user_agent=ua,
+            password_hash=await auth.hash_password(password), verified=False, ip=ip, user_agent=ua,
         )
     except asyncpg.UniqueViolationError:
         # Гонка двойного сабмита (find_identity прошёл у обоих) → не плодим, ведём на вход.
@@ -693,7 +693,7 @@ async def auth_telegram_callback(request: Request):
     try:
         username, _t = await db.create_client_account(
             provider="telegram", external_id=tg_id, name=name,
-            password_hash=auth.hash_password(secrets.token_urlsafe(32)),  # пароля нет → неюзабельный хеш
+            password_hash=await auth.hash_password(secrets.token_urlsafe(32)),  # пароля нет → неюзабельный хеш
             display_name=name, verified=True, ip=ip, user_agent=ua,
         )
     except asyncpg.UniqueViolationError:
@@ -754,7 +754,7 @@ async def auth_vk_callback(request: Request, code: str = "", state: str = "", de
         try:
             username, _t = await db.create_client_account(
                 provider="vk", external_id=vk_id, name=name,
-                password_hash=auth.hash_password(secrets.token_urlsafe(32)),
+                password_hash=await auth.hash_password(secrets.token_urlsafe(32)),
                 display_name=name, verified=True, ip=ip, user_agent=ua,
             )
         except asyncpg.UniqueViolationError:
@@ -2875,7 +2875,7 @@ async def broadcast_send(
 
     # 2) Step-up: повторный пароль оператора (constant-time argon2). Режет угнанную
     #    куку/открытую вкладку. Дёшево, переживает рестарт (§7.1).
-    if not auth.verify_password(password):
+    if not await auth.verify_password(password):
         return _broadcast_detail_redirect(broadcast_id, "stepup")
 
     # Считаем фактический размер аудитории ТЕМ ЖЕ фильтром, что бот возьмёт snapshot'ом.
@@ -2930,7 +2930,7 @@ async def broadcast_resume(
     # Подтверждение + step-up пароль (constant-time argon2) — как при запуске.
     if confirm != "yes":
         return _broadcast_detail_redirect(broadcast_id, "confirm")
-    if not auth.verify_password(password):
+    if not await auth.verify_password(password):
         return _broadcast_detail_redirect(broadcast_id, "stepup")
 
     result = await db.resume_broadcast_with_audit(
@@ -4855,7 +4855,7 @@ async def team_create(
     if not (config.TEAM_PASSWORD_MIN <= len(password) <= config.TEAM_PASSWORD_MAX):
         return RedirectResponse(url="/team?err=bad_password", status_code=303)
     result = await db.create_admin_user_with_audit(
-        uname, auth.hash_password(password), role,
+        uname, await auth.hash_password(password), role,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     if result == "exists":
@@ -4916,7 +4916,7 @@ async def team_reset_password(
     if not (config.TEAM_PASSWORD_MIN <= len(password) <= config.TEAM_PASSWORD_MAX):
         return RedirectResponse(url="/team?err=bad_password", status_code=303)
     ok = await db.set_admin_user_password_with_audit(
-        username.lower(), auth.hash_password(password),
+        username.lower(), await auth.hash_password(password),
         actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/team?saved=password" if ok else "/team?err=not_found", status_code=303)
@@ -5074,7 +5074,7 @@ async def account_change_password(
     if new_password != confirm_password:
         return RedirectResponse(url="/account?err=mismatch", status_code=303)
     ok = await db.change_own_password_with_audit(
-        session.actor, auth.hash_password(new_password),
+        session.actor, await auth.hash_password(new_password),
         ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/account?saved=password" if ok else "/account?err=not_found", status_code=303)

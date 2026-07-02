@@ -45,7 +45,7 @@ async def main() -> None:
         await drop()
         await c.execute(
             "insert into admin_users (username,password_hash,role,active) "
-            "values ($1,$2,'operator',true)", U, auth.hash_password("irrelevant-old-pw"))
+            "values ($1,$2,'operator',true)", U, await auth.hash_password("irrelevant-old-pw"))
         await c.execute(
             "insert into account_identities (provider,external_id,username,verified) "
             "values ('email',$1,$2,true)", EMAIL, U)

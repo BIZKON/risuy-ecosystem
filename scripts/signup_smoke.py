@@ -76,7 +76,7 @@ async def main() -> None:
         emailA = "smoke+a@example.org"
         uA, tA = await db.create_client_account(
             provider="email", external_id=emailA, name=emailA,
-            password_hash=auth.hash_password("smoke-pass-123"), verified=False)
+            password_hash=await auth.hash_password("smoke-pass-123"), verified=False)
         CREATED.append((uA, tA))
         async with db.pool.acquire() as c:
             t_status = await c.fetchval("select status from tenants where id = $1", tA)
@@ -94,7 +94,7 @@ async def main() -> None:
         emailB = "smoke+b@example.org"
         uB, tB = await db.create_client_account(
             provider="email", external_id=emailB, name=emailB,
-            password_hash=auth.hash_password("smoke-pass-456"), verified=False)
+            password_hash=await auth.hash_password("smoke-pass-456"), verified=False)
         CREATED.append((uB, tB))
         sidA = await auth.create_session(uA, "admin")
         sidB = await auth.create_session(uB, "admin")
@@ -113,7 +113,7 @@ async def main() -> None:
         try:
             await db.create_client_account(
                 provider="email", external_id=emailA, name=emailA,
-                password_hash=auth.hash_password("x"), verified=False)
+                password_hash=await auth.hash_password("x"), verified=False)
         except asyncpg.UniqueViolationError:
             raised = True
         async with db.pool.acquire() as c:

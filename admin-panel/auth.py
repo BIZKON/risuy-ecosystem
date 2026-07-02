@@ -37,29 +37,39 @@ _ph = PasswordHasher(
 # чтобы тайминг не отличал «нет такого логина» от «неверный пароль».
 _DUMMY_HASH = _ph.hash("x10-admin-dummy-constant-time-password")
 
+# argon2id — CPU/RAM-тяжёлый (memory_cost=64МБ, ~0.1–0.4с) и БЛОКИРУЕТ event-loop, если звать
+# синхронно. Панель = один uvicorn-тред → неаутентиф. флуд POST /login клал бы всю панель
+# (аудит 2026-07-01, находка ①). Поэтому весь argon2 уходит в поток (asyncio.to_thread), а
+# семафор ограничивает параллелизм: даже с to_thread флуд занял бы все потоки дефолтного
+# экзекьютора + выел CPU/RAM. Держим ≤3 одновременных argon2-операции (Python 3.11: Semaphore
+# на module-level безопасен — привязка к циклу ленивая, на первом await).
+_ARGON2_SEM = asyncio.Semaphore(3)
+
 # Подпись sid в cookie (только tamper-evidence; секрета сессии в cookie нет).
 _signer = URLSafeSerializer(config.SESSION_SECRET, salt="admin-session-sid")
 
 
-def verify_password(raw_password: str) -> bool:
+async def verify_password(raw_password: str) -> bool:
     """Constant-time проверка пароля оператора против ADMIN_PASSWORD_HASH.
 
     Всегда выполняет полный argon2-verify (на реальном или dummy-хеше), поэтому
     стоимость/тайминг не зависят от того, совпал ли логин. Без user-enumeration:
     вызывающий объединяет провал логина и провал пароля в один ответ.
+    argon2 — в потоке под семафором (не блокирует event-loop; см. _ARGON2_SEM).
     """
     target = config.ADMIN_PASSWORD_HASH
-    try:
-        _ph.verify(target, raw_password)
-        ok = True
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
-        ok = False
-    # Дополнительный verify на dummy выравнивает тайминг даже при раннем исключении
-    # парсинга реального хеша; результат отбрасываем.
-    try:
-        _ph.verify(_DUMMY_HASH, raw_password)
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
-        pass
+    async with _ARGON2_SEM:
+        try:
+            await asyncio.to_thread(_ph.verify, target, raw_password)
+            ok = True
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            ok = False
+        # Дополнительный verify на dummy выравнивает тайминг даже при раннем исключении
+        # парсинга реального хеша; результат отбрасываем.
+        try:
+            await asyncio.to_thread(_ph.verify, _DUMMY_HASH, raw_password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            pass
     return ok
 
 
@@ -71,10 +81,12 @@ def verify_username(raw_username: str) -> bool:
     )
 
 
-def hash_password(raw_password: str) -> str:
+async def hash_password(raw_password: str) -> str:
     """argon2id PHC-хеш для нового/сброшенного пароля оператора (раздел «Команда»).
-    Plain-пароль в БД НЕ хранится; те же параметры _ph, что и у проверки."""
-    return _ph.hash(raw_password)
+    Plain-пароль в БД НЕ хранится; те же параметры _ph, что и у проверки.
+    argon2 — в потоке под семафором (не блокирует event-loop; см. _ARGON2_SEM)."""
+    async with _ARGON2_SEM:
+        return await asyncio.to_thread(_ph.hash, raw_password)
 
 
 async def authenticate(username: str, password: str) -> tuple[str, str] | None:
@@ -87,7 +99,7 @@ async def authenticate(username: str, password: str) -> tuple[str, str] | None:
       2) БД-юзеры (admin_users): active + argon2 → (username, role).
     Без user-enumeration: обе ветки всегда выполняют полный argon2 (реальный/ _DUMMY_HASH)."""
     env_user_ok = verify_username(username)
-    env_pass_ok = verify_password(password)  # всегда полный argon2 (реальный + dummy)
+    env_pass_ok = await verify_password(password)  # всегда полный argon2 (реальный + dummy)
     if env_user_ok:
         return (config.ADMIN_USERNAME, "admin") if env_pass_ok else None
     return await _authenticate_db_user(username, password)
@@ -101,11 +113,12 @@ async def _authenticate_db_user(username: str, password: str) -> tuple[str, str]
     row = await db.get_admin_user(uname) if uname else None
     usable = bool(row and row["active"])
     target = row["password_hash"] if usable else _DUMMY_HASH
-    try:
-        _ph.verify(target, password)
-        ok = True
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
-        ok = False
+    async with _ARGON2_SEM:
+        try:
+            await asyncio.to_thread(_ph.verify, target, password)
+            ok = True
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            ok = False
     if ok and usable:
         return (row["username"], row["role"])
     return None

@@ -77,11 +77,11 @@ async def main() -> None:
 
         uA, tA = await db.create_client_account(
             provider="email", external_id=emailA, name=emailA,
-            password_hash=auth.hash_password(PW_OLD), display_name="Старое Имя", verified=False)
+            password_hash=await auth.hash_password(PW_OLD), display_name="Старое Имя", verified=False)
         CREATED.append((uA, tA))
         uB, tB = await db.create_client_account(
             provider="email", external_id=emailB, name=emailB,
-            password_hash=auth.hash_password("other-pass-789"), display_name="Чужое Имя", verified=False)
+            password_hash=await auth.hash_password("other-pass-789"), display_name="Чужое Имя", verified=False)
         CREATED.append((uB, tB))
 
         # ── 1. get_account / list_account_identities ─────────────────────────
@@ -110,12 +110,12 @@ async def main() -> None:
         # ── 3. смена своего пароля ───────────────────────────────────────────
         print("3. смена своего пароля:")
         check("старый пароль ПОДХОДИТ до смены", (await auth.authenticate(uA, PW_OLD)) == (uA, "operator"))
-        okp = await db.change_own_password_with_audit(uA, auth.hash_password(PW_NEW), ip=None, user_agent=None)
+        okp = await db.change_own_password_with_audit(uA, await auth.hash_password(PW_NEW), ip=None, user_agent=None)
         check("смена вернула True", okp)
         check("старый пароль больше НЕ подходит", await auth.authenticate(uA, PW_OLD) is None)
         check("новый пароль подходит", (await auth.authenticate(uA, PW_NEW)) == (uA, "operator"))
         check("смена пароля env-админа (нет строки) → False",
-              (await db.change_own_password_with_audit(config.ADMIN_USERNAME, auth.hash_password("z"),
+              (await db.change_own_password_with_audit(config.ADMIN_USERNAME, await auth.hash_password("z"),
                                                        ip=None, user_agent=None)) is False)
 
         # ── 4. подтверждение текущего пароля (гейт роута) ────────────────────
@@ -157,7 +157,7 @@ async def main() -> None:
         print("6b. team-оператор без личности (admin_users без account_identities):")
         uTeam = "smoke-team-op"
         await db.create_admin_user_with_audit(
-            uTeam, auth.hash_password("team-pass-123"), "operator",
+            uTeam, await auth.hash_password("team-pass-123"), "operator",
             actor="smoke", ip=None, user_agent=None)
         TEAM_USERS.append(uTeam)
         check("get_account(team-оп) вернул учётку", bool(await db.get_account(uTeam)))
@@ -165,7 +165,7 @@ async def main() -> None:
         check("правка имени team-оп → False (имени негде храниться)",
               (await db.set_account_display_name_with_audit(uTeam, "X", ip=None, user_agent=None)) is False)
         check("смена пароля team-оп → True (admin_users)",
-              (await db.change_own_password_with_audit(uTeam, auth.hash_password("team-new-456"),
+              (await db.change_own_password_with_audit(uTeam, await auth.hash_password("team-new-456"),
                                                        ip=None, user_agent=None)) is True)
 
         # ── 7. allow-list схем ссылки поддержки ──────────────────────────────
