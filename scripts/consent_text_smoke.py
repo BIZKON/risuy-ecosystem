@@ -94,6 +94,25 @@ def main() -> None:
         if legal_doc_url(*empty_args) != "":
             fails.append(f"legal_doc_url должен вернуть пусто на {empty_args} (без битых ссылок тенанту)")
 
+    # --- Task 1: раскрытие ИИ + условная трансгран-декларация ---
+    pp_tb = build_privacy_policy("ИП Петров П.П.", "770000000000", "hello@petrov.ru", transborder=True)
+    assert "за пределы Российской Федерации" in pp_tb, "transborder=True: нет трансгран-раскрытия в 6.3"
+    assert "Трансграничная передача персональных данных не осуществляется" not in pp_tb, \
+        "transborder=True: ложный абсолют не должен печататься"
+    assert "6.5." in pp_tb and "искусственного интеллекта" in pp_tb, "нет раздела 6.5 (раскрытие ИИ)"
+
+    pp_rf = build_privacy_policy("ИП Петров П.П.", "770000000000", "hello@petrov.ru", transborder=False)
+    assert "Трансграничная передача персональных данных не осуществляется" in pp_rf, \
+        "transborder=False: должна быть декларация «не осуществляется»"
+    assert "6.5." in pp_rf and "искусственного интеллекта" in pp_rf, "transborder=False: нет раздела 6.5"
+
+    pp_default = build_privacy_policy("ИП", "7700000000", "a@b.ru")
+    assert "за пределы Российской Федерации" in pp_default, "дефолт должен быть безопасной веткой (transborder=True)"
+
+    ct_ai = build_consent_text("ИП", "7700000000", "a@b.ru")
+    assert "включая ИИ" in ct_ai, "Согласие: нет строки-раскрытия ИИ"
+    print("OK: раскрытие ИИ + условная трансгран-декларация")
+
     if fails:
         print("\n".join("❌ " + f for f in fails))
         raise SystemExit(1)
