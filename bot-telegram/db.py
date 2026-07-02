@@ -1319,6 +1319,18 @@ async def get_ai_overrides(source: str | None = None, persona: str | None = None
     }
 
 
+async def get_ai_inference_rf() -> bool:
+    """Платформенный флаг-истина: инференс ИИ выполняется в РФ (нетрансгранично).
+    Глобальный ключ app_settings 'ai_inference_rf'. Fail-safe: нет ключа / ошибка чтения
+    → False (считаем трансграничным — ложную декларацию «трансгран не осуществляется» не публикуем)."""
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval("select value from app_settings where key = 'ai_inference_rf'")
+    except Exception:  # noqa: BLE001 — сбой чтения не должен ронять генерацию юр-текста
+        return False
+    return (v or "").strip().lower() in ("1", "true", "yes", "on", "да")
+
+
 async def get_ai_history(
     tg_user_id: int, *, messenger: str = "tg",
     exclude_tg_message_id: int | None = None, limit: int = 10,

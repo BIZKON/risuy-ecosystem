@@ -1803,6 +1803,19 @@ async def set_ai_settings(
             )
 
 
+async def get_ai_inference_rf() -> bool:
+    """Платформенный флаг-истина: инференс ИИ выполняется в РФ (нетрансгранично).
+    Глобальный ключ app_settings 'ai_inference_rf'. Fail-safe: нет ключа / ошибка чтения
+    → False (считаем трансграничным — ложную декларацию «трансгран не осуществляется» не публикуем).
+    Зеркалит bot-telegram/db.py::get_ai_inference_rf — логика и дефолты ДОЛЖНЫ совпадать."""
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval("select value from app_settings where key = 'ai_inference_rf'")
+    except Exception:  # noqa: BLE001 — сбой чтения не должен ронять генерацию юр-текста
+        return False
+    return (v or "").strip().lower() in ("1", "true", "yes", "on", "да")
+
+
 # ── RF-RAG: своя база знаний (pgvector) — раздел «Базы знаний» (загрузка файлов) ──
 def _vec_literal(v: list[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
