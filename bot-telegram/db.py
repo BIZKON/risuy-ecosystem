@@ -2234,3 +2234,70 @@ async def mark_stale_yookassa_orders_failed(hours: int) -> int:
             hours, tenant_id(),  # просрочка заказов ТОЛЬКО своего тенанта
         )
     return _affected(res)
+
+
+# ── club: клуб предпринимателей — бот-side data-слой (Задача 3a) ─────────────────────
+# Бот резолвит СВОЙ единственный активный тенант через tenant_id() (мультиплекс-контекст
+# либо env-дефолт Школы) — в отличие от панели (admin-panel/db.py), где tenant_id приходит
+# параметром от вызывающей стороны (оператор в UI). Бот = owner-DSN, обходит RLS, поэтому
+# tenant_id() подставляется ЯВНО в каждый INSERT (тот же backstop-паттерн, что и в upsert_start/
+# set_consent выше). SQL/колонки зеркалят admin-panel/db.py:4685-4767 (Task 2).
+async def club_member_create(*, display_name, city, okved, lead_id=None, inn=None) -> str:
+    """Создаёт участника клуба для активного тенанта бота. lead_id — через tenant-scoped
+    подзапрос: лид чужого тенанта тихо превращается в NULL (не привязывается по ошибке).
+    Возвращает id (str)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            mid = await c.fetchval(
+                """
+                insert into club_members (tenant_id, lead_id, inn, display_name, city, okved)
+                values ($1,
+                    (select id from leads where id = $2::uuid and tenant_id = $1::uuid),
+                    $3, $4, $5, $6)
+                returning id
+                """,
+                tenant_id(), lead_id, inn, display_name, city, okved,
+            )
+    return str(mid)
+
+
+async def club_profile_upsert(
+    member_id, *, offering, seeking, chain_position, okved_seek,
+    avg_check=None, description=None,
+) -> None:
+    """Insert/update карточки-профиля участника (offering/seeking для подбора партнёров).
+    member_id проверяется на принадлежность активному тенанту бота tenant-scoped подзапросом —
+    чужой member_id (другой тенант) означает, что запись не создаётся молча (см. Minor Task 2:
+    подзапрос не находит строку → insert падает на NOT NULL, а не тихо теряет данные)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                """
+                insert into club_profiles (member_id, tenant_id, offering, seeking,
+                    chain_position, okved_seek, avg_check, description)
+                values (
+                    (select id from club_members where id = $1::uuid and tenant_id = $2::uuid),
+                    $2, $3, $4, $5, $6, $7, $8)
+                on conflict (member_id) do update set
+                    offering=excluded.offering, seeking=excluded.seeking,
+                    chain_position=excluded.chain_position, okved_seek=excluded.okved_seek,
+                    avg_check=excluded.avg_check, description=excluded.description
+                """,
+                member_id, tenant_id(), offering, seeking, chain_position, okved_seek,
+                avg_check, description,
+            )
+
+
+async def club_consent_record(*, doc_type, member_id=None, lead_id=None, text_hash, channel="tg") -> None:
+    """Append-only запись согласия в consent_events (action='granted', doc_version — дефолт
+    схемы = 1, не передаём). tenant_id() — активный тенант бота, явный параметр (RLS-скоуп
+    строки). channel по умолчанию 'tg' (бот регистрирует из Telegram)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            """
+            insert into consent_events (tenant_id, member_id, lead_id, doc_type, action,
+                text_hash, channel)
+            values ($1, $2, $3, $4, 'granted', $5, $6)
+            """,
+            tenant_id(), member_id, lead_id, doc_type, text_hash, channel,
+        )

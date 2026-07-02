@@ -9,6 +9,12 @@ CLUB_CHAIN_POSITIONS: list[tuple[str, str]] = [
     ("both", "И до, и после"),
 ]
 
+_CHAIN_POSITION_VALUES = {code for code, _ in CLUB_CHAIN_POSITIONS}
+
+
+def _truthy(v) -> bool:
+    return bool(str(v or "").strip())
+
 
 def build_club_consent_text(kind: str, operator_name: str) -> str:
     """Текст согласия для consent_events.text_hash (кладём sha256 этого текста).
@@ -26,3 +32,23 @@ def build_club_consent_text(kind: str, operator_name: str) -> str:
         return ("Принимая знакомство, вы соглашаетесь на обмен контактами со вторым участником для "
                 "обсуждения партнёрства.")
     return ""
+
+
+def validate_club_registration(d: dict) -> list[str]:
+    """Проверка полей регистрации в клуб (чистая, без сети/БД). Возвращает список
+    человекочитаемых ошибок (пусто = ок). Обязательные поля — название бизнеса, город,
+    ОКВЭД; chain_position — необязателен, но если задан — должен быть одним из
+    CLUB_CHAIN_POSITIONS."""
+    errs: list[str] = []
+    if not _truthy(d.get("display_name")):
+        errs.append("Укажите название бизнеса.")
+    if not _truthy(d.get("city")):
+        errs.append("Укажите город.")
+    if not _truthy(d.get("okved")):
+        errs.append("Укажите ОКВЭД.")
+
+    chain_position = d.get("chain_position")
+    if chain_position is not None and chain_position not in _CHAIN_POSITION_VALUES:
+        errs.append("Позиция в цепочке поставки указана некорректно.")
+
+    return errs
