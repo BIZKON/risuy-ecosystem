@@ -2059,6 +2059,22 @@ async def erase_lead(lead_id: str, actor: str = "retention-cron") -> None:
             )
             # Переписка — ПДн целиком, обезличить нечего → удаляем.
             await c.execute("delete from messages where lead_id = $1", lead_id)
+            # Долгая память team-агента (agent_memory.content) — сводки диалога = ПДн at-rest,
+            # обезличить нечего → удаляем. Ключ памяти — внешний id канала (metadata->>'lead' =
+            # str(tg/vk/max_user_id)); матчим по всем каналам лида в его тенанте (152-ФЗ, Фаза 1).
+            lead_row = await c.fetchrow(
+                "select tenant_id, tg_user_id, vk_user_id, max_user_id from leads where id = $1",
+                lead_id,
+            )
+            if lead_row is not None:
+                keys = [str(lead_row[k]) for k in ("tg_user_id", "vk_user_id", "max_user_id")
+                        if lead_row[k] is not None]
+                if keys:
+                    await c.execute(
+                        "delete from agent_memory where tenant_id = $1 "
+                        "and metadata->>'lead' = any($2::text[])",
+                        lead_row["tenant_id"], keys,
+                    )
             # Клики — рвём связь с субъектом, агрегат по broadcast остаётся.
             await c.execute("update link_clicks set lead_id = null where lead_id = $1", lead_id)
             # Получатели рассылок — обнуляем прямой идентификатор адреса.
