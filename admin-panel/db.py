@@ -4677,6 +4677,95 @@ async def prospect_archive(pid, *, actor, ip, user_agent) -> bool:
             return True
 
 
+# ── club: клуб предпринимателей (Фаза 1, Уровень 1) ──────────────────────────
+# tenant_id передаётся ЯВНО каждым вызывающим (не полагаемся только на RLS/GUC):
+# owner-DSN (gen_user) владеет таблицами и ОБХОДИТ RLS policy (force=false), поэтому
+# явный "and tenant_id = $N" в каждом read/update — не дублирование RLS, а единственный
+# фактический backstop изоляции. Паттерн зеркалит prospect_* (см. выше).
+async def club_member_create(tenant_id, *, display_name, city, okved, lead_id=None, inn=None) -> str:
+    """Создаёт участника клуба. tenant_id — явным параметром (RLS-скоуп строки).
+    lead_id — через tenant-scoped подзапрос: лид чужого тенанта тихо превращается в NULL
+    (как prospect_upsert), а не привязывается по ошибке. Возвращает id (str)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            mid = await c.fetchval(
+                """
+                insert into club_members (tenant_id, lead_id, inn, display_name, city, okved)
+                values ($1,
+                    (select id from leads where id = $2::uuid and tenant_id = $1::uuid),
+                    $3, $4, $5, $6)
+                returning id
+                """,
+                tenant_id, lead_id, inn, display_name, city, okved,
+            )
+    return str(mid)
+
+
+async def club_profile_upsert(
+    member_id, tenant_id, *, offering, seeking, chain_position, okved_seek,
+    avg_check=None, description=None,
+) -> None:
+    """Insert/update карточки-профиля участника (offering/seeking для подбора партнёров).
+    member_id проверяется на принадлежность tenant_id tenant-scoped подзапросом — чужой
+    member_id (другой тенант) → подзапрос не находит строку → conflict-ветка не сработает
+    и insert упадёт на FK/ничего не вставит для чужого id (запись не создаётся молча)."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                """
+                insert into club_profiles (member_id, tenant_id, offering, seeking,
+                    chain_position, okved_seek, avg_check, description)
+                values (
+                    (select id from club_members where id = $1::uuid and tenant_id = $2::uuid),
+                    $2, $3, $4, $5, $6, $7, $8)
+                on conflict (member_id) do update set
+                    offering=excluded.offering, seeking=excluded.seeking,
+                    chain_position=excluded.chain_position, okved_seek=excluded.okved_seek,
+                    avg_check=excluded.avg_check, description=excluded.description
+                """,
+                member_id, tenant_id, offering, seeking, chain_position, okved_seek,
+                avg_check, description,
+            )
+
+
+async def club_member_list(tenant_id) -> list[dict]:
+    """Участники клуба тенанта, свежие сверху. Явный tenant_id = backstop (owner-DSN
+    обходит RLS)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select * from club_members where tenant_id = $1 order by created_at desc",
+            tenant_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def club_member_get(member_id, tenant_id) -> dict | None:
+    """Один участник клуба, только если принадлежит tenant_id (явный backstop-фильтр —
+    иначе owner-DSN покажет чужого участника в обход RLS)."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select * from club_members where id = $1 and tenant_id = $2",
+            member_id, tenant_id,
+        )
+    return dict(row) if row is not None else None
+
+
+async def club_consent_record(
+    tenant_id, *, doc_type, member_id=None, lead_id=None, text_hash, channel="web",
+) -> None:
+    """Append-only запись согласия в consent_events (action='granted', doc_version — дефолт
+    схемы = 1, не передаём). tenant_id — явный параметр (RLS-скоуп строки)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            """
+            insert into consent_events (tenant_id, member_id, lead_id, doc_type, action,
+                text_hash, channel)
+            values ($1, $2, $3, $4, 'granted', $5, $6)
+            """,
+            tenant_id, member_id, lead_id, doc_type, text_hash, channel,
+        )
+
+
 async def dadata_quota_take(limit: int) -> bool:
     """Атомарный инкремент глобального суточного счётчика запросов DaData (app_settings, value text).
     True — в пределах лимита; False — исчерпан. Ключ dadata_quota__<YYYY-MM-DD> (UTC)."""
