@@ -70,6 +70,23 @@
       </div>
     </form>
   </details>
+
+  {# ── Юр-флаг: инференс ИИ в РФ (нетрансгранично) — только платформа, читает генерация Политики ── #}
+  <section class="card card--soft" style="margin-top:16px;" aria-label="Инференс ИИ в РФ">
+    <h2 class="card__title">Инференс ИИ в РФ</h2>
+    <form method="post" action="/agents/ai-inference-rf" autocomplete="off">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field field--check">
+        <input type="checkbox" name="ai_inference_rf" value="1"{% if ai_inference_rf %} checked{% endif %}>
+        <span class="field__label">Инференс ИИ выполняется в РФ (нетрансгранично)</span>
+      </label>
+      <p class="hint hint--block">Включайте только после письменного подтверждения РФ-размещения инференса и логов
+        (см. legal-gate досье). По умолчанию — выкл.: Политика раскрывает возможную трансграничную передачу.</p>
+      <div class="form-actions">
+        <button class="btn btn--dark" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </section>
   {% endif %}
 </section>
 

@@ -1816,6 +1816,25 @@ async def get_ai_inference_rf() -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on", "да")
 
 
+async def set_ai_inference_rf(
+    value: bool, *, actor: str, ip: str | None = None, user_agent: str | None = None,
+) -> None:
+    """Платформенный флаг-истина (app_settings['ai_inference_rf']) + аудит — паттерн
+    set_kb_enabled/set_ai_settings (upsert + _insert_audit в одной транзакции). Пишет '1'/'0'
+    явно (не пусто, в отличие от лид-магнита) — get_ai_inference_rf сверяет строго '1'/true/…"""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "insert into app_settings (key, value) values ('ai_inference_rf', $1) "
+                "on conflict (key) do update set value = excluded.value",
+                "1" if value else "0",
+            )
+            await _insert_audit(
+                c, actor=actor, action="ai_inference_rf_set", ip=ip, user_agent=user_agent,
+                detail={"value": value},
+            )
+
+
 # ── RF-RAG: своя база знаний (pgvector) — раздел «Базы знаний» (загрузка файлов) ──
 def _vec_literal(v: list[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"

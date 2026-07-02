@@ -3806,6 +3806,7 @@ async def agents_page(
     # Обзор ИИ-сотрудников по ролям: статус (агент создан? кастомизирован? есть знания?)
     # + нагрузка/конверсия (счётчик диалогов на сотрудника — для решений «кого развивать»).
     stats = await _persona_stats()
+    ai_inference_rf = await db.get_ai_inference_rf()  # платформенный флаг для чекбокса ниже (is_platform-only)
     role_cards = []
     for k in persona_order:
         r = await db.get_persona_role(k)
@@ -3840,6 +3841,7 @@ async def agents_page(
             "preset_applied": bool(preset_key),
             "role_cards": role_cards,
             "recent_messages": recent,
+            "ai_inference_rf": ai_inference_rf,
             "csrf_token": session.csrf_token,
             "session": session,
             "active": "agents",
@@ -3901,6 +3903,25 @@ async def agents_save(
         enabled=bool(enabled), backend=backend, agent_id=agent_id, model=model,
         gateway_base_url=gateway_base_url, system_prompt=system_prompt, fallback=fallback,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request), persona=persona,
+    )
+    return RedirectResponse(url="/agents?saved=1", status_code=303)
+
+
+@app.post("/agents/ai-inference-rf")
+async def agents_set_ai_inference_rf(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    ai_inference_rf: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Платформенный флаг-истина «инференс ИИ в РФ» (app_settings['ai_inference_rf']) —
+    читается генерацией Политики (transborder=not rf). Только платформа (is_platform),
+    как остальные глобальные app_settings-тумблеры (kb_enabled, ai_settings)."""
+    _require_admin(session)  # глобальный app_settings — только платформе (анти-кросс-тенант)
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_ai_inference_rf(
+        ai_inference_rf.strip() == "1",
+        actor=session.actor, ip=_ip(request), user_agent=_ua(request),
     )
     return RedirectResponse(url="/agents?saved=1", status_code=303)
 
