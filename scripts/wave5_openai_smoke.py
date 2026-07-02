@@ -219,7 +219,8 @@ async def test_ask_ai_dispatch() -> None:
             calls["openai"] = True
             return "НЕ_ДОЛЖНО"
 
-        async def gw(text, *, base_url=None, model=None, system_prompt=None, fallback=None):
+        async def gw(text, *, base_url=None, model=None, system_prompt=None, fallback=None,
+                     history=None):
             calls["gw"] = True
             return ("GW_OTVET", None)  # meta=None → без cost-capture
 

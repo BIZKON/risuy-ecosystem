@@ -100,10 +100,16 @@ def format_card(payload: dict, *, tg_user_id: int, lead_id: str | None = None,
             # «Сводка диалога» — щедрее по длине (контекст для менеджера).
             cap = 900 if key == "summary" else 300
             clean_v = re.sub(r"\s+", " ", str(v)).strip()[:cap]
-            # Машинные enum-коды (reason/intent) → русская подпись для менеджера.
+            # Машинные enum-коды (reason/intent) → русская подпись для менеджера. Task 2.1:
+            # код из LLM-payload недоверен — валидируем по БЕЛОМУ списку _VALUE_RU; неизвестный
+            # или подделанный код НЕ показываем менеджеру (дропаем поле), чтобы модель не
+            # «протащила» произвольный текст в карточку под видом машинного кода.
             ru = _VALUE_RU.get(key)
-            if ru:
-                clean_v = ru.get(clean_v.lower(), clean_v)
+            if ru is not None:
+                code = clean_v.lower()
+                if code not in ru:
+                    continue
+                clean_v = ru[code]
             lines.append(f"{label}: {clean_v}")
             shown = True
     if not shown:
@@ -169,8 +175,22 @@ async def escalate(bot, tg_user_id: int, payload: dict, *,
             return  # уже эскалирован / нет лида / гонка проиграна
         try:
             lead_id = await db.get_lead_id(tg_user_id, messenger=messenger)
+            # Task 2.1: name/phone карточки — из БД-профиля лида, НЕ из LLM-payload (модель
+            # могла подделать/сгаллюцинировать имя/телефон → менеджер позвонит не туда).
+            # Fail-closed: нет в БД → пусто (значение из payload НЕ подставляем). Остальные
+            # поля (reason/intent/summary/…) — из payload; reason/intent валидируются по enum
+            # в format_card. Профиль tenant-скоуплен (get_lead_for_purchase по tenant_id).
+            # Fail-soft к сбою БД (как соседний get_lead_id): карточку не роняем — имя/тел
+            # просто пусты, менеджер видит панель-ссылку и сводку (escalate «НЕ бросает»).
+            try:
+                profile = await db.get_lead_for_purchase(tg_user_id, messenger=messenger)
+            except Exception:  # noqa: BLE001
+                profile = None
+            card_payload = dict(payload or {})
+            card_payload["name"] = (profile or {}).get("name")
+            card_payload["phone"] = (profile or {}).get("phone")
             text = format_card(
-                payload, tg_user_id=tg_user_id, lead_id=lead_id,
+                card_payload, tg_user_id=tg_user_id, lead_id=lead_id,
                 panel_base=config.PANEL_BASE_URL or None, raw=raw,
                 client_link=client_link(messenger, tg_user_id),
             )
