@@ -4790,6 +4790,116 @@ async def club_consent_record(
         )
 
 
+async def club_intro_create(tenant_id, from_member, to_member, message=None) -> str | None:
+    """Создаёт запрос на знакомство (Уровень 1 — внутри тенанта, to_tenant_id=tenant_id;
+    Уровень 2 межтенантный — вне Фазы 1, не реализован). Оба участника (from_member И
+    to_member) проверяются tenant-scoped подзапросом на принадлежность tenant_id — если
+    любой из них чужого тенанта/не существует, подзапрос возвращает NULL и insert падает
+    на NOT NULL constraint (intro не создаётся молча). В этом случае — None."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            try:
+                iid = await c.fetchval(
+                    """
+                    insert into club_intros (tenant_id, from_member, to_member, to_tenant_id,
+                        status, message)
+                    values ($1,
+                        (select id from club_members where id = $2::uuid and tenant_id = $1::uuid),
+                        (select id from club_members where id = $3::uuid and tenant_id = $1::uuid),
+                        $1, 'requested', $4)
+                    returning id
+                    """,
+                    tenant_id, from_member, to_member, message,
+                )
+            except asyncpg.NotNullViolationError:
+                return None
+    return str(iid) if iid is not None else None
+
+
+async def club_intro_decide(intro_id, tenant_id, accept: bool, *, text_hash=None) -> bool:
+    """Решение по запросу на знакомство. tenant-scope backstop — WHERE id=$1 and tenant_id=$2
+    (чужой intro не тронется). Идемпотентно: апдейт срабатывает ТОЛЬКО если текущий
+    status='requested' — повторный вызов на уже решённом intro ничего не меняет, возвращает
+    False. При accept=True (взаимное согласие) — статус 'accepted' + ДВЕ строки в
+    consent_events (doc_type='intro_accept', action='granted') — одна на from_member, одна
+    на to_member: оба участника фиксируют согласие на раскрытие контакта. При accept=False —
+    статус 'declined', consent_events не пишем. Всё в одной транзакции."""
+    status = "accepted" if accept else "declined"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                """
+                update club_intros set status = $3, decided_at = now()
+                where id = $1 and tenant_id = $2 and status = 'requested'
+                returning from_member, to_member
+                """,
+                intro_id, tenant_id, status,
+            )
+            if row is None:
+                return False
+            if accept:
+                await c.execute(
+                    """
+                    insert into consent_events (tenant_id, member_id, doc_type, action,
+                        text_hash, channel)
+                    values ($1, $2, 'intro_accept', 'granted', $3, 'web'),
+                           ($1, $4, 'intro_accept', 'granted', $3, 'web')
+                    """,
+                    tenant_id, row["from_member"], text_hash, row["to_member"],
+                )
+    return True
+
+
+async def club_intro_reveal(intro_id, tenant_id) -> dict | None:
+    """КРАСНАЯ ЛИНИЯ: контакты раскрываются ТОЛЬКО при status='accepted' (взаимное согласие).
+    Если intro не найден, чужого тенанта, или status != 'accepted' — None. tenant-scope
+    backstop — WHERE intro.id=$1 and intro.tenant_id=$2. Контакт каждого участника — из
+    club_members (+ club_profiles, если профиль заполнен) с LEFT JOIN на leads под явным
+    tenant-скоупом (leads.tenant_id = $2), чтобы подтянуть имя/телефон лида, если участник
+    был промоушен из лида."""
+    async with pool.acquire() as c:
+        intro = await c.fetchrow(
+            """
+            select from_member, to_member
+            from club_intros
+            where id = $1 and tenant_id = $2 and status = 'accepted'
+            """,
+            intro_id, tenant_id,
+        )
+        if intro is None:
+            return None
+
+        async def _contact(member_id):
+            row = await c.fetchrow(
+                """
+                select m.id, m.display_name, m.city, m.okved, m.inn,
+                       p.offering, p.seeking, p.chain_position, p.okved_seek, p.description,
+                       l.name as lead_name, l.phone as lead_phone
+                from club_members m
+                left join club_profiles p on p.member_id = m.id and p.tenant_id = $2
+                left join leads l on l.id = m.lead_id and l.tenant_id = $2
+                where m.id = $1 and m.tenant_id = $2
+                """,
+                member_id, tenant_id,
+            )
+            return dict(row) if row is not None else None
+
+        from_contact = await _contact(intro["from_member"])
+        to_contact = await _contact(intro["to_member"])
+    return {"from": from_contact, "to": to_contact}
+
+
+async def club_intro_list(tenant_id) -> list[dict]:
+    """Список запросов на знакомство тенанта, свежие сверху. Явный tenant_id = backstop
+    (owner-DSN обходит RLS), как club_member_list."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select * from club_intros where tenant_id = $1 order by created_at desc",
+            tenant_id,
+        )
+    return [dict(r) for r in rows]
+
+
 async def dadata_quota_take(limit: int) -> bool:
     """Атомарный инкремент глобального суточного счётчика запросов DaData (app_settings, value text).
     True — в пределах лимита; False — исчерпан. Ключ dadata_quota__<YYYY-MM-DD> (UTC)."""
