@@ -97,12 +97,15 @@ def _guide_kb(guide_url: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _club_consent_kb() -> InlineKeyboardMarkup:
+def _club_consent_kb(privacy_url: str = "") -> InlineKeyboardMarkup:
     """Кнопка согласия для входа в клуб + (опц.) политика ПДн. Согласие — callback
-    club_consent_yes; политика — та же PRIVACY_URL, что и в основной воронке."""
+    club_consent_yes; политика — ПЕР-ТЕНАНТНЫЙ privacy_url (как в основной воронке:
+    privacy_url тенанта / сгенерированная /legal/{slug}/privacy), с фолбэком на глобальный
+    config.PRIVACY_URL. Мульти-тенант: показываем Политику именно оператора-тенанта."""
     rows = [[InlineKeyboardButton(text=texts.CLUB_JOIN_BTN, callback_data="club_consent_yes")]]
-    if config.PRIVACY_URL:
-        rows.append([InlineKeyboardButton(text=texts.PRIVACY_BTN, url=config.PRIVACY_URL)])
+    url = privacy_url or config.PRIVACY_URL
+    if url:
+        rows.append([InlineKeyboardButton(text=texts.PRIVACY_BTN, url=url)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -137,11 +140,29 @@ async def _club_start(message: Message, state: FSMContext) -> None:
             source="system",
         )
         return
-    consent_text = build_club_consent_text("club_join", operator)
+    operator_inn = (cfg.get("operator_inn") or "").strip()
+    operator_email = (cfg.get("operator_email") or "").strip()
+    privacy_url = (cfg.get("privacy_url") or cfg.get("legal_privacy_url") or "").strip()
+    # 152-ФЗ ст.9: полный состав согласия невозможен без идентификации оператора (ИНН) и
+    # порядка отзыва (email) — паритет с эталоном воронки. Нет реквизитов → клуб-вход отклонён.
+    if not (operator_inn and operator_email):
+        logger.warning(
+            "club: у тенанта %s не заполнены ИНН/email оператора — клуб-вход отклонён (152-ФЗ состав)",
+            db.tenant_id(),
+        )
+        await messaging.reply_text(
+            message,
+            "Клуб сейчас недоступен: у оператора не настроены реквизиты. Загляните чуть позже 🙂",
+            source="system",
+        )
+        return
+    consent_text = build_club_consent_text("club_join", operator, operator_inn,
+                                           operator_email, privacy_hint=bool(privacy_url))
     await state.set_state(ClubSignup.consent)
     await state.update_data(club_consent_text=consent_text)
     await messaging.reply_text(
-        message, texts.CLUB_INTRO + consent_text, source="funnel", reply_markup=_club_consent_kb()
+        message, texts.CLUB_INTRO + consent_text, source="funnel",
+        reply_markup=_club_consent_kb(privacy_url),
     )
 
 
@@ -174,7 +195,7 @@ async def _club_finish(user_id: int, bot: Bot, state: FSMContext) -> None:
         else:
             mid = await db.club_member_create(
                 display_name=reg["display_name"], city=reg["city"], okved=reg["okved"],
-                lead_id=lead_id,
+                lead_id=lead_id, tg_user_id=user_id, messenger="tg",
             )
         await db.club_profile_upsert(
             mid, offering=reg["offering"], seeking=reg["seeking"],
@@ -191,14 +212,20 @@ async def _club_finish(user_id: int, bot: Bot, state: FSMContext) -> None:
         await state.clear()
 
 
-def _intro_decide_kb(intro_id: str) -> InlineKeyboardMarkup:
-    """Кнопки «Принять»/«Отклонить» под приглашением на знакомство. callback_data несёт
-    intro_id — callback переперепроверит участие (from ИЛИ to) + status='requested' (защита
-    от утёкшей/устаревшей кнопки), поэтому доверять самому intro_id в кнопке безопасно."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
+def _intro_decide_kb(intro_id: str, privacy_url: str = "") -> InlineKeyboardMarkup:
+    """Кнопки «Принять»/«Отклонить» под приглашением на знакомство + (опц.) Политика ПДн
+    (пер-тенантный privacy_url, фолбэк config.PRIVACY_URL — L3-intro-policy-link-absent).
+    callback_data несёт intro_id — callback переперепроверит участие (from ИЛИ to) +
+    status='requested' (защита от утёкшей/устаревшей кнопки), поэтому доверять самому intro_id
+    в кнопке безопасно."""
+    rows = [[
         InlineKeyboardButton(text=texts.CLUB_INTRO_OK_BTN, callback_data=f"intro_ok:{intro_id}"),
         InlineKeyboardButton(text=texts.CLUB_INTRO_NO_BTN, callback_data=f"intro_no:{intro_id}"),
-    ]])
+    ]]
+    url = privacy_url or config.PRIVACY_URL
+    if url:
+        rows.append([InlineKeyboardButton(text=texts.PRIVACY_BTN, url=url)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _intro_side_accepted(intro: dict, member_id) -> bool:
@@ -243,11 +270,25 @@ async def _club_intro_open(message: Message, intro_id: str) -> None:
     if _intro_side_accepted(intro, member["id"]):
         await messaging.reply_text(message, texts.CLUB_INTRO_ALREADY_CONFIRMED, source="funnel")
         return
-    # Имя бизнеса второй стороны до accept недоступно (бот-side club_member_get нет, reveal
-    # гейтит до accepted, панель создаёт intro без message в Фазе 1) — показываем обобщённо.
-    text = texts.CLUB_INTRO_OFFER.format(from_line=texts.CLUB_INTRO_FROM_ANON)
+    # ПОКАЗЫВАЕМ ровно тот consent-текст, что будет хэширован в consent_events (показано==хэшировано,
+    # L3-intro-shown-neq-hashed). Он называет оператора+ИНН, перечисляет реально раскрываемый при
+    # взаимном accept состав (название/город/ОКВЭД/имя/телефон) и порядок отзыва. Имя инициатора
+    # НЕ раскрываем — только факт предложения (красная линия; контакты — после обоюдного accept).
+    cfg = await db.get_funnel_config(db.tenant_id())
+    operator = (cfg.get("company_name") or config.CLUB_OPERATOR_NAME or "").strip()
+    operator_inn = (cfg.get("operator_inn") or "").strip()
+    operator_email = (cfg.get("operator_email") or "").strip()
+    privacy_url = (cfg.get("privacy_url") or cfg.get("legal_privacy_url") or "").strip()
+    # Симметрично club_join (F2): без реквизитов оператора не показываем accept — иначе
+    # хэшируем юридически ничтожное согласие (152-ФЗ ст.9). Intro доступен только после
+    # полноценного онбординга, но тенант мог очистить реквизиты — страхуемся.
+    if not (operator and operator_inn and operator_email):
+        logger.warning("club: intro отклонён — у тенанта %s не настроены реквизиты оператора", db.tenant_id())
+        await messaging.reply_text(message, texts.CLUB_INTRO_UNAVAILABLE, source="system")
+        return
+    text = build_club_consent_text("intro", operator, operator_inn, operator_email)
     await messaging.reply_text(
-        message, text, source="funnel", reply_markup=_intro_decide_kb(intro_id)
+        message, text, source="funnel", reply_markup=_intro_decide_kb(intro_id, privacy_url)
     )
 
 
@@ -304,6 +345,21 @@ async def cmd_stop(message: Message):
     await messaging.reply_text(message, texts.UNSUBSCRIBED_OK, source="system")
 
 
+@router.message(Command("offers_off", ignore_case=True))
+async def cmd_offers_off(message: Message):
+    """ФЗ-38: отказ от партнёрских предложений клуба БЕЗ выхода из клуба (L2-no-offer-optout).
+    Отделено и от согласия на обработку ПДн (членство сохраняется), и от /stop (рассылки школы)."""
+    n = await db.club_set_offers_opt_in(message.from_user.id, False)
+    await messaging.reply_text(message, texts.OFFERS_OFF_OK if n else texts.OFFERS_NONE, source="system")
+
+
+@router.message(Command("offers_on", ignore_case=True))
+async def cmd_offers_on(message: Message):
+    """Вернуть согласие на партнёрские предложения клуба (ФЗ-38 opt-in)."""
+    n = await db.club_set_offers_opt_in(message.from_user.id, True)
+    await messaging.reply_text(message, texts.OFFERS_ON_OK if n else texts.OFFERS_NONE, source="system")
+
+
 @router.callback_query(F.data == "unsub")
 async def on_unsub(cb: CallbackQuery):
     """Inline-кнопка «Отписаться» (в футере рассылок). Идемпотентно, БЕЗ state-фильтра."""
@@ -317,8 +373,12 @@ async def cmd_revoke(message: Message):
     """Отзыв согласия на обработку ПДн субъектом (152-ФЗ ст.9 ч.2 — «в любой момент»). ОТЛИЧАЕТСЯ
     от /stop (отписка от рассылок): ставит erase_requested_at + unsubscribed_at + пишет
     consent_events('revoked'); обезличивание ПДн — retention-cron (ERASE_AFTER_DAYS)."""
-    await db.request_erase(message.from_user.id, channel="tg")
-    await messaging.reply_text(message, texts.REVOKE_OK, source="system")
+    lead_id = await db.request_erase(message.from_user.id, channel="tg")
+    club_n = await db.club_revoke_member(message.from_user.id, channel="tg")
+    if lead_id is not None or club_n:
+        await messaging.reply_text(message, texts.REVOKE_OK, source="system")
+    else:
+        await messaging.reply_text(message, texts.REVOKE_NONE, source="system")
 
 
 @router.callback_query(Funnel.consent, F.data == "consent_yes")
@@ -544,7 +604,11 @@ async def _intro_accept(cb: CallbackQuery) -> None:
     member, intro = resolved
     cfg = await db.get_funnel_config(db.tenant_id())
     operator = (cfg.get("company_name") or config.CLUB_OPERATOR_NAME or "").strip()
-    consent_text = build_club_consent_text("intro", operator)
+    # Хэшируем РОВНО ту строку, что показана субъекту в _club_intro_open (показано==хэшировано):
+    # тот же build_club_consent_text('intro', operator, inn, email) детерминирован по cfg.
+    consent_text = build_club_consent_text("intro", operator,
+                                           (cfg.get("operator_inn") or "").strip(),
+                                           (cfg.get("operator_email") or "").strip())
     text_hash = hashlib.sha256(consent_text.encode("utf-8")).hexdigest()
     res = await db.club_intro_accept_side(intro_id, member["id"], text_hash=text_hash)
     await cb.answer()

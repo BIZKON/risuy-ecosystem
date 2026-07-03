@@ -5559,6 +5559,9 @@ async def _render_lead_magnet(request, session, *, values: dict, errors=(), save
             phone_step=phone_step,
         )
         rf = await db.get_ai_inference_rf()
+        # club-режим Политики, если у тенанта есть клуб — превью оператора == публичный
+        # /legal/{slug}/privacy (тенант видит РОВНО то, что видит субъект; ничего «скрытого»).
+        has_club = await db.club_has_members(session.active_tenant_id)
         policy = leadmagnet.build_privacy_policy(
             values["operator_name"], values["operator_inn"], values["operator_email"],
             operator_ogrn=values.get("operator_ogrn") or None,
@@ -5566,6 +5569,7 @@ async def _render_lead_magnet(request, session, *, values: dict, errors=(), save
             data_purpose=values.get("data_purpose") or None,
             phone_step=phone_step,
             transborder=not rf,
+            club=has_club,
         )
     return templates.TemplateResponse(
         request,

@@ -84,6 +84,7 @@ def build_privacy_policy(
     *,
     phone_step: bool = True,
     transborder: bool = True,
+    club: bool = False,
 ) -> str:
     """Полный текст «Политики обработки персональных данных» (152-ФЗ ст. 18.1) из реквизитов оператора.
 
@@ -94,6 +95,14 @@ def build_privacy_policy(
     в РФ). §6.5 (раскрытие ИИ-обработки) присутствует всегда. Возвращает plain-текст (разделы пронумерованы)."""
     purpose = (data_purpose or "").strip() or DEFAULT_DATA_PURPOSE
     data = _data_list(phone_step)
+    if club:
+        # Клубные категории ПДн (L4-policy-missing-club-categories): Политика тенанта с активным
+        # Клубом предпринимателей обязана описывать состав данных клуба, на который ссылается
+        # согласие club_join. Синхронно с build_club_consent_text('club_join'/'intro').
+        data = (data + "; для участников Клуба предпринимателей — сведения о бизнесе субъекта: "
+                "наименование, город, сфера деятельности/ОКВЭД, ИНН, предложение и запрос партнёрам, "
+                "позиция в цепочке поставки; при знакомстве по взаимному согласию имя контактного "
+                "лица и телефон передаются второму участнику")
     req = [f"наименование (ФИО): {operator_name}", f"ИНН: {operator_inn}"]
     if (operator_ogrn or "").strip():
         req.append(f"ОГРН/ОГРНИП: {operator_ogrn.strip()}")

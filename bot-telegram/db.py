@@ -162,13 +162,56 @@ async def request_erase(tg_user_id: int, *, channel: str = "tg", messenger: str 
     return lead_id
 
 
+async def club_revoke_member(tg_user_id: int, *, messenger: str = "tg", channel: str = "tg") -> int:
+    """Отзыв согласия члена клуба (152-ФЗ ст.9 ч.2). Чистый клуб-член входит с lead_id=NULL,
+    поэтому request_erase (по leads) его НЕ находит → был no-op (L4-revoke-noop-club). Тут
+    ставим club_members.erase_requested_at (coalesce) по каналу идентичности + пишем
+    consent_events('revoked', doc_type='club_join', member_id) на КАЖДОГО найденного члена —
+    одной транзакцией. Фактическое обезличивание клуб-ПДн — retention-cron (club_due_for_erase).
+    tenant-scoped, идемпотентно (coalesce). Возвращает число затронутых членов (0 = членства нет)."""
+    col = _user_col(messenger)
+    async with pool.acquire() as c:
+        async with c.transaction():
+            rows = await c.fetch(
+                f"update club_members set erase_requested_at = coalesce(erase_requested_at, now()) "
+                f"where {col} = $1 and tenant_id = $2 returning id",
+                tg_user_id, tenant_id(),
+            )
+            for r in rows:
+                await c.execute(
+                    "insert into consent_events (tenant_id, member_id, doc_type, action, channel) "
+                    "values ($1, $2, 'club_join', 'revoked', $3)",
+                    tenant_id(), r["id"], channel,
+                )
+    return len(rows)
+
+
+async def club_set_offers_opt_in(tg_user_id: int, value: bool, *, messenger: str = "tg") -> int:
+    """ФЗ-38: включить/выключить согласие члена на партнёрские предложения клуба (offers_opt_in)
+    БЕЗ выхода из клуба (L2-no-offer-optout) — отделено от согласия на обработку ПДн и от
+    unsubscribed_at (рассылки школы). По каналу идентичности, tenant-scoped. Возвращает число членов."""
+    col = _user_col(messenger)
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            f"update club_members set offers_opt_in = $3 where {col} = $1 and tenant_id = $2 returning id",
+            tg_user_id, tenant_id(), value,
+        )
+    return len(rows)
+
+
 async def is_erase_requested(tg_user_id: int, *, messenger: str = "tg") -> bool:
     """Отозвал ли субъект согласие (erase_requested_at стоит) → бот молчит (стоп-обработка).
+    Проверяет И лид, И членство в клубе (клуб-член без lead отзывается по club_members).
     messenger — канал идентичности (tg/vk/max). tenant-scoped."""
     col = _user_col(messenger)
     async with pool.acquire() as c:
         return bool(await c.fetchval(
-            f"select erase_requested_at is not null from leads where {col} = $1 and tenant_id = $2",
+            f"""
+            select exists(select 1 from leads
+                          where {col} = $1 and tenant_id = $2 and erase_requested_at is not null)
+                or exists(select 1 from club_members
+                          where {col} = $1 and tenant_id = $2 and erase_requested_at is not null)
+            """,
             tg_user_id, tenant_id(),
         ))
 
@@ -1627,6 +1670,8 @@ async def get_funnel_config(tid) -> dict:
         "privacy_url": s("privacy_url") or None,
         "legal_privacy_url": legal_privacy_url,
         "company_name": s("company_name") or s("operator_name"),
+        "operator_inn": s("operator_inn") or None,      # клуб-согласие (152-ФЗ состав) + гард _club_start
+        "operator_email": s("operator_email") or None,  # порядок отзыва в клуб-согласии
         "phone_step": phone_step,
         "gate": {
             "enabled": bool(s("gate_enabled")),
@@ -1678,12 +1723,20 @@ async def get_legal_doc_data(slug: str) -> dict | None:
             "where t.slug = $1 and s.key = any($2::text[])",
             slug, keys,
         )
+        # Есть ли у тенанта активный клуб → Политика должна описать клубные категории ПДн
+        # (L4-policy-missing-club-categories). Отдельный дешёвый exists по слагу.
+        has_club = await c.fetchval(
+            "select exists(select 1 from club_members m join tenants t on t.id = m.tenant_id "
+            "where t.slug = $1)",
+            slug,
+        )
     if not rows:
         return None
     kv = {r["key"]: (r["value"] or "") for r in rows}
     if not (kv.get("operator_name", "").strip() and kv.get("operator_inn", "").strip()
             and kv.get("operator_email", "").strip()):
         return None
+    kv["_club"] = "1" if has_club else ""
     return kv
 
 
@@ -2098,10 +2151,70 @@ async def erase_lead(lead_id: str, actor: str = "retention-cron") -> None:
             await c.execute(
                 "update admin_audit set detail = null where lead_id = $1", lead_id
             )
+            # Клубные карточки промотированного лида — обезличиваем синхронно (retention по
+            # club_members отдельно ловит только чистых членов без lead). Строки НЕ удаляем.
+            await c.execute(
+                "update club_members set display_name = 'удалено', city = null, okved = null, "
+                "inn = null, tg_user_id = null, vk_user_id = null, max_user_id = null, "
+                "status = 'left' where lead_id = $1",
+                lead_id,
+            )
+            await c.execute(
+                "update club_profiles set offering = null, seeking = null, description = null, "
+                "chain_position = null, okved_seek = null, avg_check = null "
+                "where member_id in (select id from club_members where lead_id = $1)",
+                lead_id,
+            )
             await c.execute(
                 "insert into admin_audit (actor, action, lead_id, detail) "
                 "values ($1, 'lead_erased', $2, $3::jsonb)",
                 actor, lead_id, json.dumps({"by": "retention-cron"}),
+            )
+
+
+async def club_due_for_erase(after_days: int) -> list[str]:
+    """uuid клуб-членов с erase_requested_at + N дней <= now(), ещё не обезличенных
+    (status <> 'left'). Покрывает чистых членов с lead_id=NULL, которых retention по leads
+    не видит (L4-retention-club-tables). tenant-scoped (бот=owner обходит RLS)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select id from club_members
+            where erase_requested_at is not null
+              and tenant_id = $2
+              and erase_requested_at + make_interval(days => $1) <= now()
+              and status <> 'left'
+            limit 100
+            """,
+            after_days, tenant_id(),
+        )
+    return [str(r["id"]) for r in rows]
+
+
+async def club_erase_member(member_id: str, actor: str = "retention-cron") -> None:
+    """Обезличивает клуб-ПДн члена одной транзакцией + аудит 'club_member_erased' (доказательство
+    срока для РКН). Строку НЕ удаляем — обезличиваем in-place: club_members (display_name→'удалено',
+    city/okved/inn/tg/vk/max_user_id→null, status='left') + club_profiles (offering/seeking/
+    description/chain_position/okved_seek/avg_check→null). Событие consent_events('revoked') уже
+    записано на этапе отзыва (club_revoke_member / request_erase). tenant-scoped."""
+    import json
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "update club_members set display_name = 'удалено', city = null, okved = null, "
+                "inn = null, tg_user_id = null, vk_user_id = null, max_user_id = null, "
+                "status = 'left' where id = $1 and tenant_id = $2",
+                member_id, tenant_id(),
+            )
+            await c.execute(
+                "update club_profiles set offering = null, seeking = null, description = null, "
+                "chain_position = null, okved_seek = null, avg_check = null "
+                "where member_id = $1 and tenant_id = $2",
+                member_id, tenant_id(),
+            )
+            await c.execute(
+                "insert into admin_audit (actor, action, detail) values ($1, 'club_member_erased', $2::jsonb)",
+                actor, json.dumps({"member": str(member_id)}),
             )
 
 
@@ -2242,21 +2355,26 @@ async def mark_stale_yookassa_orders_failed(hours: int) -> int:
 # параметром от вызывающей стороны (оператор в UI). Бот = owner-DSN, обходит RLS, поэтому
 # tenant_id() подставляется ЯВНО в каждый INSERT (тот же backstop-паттерн, что и в upsert_start/
 # set_consent выше). SQL/колонки зеркалят admin-panel/db.py:4685-4767 (Task 2).
-async def club_member_create(*, display_name, city, okved, lead_id=None, inn=None) -> str:
+async def club_member_create(*, display_name, city, okved, lead_id=None, inn=None,
+                             tg_user_id=None, messenger="tg", offers_opt_in=True) -> str:
     """Создаёт участника клуба для активного тенанта бота. lead_id — через tenant-scoped
     подзапрос: лид чужого тенанта тихо превращается в NULL (не привязывается по ошибке).
-    Возвращает id (str)."""
+    tg_user_id — внешний id канала субъекта: обратная связь «юзер→член» для отзыва согласия
+    члена БЕЗ lead (иначе /revoke = no-op, L4-revoke-noop-club). offers_opt_in — отделимое
+    согласие на партнёрские предложения (ФЗ-38). Возвращает id (str)."""
+    col = _user_col(messenger)
     async with pool.acquire() as c:
         async with c.transaction():
             mid = await c.fetchval(
-                """
-                insert into club_members (tenant_id, lead_id, inn, display_name, city, okved)
+                f"""
+                insert into club_members (tenant_id, lead_id, inn, display_name, city, okved,
+                    {col}, offers_opt_in)
                 values ($1,
                     (select id from leads where id = $2::uuid and tenant_id = $1::uuid),
-                    $3, $4, $5, $6)
+                    $3, $4, $5, $6, $7, $8)
                 returning id
                 """,
-                tenant_id(), lead_id, inn, display_name, city, okved,
+                tenant_id(), lead_id, inn, display_name, city, okved, tg_user_id, offers_opt_in,
             )
     return str(mid)
 

@@ -57,10 +57,16 @@ def main() -> None:
     check("пустой dict → минимум 3 ошибки (name/city/okved)", len(errs5) >= 3, repr(errs5))
 
     print("\n2. build_club_consent_text:")
-    text = build_club_consent_text("club_join", "ООО Оператор")
+    text = build_club_consent_text("club_join", "ООО Оператор", "7707083893", "op@x.ru")
     check("club_join текст непустой", bool(text))
-    check("club_join текст содержит «клуб предпринимателей»", "клуб предпринимателей" in text, repr(text))
+    check("club_join текст упоминает клуб предпринимателей", "клуб предпринимателей" in text.lower(), repr(text))
     check("club_join текст упоминает оператора", "ООО Оператор" in text, repr(text))
+    # 152-ФЗ состав (приведён к эталону): ИНН, перечень ПДн, локализация, порядок отзыва.
+    check("club_join содержит ИНН оператора", "ИНН 7707083893" in text, repr(text))
+    check("club_join перечисляет состав ПДн", "название бизнеса" in text and "ОКВЭД" in text)
+    check("club_join: хранение в РФ + порядок отзыва", "на серверах в России" in text and "/revoke" in text)
+    # ФЗ-38: рекламные «предложения о партнёрстве» ВЫНЕСЕНЫ из согласия на обработку.
+    check("club_join НЕ бандлит рекламу (ФЗ-38)", "предложения о партнёрстве" not in text, repr(text))
 
     print()
     if FAILS:

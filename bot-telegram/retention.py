@@ -46,6 +46,16 @@ async def _tick() -> None:
         except Exception as e:  # noqa: BLE001 — один лид не должен валить остальных
             logger.exception("Не удалось обезличить лид %s: %s", lead_id, e)
 
+    # 1b) Обезличивание клуб-членов по отзыву (в т.ч. чистых, без lead — retention по leads
+    # их не видит). Отдельная выборка по club_members.erase_requested_at (L4-retention-club-tables).
+    member_ids = await db.club_due_for_erase(config.ERASE_AFTER_DAYS)
+    for member_id in member_ids:
+        try:
+            await db.club_erase_member(member_id)
+            logger.info("Клуб-член %s обезличен (erase_requested_at + %sд)", member_id, config.ERASE_AFTER_DAYS)
+        except Exception as e:  # noqa: BLE001 — один член не должен валить остальных
+            logger.exception("Не удалось обезличить клуб-члена %s: %s", member_id, e)
+
     # 2) Абсолютный TTL содержимого переписки.
     purged = await db.purge_old_message_text(config.MESSAGES_TTL_DAYS)
     if purged:

@@ -370,7 +370,7 @@ async def _legal_page(request: web.Request) -> web.StreamResponse:
             operator_ogrn=kv.get("operator_ogrn") or None,
             operator_address=kv.get("operator_address") or None,
             data_purpose=kv.get("data_purpose") or None, phone_step=phone,
-            transborder=not rf)
+            transborder=not rf, club=bool(kv.get("_club")))
     else:
         title = "Согласие на обработку персональных данных"
         body = build_consent_text(

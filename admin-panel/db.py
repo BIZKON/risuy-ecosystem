@@ -4728,6 +4728,16 @@ async def club_profile_upsert(
             )
 
 
+async def club_has_members(tenant_id) -> bool:
+    """Есть ли у тенанта хотя бы один член клуба — для club-режима Политики в превью панели
+    (паритет с публичной /legal/{slug}/privacy, которая включает клубные категории при наличии
+    club_members). Явный tenant_id = backstop (owner-DSN обходит RLS)."""
+    async with pool.acquire() as c:
+        return bool(await c.fetchval(
+            "select exists(select 1 from club_members where tenant_id = $1)", tenant_id,
+        ))
+
+
 async def club_member_list(tenant_id) -> list[dict]:
     """Участники клуба тенанта, свежие сверху. Явный tenant_id = backstop (owner-DSN
     обходит RLS)."""
