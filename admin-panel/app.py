@@ -4259,6 +4259,13 @@ async def club_page(
 
     # ЕГРЮЛ-обогащение по inn: только среди уже сохранённых карточек prospects тенанта
     # (никаких новых платных dadata-запросов из каталога клуба).
+    # Doc-инвариант: prospect_list() БЕЗ явного tenant_id — изоляция тенанта здесь идёт
+    # через RLS/GUC (panel_rw-соединение + set_active_tenant/current_setting('app.tenant_id')),
+    # НЕ через явный tenant-фильтр в SQL, как у club_*-хелперов (club_member_get,
+    # club_intro_create и т.д.), которые несут tenant_id параметром как backstop против
+    # owner-DSN (owner-DSN обходит RLS). Вызов безопасен именно в панельном рантайме
+    # (panel_rw + активная сессия с выставленным GUC) — эту функцию НЕЛЬЗЯ вызывать из
+    # owner-DSN контекста (скрипты/миграции), там RLS-изоляция не сработает.
     prospect_by_inn: dict[str, dict] = {}
     if tid:
         prospects = await db.prospect_list()
@@ -4325,13 +4332,16 @@ def _club_intro_err_text(err: str | None) -> str | None:
 
 
 def _build_intro_invite_text(bot_username: str, iid: str) -> str:
-    """Уведомление участнику-получателю (to_member) о предложенном знакомстве, с
-    deep-link на приём/отклонение внутри бота (7b-бот, вне этой панели — панель
-    только создаёт intro и кладёт уведомление в outbox)."""
+    """Уведомление участнику клуба (стороне intro — from ИЛИ to, модель ДВУСТОРОННЯЯ,
+    commit e7800d5) о предложенном знакомстве, с deep-link на приём/отклонение внутри
+    бота (7b-бот, вне этой панели — панель только создаёт intro и кладёт уведомления
+    в outbox). Текст нейтральный: обеим сторонам уходит один и тот же deep-link, бот
+    сам определяет, какая сторона кликнула (member_id по tg_user_id клика)."""
     link = f"https://t.me/{bot_username}?start=intro_{iid}"
     return (
         "В «Клубе предпринимателей» вам предлагают знакомство 🤝\n\n"
-        "Другой участник клуба хочет обменяться контактами. Посмотреть и ответить:\n"
+        "Вам предлагают знакомство с другим участником клуба для обмена контактами. "
+        "Посмотреть и ответить:\n"
         f"{link}"
     )
 
@@ -4345,10 +4355,12 @@ async def club_intro_propose(
     csrf_token: str = Form(""),
 ):
     """Оператор предлагает знакомство между двумя участниками клуба (из карточки
-    рекомендации «Рекомендуем познакомиться»). Красная линия: панель НЕ решает за
-    участника-получателя — только создаёт intro (status='requested') и кладёт
-    уведомление в его outbox. Согласие (accept/decline) — клик получателя в боте
-    (7b-бот, deep-link ?start=intro_<id>)."""
+    рекомендации «Рекомендуем познакомиться»). Красная линия: панель НЕ решает ни за
+    одну из сторон — только создаёт intro (status='requested') и кладёт уведомления
+    в outbox ОБЕИХ сторон. Модель ДВУСТОРОННЯЯ (commit e7800d5): и from_member, и
+    to_member принимают intro КАЖДЫЙ своим кликом в боте (7b-бот, deep-link
+    ?start=intro_<id> — один и тот же линк для обеих сторон); контакты раскрываются
+    только когда ОБЕ стороны согласились (club_intro_accept_side → status='accepted')."""
     await _enforce_csrf(request, session, csrf_token)
     tid = session.active_tenant_id
     if not tid:
@@ -4360,7 +4372,7 @@ async def club_intro_propose(
 
     # Intro создан в любом случае — аудит пишем ПОСЛЕ определения исхода доставки,
     # чтобы detail честно отражал не только факт создания, но и результат уведомления
-    # получателя (delivered=False + reason, если уведомление не ушло).
+    # ОБЕИХ сторон (delivered=False + reason, если хотя бы одна не ушла).
     async def _audit_intro(*, delivered: bool, reason: str | None = None) -> None:
         detail = {"intro_id": iid, "from_member": str(from_member), "to_member": str(to_member),
                    "delivered": delivered}
@@ -4369,12 +4381,15 @@ async def club_intro_propose(
         await db.audit(actor=session.actor, action="club_intro_propose",
                        ip=_ip(request), user_agent=_ua(request), detail=detail)
 
-    # Уведомление получателю — ТОЛЬКО если он достижим (lead_id есть → у него есть карточка
-    # лида с адресом канала). Недостижимый получатель: intro создан молча, мягкая ошибка —
-    # оператор должен понять, почему уведомление не ушло.
+    # Двусторонний accept невозможен, если хоть одну сторону нельзя уведомить — обе
+    # должны быть достижимы (lead_id есть → карточка лида с адресом канала). Кнопка
+    # «Предложить знакомство» уже показывается только для пары достижимых (club.html),
+    # но сервер ПЕРЕПРОВЕРЯЕТ: карточки могли устареть между рендером и submit.
+    from_rec = await db.club_member_get(from_member, tid)
     to_rec = await db.club_member_get(to_member, tid)
+    from_lead_id = from_rec.get("lead_id") if from_rec else None
     to_lead_id = to_rec.get("lead_id") if to_rec else None
-    if not to_lead_id:
+    if not from_lead_id or not to_lead_id:
         await _audit_intro(delivered=False, reason="unreachable")
         return RedirectResponse(url=f"/club?intro=1&intro_err=unreachable", status_code=303)
 
@@ -4383,12 +4398,20 @@ async def club_intro_propose(
         await _audit_intro(delivered=False, reason="no_bot")
         return RedirectResponse(url=f"/club?intro=1&intro_err=no_bot", status_code=303)
 
+    # Уведомление КАЖДОЙ стороне в её lead-канал — один и тот же deep-link (бот сам
+    # определит сторону по tg_user_id клика). Обе доставки best-effort, но ОБЕ должны
+    # пройти для delivered=True — если хоть одна enqueue вернула None, delivered=False
+    # (intro всё равно создан, оператор может попробовать снова).
     text = _build_intro_invite_text(bot_username, iid)
-    rows = await db.enqueue_manual_reply(
+    rows_from = await db.enqueue_manual_reply(
+        from_lead_id, text=text, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    rows_to = await db.enqueue_manual_reply(
         to_lead_id, text=text, actor=session.actor,
         ip=_ip(request), user_agent=_ua(request),
     )
-    if rows is None:
+    if rows_from is None or rows_to is None:
         await _audit_intro(delivered=False, reason="enqueue")
         return RedirectResponse(url=f"/club?intro=1&intro_err=enqueue", status_code=303)
 

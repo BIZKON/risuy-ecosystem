@@ -106,7 +106,7 @@
             <span class="intro-card__arrow">→</span>
             <b>{{ (i.to.display_name if i.to else "—") }}</b>
             {% if i.status == 'requested' %}
-              <span class="pill pill--warn">ожидает ответа</span>
+              <span class="pill pill--warn">ожидает подтверждения участников</span>
             {% elif i.status == 'accepted' %}
               <span class="pill pill--ok">принято</span>
             {% elif i.status == 'declined' %}
@@ -123,7 +123,7 @@
               <dd>{{ (i.reveal.to.lead_phone if i.reveal.to else None) or "—" }}</dd>
             </dl>
           {% elif i.status == 'requested' %}
-            <p class="muted">Ждём ответа получателя в боте — контакты появятся после согласия обеих сторон.</p>
+            <p class="muted">Ждём подтверждения в боте от каждого участника — контакты появятся после согласия обеих сторон.</p>
           {% endif %}
         </div>
       {% endfor %}
