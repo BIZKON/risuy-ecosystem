@@ -40,6 +40,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
+_BOT_USERNAME = ""  # username бота (из get_me при старте) — для deep-link лендинга клуба
+
 # ── Трекинг-редирект /r/<token> ──────────────────────────────────────────────
 # Токен — secrets.token_urlsafe(16) → алфавит [A-Za-z0-9_-]. Валидируем ДО любого SELECT:
 # мусор / %00 / гигантская строка → 404 без обращения к БД.
@@ -412,12 +414,37 @@ async def _legal_page(request: web.Request) -> web.StreamResponse:
     return resp
 
 
+async def _club_landing(request: web.Request) -> web.StreamResponse:
+    """Публичная страница-приглашение в клуб тенанта: GET /club/{slug}, без авторизации.
+    404, если тенанта нет, реквизиты оператора не заполнены (клуб не может принять вступление),
+    или бот ещё не знает свой username (deep-link не построить)."""
+    slug = request.match_info.get("slug", "")
+    try:
+        kv = await db.get_legal_doc_data(slug)
+    except Exception:  # noqa: BLE001
+        logger.warning("club-landing: чтение реквизитов упало slug=%s", slug, exc_info=True)
+        kv = None
+    if kv is None or not _BOT_USERNAME:
+        return web.Response(status=404, text="Клуб не найден или не настроен")
+    deeplink = f"https://t.me/{_BOT_USERNAME}?start=club"
+    base = config.BOT_PUBLIC_BASE_URL
+    policy_url = f"{base}/legal/{slug}/privacy" if base else ""
+    resp = web.Response(
+        text=_club_landing_html(kv["operator_name"], deeplink, policy_url),
+        content_type="text/html", charset="utf-8",
+    )
+    resp.headers["Cache-Control"] = "public, max-age=600"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
 async def _start_health() -> web.AppRunner:
     app = web.Application()
     app.router.add_get("/", _health)
     app.router.add_get("/health", _health)
     app.router.add_get("/r/{token}", _redirect)  # публичный трекинг-редирект (§6.2)
     app.router.add_get("/legal/{slug}/{doc_type}", _legal_page)  # публичные юр-страницы тенанта (152-ФЗ)
+    app.router.add_get("/club/{slug}", _club_landing)  # публичный лендинг-приглашение в клуб тенанта
     app.router.add_post("/api/demo-chat", _demo_chat)     # веб-чат демо-Лии для сайта
     app.router.add_options("/api/demo-chat", _demo_chat)  # CORS preflight
     runner = web.AppRunner(app)
@@ -464,6 +491,8 @@ async def main() -> None:
         # критичен, бот должен подняться в любом случае.
         try:
             me = await bot.get_me()
+            global _BOT_USERNAME
+            _BOT_USERNAME = (me.username or "").strip()
             await db.publish_runtime_status(
                 bot_username=me.username or "",
                 gate_channel_url=config.CHANNEL_URL,

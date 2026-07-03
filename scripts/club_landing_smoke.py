@@ -26,6 +26,23 @@ def main():
     check("название клуба в заголовке", "Клуб предпринимателей" in html)
     html2 = bot._club_landing_html("ООО Роза", "https://t.me/mybot?start=club", "")
     check("без policy_url — Политику не рендерим, но лендинг цел", "Политика" not in html2 and "Вступить в клуб" in html2)
+
+    # db-часть (Task 2, Step 5 плана): только на risuy_dev, если явно задан TEAM_DSN.
+    # Без TEAM_DSN — тихо пропускаем (нет доступа к БД в этой сессии).
+    dsn = os.environ.get("TEAM_DSN", "")
+    if "/risuy_dev" in dsn.split("?")[0]:
+        import asyncio, asyncpg
+        async def _db():
+            db.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+            try:
+                none1 = await db.get_legal_doc_data("no-such-slug-zzz")
+                check("get_legal_doc_data(неизвестный слаг) → None", none1 is None)
+            finally:
+                await db.pool.close()
+        asyncio.run(_db())
+    else:
+        print("  (пропуск db-проверки: TEAM_DSN не указывает на risuy_dev)")
+
     print()
     if FAILS: print(f"❌ ПРОВАЛЫ ({len(FAILS)}): " + ", ".join(FAILS)); sys.exit(1)
     print("✅ club_landing_smoke — все проверки зелёные")
