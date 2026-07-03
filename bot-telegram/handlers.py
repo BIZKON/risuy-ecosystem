@@ -117,12 +117,26 @@ def _club_chain_kb() -> InlineKeyboardMarkup:
 
 async def _club_start(message: Message, state: FSMContext) -> None:
     """Общий вход в воронку клуба (из deep-link ?start=club и из /club). Операторское имя
-    берём из funnel-config активного тенанта (панель, «Интеграции») поверх env-фолбэка
-    config.CLUB_OPERATOR_NAME — как и в остальных 152-ФЗ-текстах бота. Текст согласия
-    строим один раз и кладём в FSM data — на финале хешируем ИМЕННО то, что показали
-    человеку (club_consent_record.text_hash)."""
+    берём из funnel-config активного тенанта (панель, «Интеграции») — ключ company_name
+    (= operator_name с фолбэком на company_name, см. db.get_funnel_config) — поверх env-
+    фолбэка config.CLUB_OPERATOR_NAME. Если реквизиты оператора у тенанта не настроены —
+    вход в клуб отклоняется (см. ниже): показывать/хешировать согласие с пустым/заглушечным
+    оператором нельзя, иначе consent_events зафиксирует юридически ничтожный текст (152-ФЗ).
+    Текст согласия строим один раз и кладём в FSM data — на финале хешируем ИМЕННО то, что
+    показали человеку (club_consent_record.text_hash)."""
     cfg = await db.get_funnel_config(db.tenant_id())
-    operator = (cfg.get("operator_name") or config.CLUB_OPERATOR_NAME or "оператор").strip()
+    operator = (cfg.get("company_name") or config.CLUB_OPERATOR_NAME or "").strip()
+    if not operator:
+        logger.warning(
+            "club: у тенанта %s не настроены реквизиты оператора — клуб-вход отклонён",
+            db.tenant_id(),
+        )
+        await messaging.reply_text(
+            message,
+            "Клуб сейчас недоступен: у оператора не настроены реквизиты. Загляните чуть позже 🙂",
+            source="system",
+        )
+        return
     consent_text = build_club_consent_text("club_join", operator)
     await state.set_state(ClubSignup.consent)
     await state.update_data(club_consent_text=consent_text)
