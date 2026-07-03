@@ -40,6 +40,8 @@
 {% if replied %}{{ flash('Ответ поставлен в очередь — бот отправит его клиенту.', 'ok') }}{% endif %}
 {% if paused_flash %}{{ flash('Режим бота переключён.', 'ok') }}{% endif %}
 {% if reply_err %}{{ flash(reply_err, 'error') }}{% endif %}
+{% if club_invited %}{{ flash('Приглашение в клуб поставлено в очередь — бот отправит его лиду.', 'ok') }}{% endif %}
+{% if club_err %}{{ flash(club_err, 'error') }}{% endif %}
 
 {% if lead.erase_requested_at %}
 <div class="alert-strip alert-strip--static" role="status">
@@ -144,6 +146,17 @@
           {# Перехват: бот перестаёт авто-отвечать (Лия+прогрев), оператор пишет руками.
              Воронка выдачи гайда НЕ глушится. UPDATE leads.bot_paused + аудит. #}
           {{ bot_toggle(lead, csrf_token, 'card') }}
+          {# Промоушен в клуб (вход B): показываем ТОЛЬКО opt-in лиду (дал согласие) с
+             адресом доставки и при известном username бота (deep-link ?start=club).
+             Член клуба создаётся не здесь, а когда лид сам пройдёт воронку и даст
+             согласие внутри неё — бот привяжет участника к этому лиду автоматически. #}
+          {% if bot_username and lead.consent and lead.can_reply %}
+          <form class="inline-form" method="post" action="/leads/{{ lead.id }}/club-invite" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn--ghost btn--sm" type="submit"
+                    title="Отправить лиду приглашение в «Клуб предпринимателей» со ссылкой на воронку вступления">Пригласить в клуб</button>
+          </form>
+          {% endif %}
           <a class="btn btn--ghost btn--sm" href="/leads/{{ lead.id }}#thread" title="Обновить переписку">Обновить</a>
         </div>
       </div>

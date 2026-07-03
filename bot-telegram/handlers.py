@@ -147,8 +147,10 @@ async def _club_start(message: Message, state: FSMContext) -> None:
 
 async def _club_finish(user_id: int, bot: Bot, state: FSMContext) -> None:
     """Финал воронки клуба: валидация → создание карточки участника (club_members +
-    club_profiles) → фиксация согласия (consent_events). club-member — БЕЗ lead_id: клуб
-    отдельный лид-магнит, не привязан к воронке основного гайда."""
+    club_profiles) → фиксация согласия (consent_events). Если tg-юзер — известный лид
+    тенанта (пришёл по приглашению «Пригласить в клуб», вход B), участник и запись
+    согласия привязываются к его lead_id; иначе (чистый лид-магнит) lead_id = None.
+    club_member_create сам скоупит lead по тенанту (подзапрос) — чужой не привяжется."""
     data = await state.get_data()
     reg = {k: data.get(k) for k in ("display_name", "city", "okved", "offering", "seeking", "chain_position")}
     errs = validate_club_registration(reg)
@@ -159,15 +161,20 @@ async def _club_finish(user_id: int, bot: Bot, state: FSMContext) -> None:
         await state.clear()
         return
     try:
+        # Вход B: резолвим lead_id текущего tg-юзера в активном тенанте. None — юзер не
+        # лид этого тенанта (чистый клуб-лид-магнит), тогда участник без привязки, как было.
+        lead_id = await db.get_lead_id(user_id, messenger="tg")
         mid = await db.club_member_create(
-            display_name=reg["display_name"], city=reg["city"], okved=reg["okved"]
+            display_name=reg["display_name"], city=reg["city"], okved=reg["okved"],
+            lead_id=lead_id,
         )
         await db.club_profile_upsert(
             mid, offering=reg["offering"], seeking=reg["seeking"],
             chain_position=reg["chain_position"], okved_seek="",
         )
         text_hash = hashlib.sha256((data.get("club_consent_text") or "").encode("utf-8")).hexdigest()
-        await db.club_consent_record(doc_type="club_join", member_id=mid, text_hash=text_hash, channel="tg")
+        await db.club_consent_record(doc_type="club_join", member_id=mid, lead_id=lead_id,
+                                     text_hash=text_hash, channel="tg")
         await messaging.send_text(bot, user_id, texts.CLUB_DONE, source="funnel")
     except Exception as e:
         logger.warning("club: не удалось сохранить карточку: %s", e)

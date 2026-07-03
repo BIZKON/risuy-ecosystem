@@ -1408,6 +1408,8 @@ async def lead_detail(
     erased: int = 0,
     replied: int = 0,
     paused: int = 0,
+    club_invited: int = 0,
+    club_err: str | None = None,
     err: str | None = None,
 ):
     rec = await db.get_lead(lead_id)
@@ -1422,7 +1424,9 @@ async def lead_detail(
 
     ctx = _lead_context(request, session, rec, revealed=None, saved=bool(saved),
                         erased=bool(erased), thread=thread, replied=bool(replied),
-                        paused_flash=bool(paused), reply_err=err)
+                        paused_flash=bool(paused), reply_err=err,
+                        bot_username=await _bot_username(),
+                        club_invited=bool(club_invited), club_err=club_err)
     ctx["consent_events"] = await db.list_lead_consent_events(lead_id)  # реестр согласий (152-ФЗ)
     return templates.TemplateResponse(request, "lead.html", ctx)
 
@@ -1471,9 +1475,29 @@ def _reply_err_text(err: str | None) -> str | None:
     }.get(err or "")
 
 
+def _club_invite_err_text(err: str | None) -> str | None:
+    """Текст ошибки приглашения в клуб (PRG ?club_err=... из club_invite_lead). None → нет ошибки."""
+    return {
+        "no_consent": "Пригласить в клуб можно только лида с согласием на обработку ПДн.",
+        "no_tg": "У лида нет Telegram-адреса — приглашение некому доставить.",
+        "no_bot": "Не задан username бота (раздел «Каналы») — deep-link воронки не собрать.",
+        "enqueue": "Не удалось поставить приглашение в очередь. Попробуйте ещё раз.",
+    }.get(err or "")
+
+
+async def _bot_username() -> str:
+    """Username бота (без @) из runtime-снимка app_settings — источник deep-link'ов
+    воронки (t.me/<bot_username>?start=…), как на /channels. Пусто → бот ещё не
+    публиковал статус: приглашение в клуб собрать нельзя (кнопку прячем)."""
+    runtime = await db.get_runtime_status()
+    return (runtime.get("bot_username") or "").strip()
+
+
 def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = False,
                   erased: bool = False, thread=None, replied: bool = False,
-                  paused_flash: bool = False, reply_err: str | None = None) -> dict:
+                  paused_flash: bool = False, reply_err: str | None = None,
+                  bot_username: str = "", club_invited: bool = False,
+                  club_err: str | None = None) -> dict:
     lead = dict(rec)
     lead["phone_masked"] = security.mask_phone(rec["phone_tail"], rec["has_phone"])
     return {
@@ -1484,6 +1508,11 @@ def _lead_context(request, session, rec, *, revealed: str | None, saved: bool = 
         "replied": replied,             # флеш «ответ поставлен в очередь»
         "paused_flash": paused_flash,   # флеш переключения перехвата
         "reply_err": _reply_err_text(reply_err),  # ошибка вложения ответа (PRG)
+        # Промоушен в клуб (вход B): username бота для deep-link ?start=club, флеши PRG.
+        # Пусто → кнопка «Пригласить в клуб» не рендерится (нет адреса воронки).
+        "bot_username": bot_username,
+        "club_invited": club_invited,           # флеш «приглашение поставлено в очередь»
+        "club_err": _club_invite_err_text(club_err),
         "thread": thread or [],
         "refresh_sec": config.THREAD_REFRESH_SEC,
         "msg_max": config.MSG_MAX_LEN,
@@ -1555,7 +1584,8 @@ async def lead_reveal(
     resp = templates.TemplateResponse(
         request,
         "lead.html",
-        _lead_context(request, session, rec, revealed=revealed),
+        _lead_context(request, session, rec, revealed=revealed,
+                      bot_username=await _bot_username()),
     )
     # Жёстко гасим кэш/BFCache на ответе с полным номером.
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
@@ -1675,6 +1705,80 @@ async def lead_reply(
             status_code=400, detail="Лиду нельзя написать (нет Telegram-адреса)"
         )
     return _chat_return(lead_id, from_, replied=True)
+
+
+# ---- /leads/{id}/club-invite — промоушен лида в члены клуба (вход B) -------- #
+def _club_invite_return(lead_id, *, invited: bool = False,
+                        err: str | None = None) -> RedirectResponse:
+    """PRG-редирект после приглашения в клуб → назад на карточку лида (/leads/{id})."""
+    params: dict[str, str] = {}
+    if invited:
+        params["club_invited"] = "1"
+    if err:
+        params["club_err"] = err
+    qs = urlencode(params)
+    return RedirectResponse(url=f"/leads/{lead_id}{'?' + qs if qs else ''}#thread",
+                            status_code=303)
+
+
+def _build_club_invite_text(bot_username: str) -> str:
+    """Дружелюбный операторский текст приглашения в «Клуб предпринимателей» с deep-link
+    на ГОТОВУЮ воронку клуба (Task 3b, ?start=club). Это операторское сообщение уже
+    opt-in лиду в рамках текущих отношений (НЕ холодный контакт). Красная линия: член
+    клуба создаётся ТОЛЬКО когда лид сам пройдёт воронку и даст согласие внутри неё —
+    здесь мы лишь приглашаем и даём ссылку, никакого согласия за лида не фиксируем."""
+    link = f"https://t.me/{bot_username}?start=club"
+    return (
+        "Приглашаем вас в «Клуб предпринимателей» 🤝\n\n"
+        "Это закрытое сообщество для нетворкинга и партнёрств: короткая анкета — "
+        "и вы в общей базе, где вас находят по тому, что вы предлагаете и что ищете.\n\n"
+        f"Вступить (займёт пару минут): {link}"
+    )
+
+
+@app.post("/leads/{lead_id}/club-invite")
+async def club_invite_lead(
+    request: Request,
+    lead_id: uuid.UUID,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+):
+    """Оператор приглашает opt-in лида в клуб: кладёт в outbox приглашение с deep-link
+    на клуб-воронку. Член клуба здесь НЕ создаётся — только когда лид сам пройдёт
+    воронку (Task 3b) и даст согласие внутри неё. Тогда бот (_club_finish) сам
+    привяжет нового участника к этому лиду по tg_user_id (вход B, автопривязка)."""
+    await _enforce_csrf(request, session, csrf_token)
+
+    # Лид скоупится RLS активного тенанта (panel_rw). get_lead → None ⇒ чужой/нет лида.
+    rec = await db.get_lead(lead_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+
+    # Гейт-1: только opt-in лид (дал согласие на обработку ПДн в боте). Без согласия
+    # приглашать нельзя — это была бы новая коммуникация без правового основания.
+    if not rec["consent"]:
+        return _club_invite_return(lead_id, err="no_consent")
+    # Гейт-2: есть адрес доставки в канале лида (иначе бот не доставит).
+    if not rec["can_reply"]:
+        return _club_invite_return(lead_id, err="no_tg")
+    # Гейт-3: известен username бота (source deep-link'а воронки). Пусто → мягкий отказ.
+    bot_username = await _bot_username()
+    if not bot_username:
+        return _club_invite_return(lead_id, err="no_bot")
+
+    text = _build_club_invite_text(bot_username)
+    rows = await db.enqueue_manual_reply(
+        lead_id, text=text, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if rows is None:
+        # Гонка: лид пропал / потерял адрес между чтением и enqueue — не молчим.
+        return _club_invite_return(lead_id, err="enqueue")
+    # Явный аудит промоушена (enqueue_manual_reply уже пишет manual_reply без текста;
+    # club_invite фиксирует бизнес-действие «пригласили в клуб»).
+    await db.audit(actor=session.actor, action="club_invite", lead_id=lead_id,
+                   ip=_ip(request), user_agent=_ua(request))
+    return _club_invite_return(lead_id, invited=True)
 
 
 # ---- /leads/{id}/invoice — «счёт из диалога» (Phase 1B) -------------------- #
