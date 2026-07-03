@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Unit-смоук лендинга клуба: _club_landing_html (bot.py) — без сети/БД.
+"""Смоук лендинга клуба: _club_landing_html (bot.py, unit, без сети/БД) + опц. db-часть
+(get_legal_doc_data-гейт) — только при TEAM_DSN на risuy_dev (контроллер).
 Запуск: PYTHONPATH=bot-telegram:. ./.venv-smoke/bin/python scripts/club_landing_smoke.py"""
 import os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,7 +32,7 @@ def main():
     # Без TEAM_DSN — тихо пропускаем (нет доступа к БД в этой сессии).
     dsn = os.environ.get("TEAM_DSN", "")
     if "/risuy_dev" in dsn.split("?")[0]:
-        import asyncio, asyncpg
+        import asyncio, asyncpg, db  # noqa: E402  (db — bot-telegram/db.py, на PYTHONPATH)
         async def _db():
             db.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
             try:
