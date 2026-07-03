@@ -4223,6 +4223,63 @@ async def companies_page(
     )
 
 
+@app.get("/club", response_class=HTMLResponse)
+async def club_page(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    city: str = "",
+    okved: str = "",
+):
+    """Каталог «Клуб предпринимателей» (Уровень 1, tenant-scoped). Только участники
+    активного тенанта (opt-in воронка бота — cmd_club/_club_finish). Фильтр по
+    городу/ОКВЭД — в Python (небольшой каталог, без пагинации, как /companies).
+    ЕГРЮЛ-обогащение — опц. подстановка карточки prospects по member.inn (та же
+    tenant-scoped RLS-выборка, что /companies; НЕ платный lookup — только то, что
+    уже сохранено ранее через /companies/lookup)."""
+    tid = session.active_tenant_id
+    members = await db.club_member_list(tid) if tid else []
+
+    city_q = (city or "").strip()
+    okved_q = (okved or "").strip()
+    if city_q:
+        members = [m for m in members if (m.get("city") or "").strip().lower() == city_q.lower()]
+    if okved_q:
+        members = [m for m in members if (m.get("okved") or "").strip().lower() == okved_q.lower()]
+
+    # ЕГРЮЛ-обогащение по inn: только среди уже сохранённых карточек prospects тенанта
+    # (никаких новых платных dadata-запросов из каталога клуба).
+    prospect_by_inn: dict[str, dict] = {}
+    if tid:
+        prospects = await db.prospect_list()
+        for p in prospects:
+            if p["inn"]:
+                prospect_by_inn[p["inn"]] = dict(p)
+    for m in members:
+        m["prospect"] = prospect_by_inn.get((m.get("inn") or "").strip()) if m.get("inn") else None
+
+    # Опции фильтров — из текущего набора участников тенанта (до фильтрации), без БД-запроса.
+    all_members = await db.club_member_list(tid) if tid else []
+    cities = sorted({(m.get("city") or "").strip() for m in all_members if m.get("city")})
+    okveds = sorted({(m.get("okved") or "").strip() for m in all_members if m.get("okved")})
+
+    return templates.TemplateResponse(
+        request, "club.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "club",
+            "has_tenant": bool(tid),
+            "members": members,
+            "cities": cities,
+            "okveds": okveds,
+            "filter_city": city_q,
+            "filter_okved": okved_q,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+            "help_dismissed": await _help_dismissed(session, "club"),
+        },
+    )
+
+
 _INN_LENGTHS = frozenset({10, 12, 13, 15})  # ИНН ЮЛ 10 / ИП 12 / ОГРН 13 / ОГРНИП 15
 
 

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_macros.html" import help_card %}
+{% block title %}Клуб{% endblock %}
+{% block content %}
+<h1 class="page-title">Клуб предпринимателей</h1>
+
+{% if not has_tenant %}
+  <p class="empty-state">Выберите клиента в разделе «Клиенты» — клуб ведётся в кабинете клиента.</p>
+{% else %}
+
+  {% if not help_dismissed %}
+    {{ help_card("Зачем «Клуб»",
+        "Каталог участников клуба вашего кабинета — только те, кто сам согласился (opt-in через бота). "
+        "Это справочник для аналитики и подготовки знакомств, не список для холодного обзвона. "
+        "Первый контакт между участниками — только по взаимному согласию сторон.",
+        dismiss_key="help_dismissed__club", csrf_token=csrf_token, back="/club") }}
+  {% endif %}
+
+  <form class="filters" method="get" action="/club">
+    <div class="filters__row">
+      <label class="field field--inline">
+        <span class="field__label">Город</span>
+        <select class="field__input" name="city">
+          <option value="">Все</option>
+          {% for c in cities %}
+            <option value="{{ c }}" {% if filter_city == c %}selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field field--inline">
+        <span class="field__label">ОКВЭД</span>
+        <select class="field__input" name="okved">
+          <option value="">Все</option>
+          {% for o in okveds %}
+            <option value="{{ o }}" {% if filter_okved == o %}selected{% endif %}>{{ o }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <button class="btn btn--primary" type="submit">Фильтровать</button>
+      {% if filter_city or filter_okved %}
+      <a class="btn btn--ghost" href="/club">Сбросить</a>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if members %}
+    <div class="club-list">
+      {% for m in members %}
+        <div class="club-card">
+          <div class="club-card__head">
+            <b>{{ m.display_name or "—" }}</b>
+            {% if m.status %}
+              <span class="pill pill--{{ 'ok' if m.status == 'active' else 'muted' }}">
+                {{ {'active': 'активен', 'paused': 'на паузе', 'left': 'вышел'}.get(m.status, m.status) }}
+              </span>
+            {% endif %}
+          </div>
+          <dl class="club-card__grid">
+            {% if m.city %}<dt>Город</dt><dd>{{ m.city }}</dd>{% endif %}
+            {% if m.okved %}<dt>ОКВЭД</dt><dd>{{ m.okved }}</dd>{% endif %}
+            {% if m.inn %}<dt>ИНН</dt><dd class="mono">{{ m.inn }}</dd>{% endif %}
+          </dl>
+          {% if m.prospect %}
+            {% with p = m.prospect %}{% include "_company_card.html" %}{% endwith %}
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty-state">Пока нет участников. Приглашение в клуб — через бота (воронка согласия).</p>
+  {% endif %}
+
+  {% if support_url %}<p class="muted"><a href="{{ support_url }}">Нужна помощь?</a></p>{% endif %}
+{% endif %}
+{% endblock %}
