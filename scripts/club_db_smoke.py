@@ -92,6 +92,12 @@ async def main():
         list_b = await db.club_member_list(tb)
         check("RLS: list(B) НЕ содержит mid", all(str(m["id"]) != mid for m in list_b))
 
+        # ── get_tenant_slug: слаг тенанта по id (глобальная таблица tenants, без GUC) ──
+        slug = await db.get_tenant_slug(ta)
+        check("get_tenant_slug вернул слаг тенанта", isinstance(slug, str) and len(slug) > 0, repr(slug))
+        check("get_tenant_slug(случайный uuid) → None",
+              await db.get_tenant_slug("00000000-0000-0000-0000-000000000000") is None)
+
         # ── согласие пишется в consent_events ────────────────────────────────
         db.set_active_tenant(ta)
         await db.club_consent_record(

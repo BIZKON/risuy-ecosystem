@@ -4738,6 +4738,13 @@ async def club_has_members(tenant_id) -> bool:
         ))
 
 
+async def get_tenant_slug(tenant_id) -> str | None:
+    """Слаг тенанта по id (для URL публичного лендинга клуба). None — тенанта нет."""
+    async with pool.acquire() as c:
+        v = await c.fetchval("select slug from tenants where id = $1", tenant_id)
+    return (v or "").strip() or None
+
+
 async def club_member_list(tenant_id) -> list[dict]:
     """Участники клуба тенанта, свежие сверху. Явный tenant_id = backstop (owner-DSN
     обходит RLS)."""

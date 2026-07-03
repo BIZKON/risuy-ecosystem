@@ -4294,6 +4294,30 @@ async def club_page(
             else None
         )
 
+    # Карточка-приглашение: публичный лендинг клуба + deep-link в бот, для оператора,
+    # чтобы делиться ссылкой в своих каналах. Готовность = бот знает свой username и
+    # публичный base (get_runtime_status — публикует бот при старте), у тенанта есть
+    # slug, и заполнены реквизиты оператора (operator_name/inn/email в tenant_settings —
+    # ТОТ ЖЕ гейт, что у бота в get_legal_doc_data для публичного роута /club/{slug};
+    # get_tenant_legal_urls тут не подходит — она лишь строит URL из base+slug и не
+    # проверяет реквизиты, иначе панель показала бы «готово» при живом 404 на лендинге).
+    runtime = await db.get_runtime_status()
+    _bot_u = (runtime.get("bot_username") or "").strip()
+    _bot_base = (runtime.get("public_base_url") or "").strip()
+    _slug = await db.get_tenant_slug(tid) if tid else None
+    _funnel = await db.get_funnel_config_panel(tid) if tid else {}
+    _legal_ready = bool(
+        (_funnel.get("operator_name") or "").strip()
+        and (_funnel.get("operator_inn") or "").strip()
+        and (_funnel.get("operator_email") or "").strip()
+    )
+    _ready = bool(_bot_u and _bot_base and _slug and _legal_ready)
+    invite = {
+        "ready": _ready,
+        "landing_url": f"{_bot_base}/club/{_slug}" if (_bot_base and _slug) else "",
+        "deeplink": f"https://t.me/{_bot_u}?start=club" if _bot_u else "",
+    }
+
     resp = templates.TemplateResponse(
         request, "club.html",
         {
@@ -4311,6 +4335,7 @@ async def club_page(
             "intros": intros,
             "intro_flash": request.query_params.get("intro"),
             "intro_err": _club_intro_err_text(request.query_params.get("intro_err")),
+            "invite": invite,
         },
     )
     if any(i.get("reveal") for i in intros):
