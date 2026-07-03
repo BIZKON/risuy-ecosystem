@@ -135,9 +135,18 @@ summarize(rows: list[dict]) -> dict
 ```
 CSV_HEADERS = [display_name, город(норм.), тип, ИНН, ОКВЭД, ОКВЭД-название,
                краткое имя ЕГРЮЛ, offering, средний чек, seeking, цепочка, статус, дата регистрации]
-csv_business_rows(rows) -> Iterable[list[str]]
-  - каждое поле через csv_safe() (formula-guard из shared/anon.py)
+csv_business_rows(rows) -> Iterable[list[str]]   # ТОЛЬКО data-строки (без заголовка)
+  - сырые бизнес-значения; formula-guard применяет роут экспорта через _csv_line() (csv_safe)
+  - заголовок роут пишет из CSV_HEADERS
   - контакты/ПДн НЕ включаются (см. §8)
+```
+
+### 5.5 Фильтрация (city/тип — в Python)
+```
+filter_members(rows, *, city='', etype='') -> list[dict]   # чистая функция, юнит-тест
+  - city:  оставить m, где normalize_city(m.city) == normalize_city(city)
+  - etype: оставить m, где entity_type(m.inn, m.prospect.opf) == etype
+  - status/okved — НЕ здесь (фильтруются в SQL, §6)
 ```
 
 ---
@@ -192,9 +201,10 @@ club_intro_funnel(tenant_id) -> dict
   KPI-плитки, распределения (город/ОКВЭД/тип — списки-бары), покрытие цепочки, средний чек,
   рост по неделям/месяцам (`club_growth`), воронка знакомств (`club_intro_funnel`).
   Пустой клуб → нули, не падает.
-- **`GET /club/export.csv`** (новый) → `StreamingResponse` (`text/csv; charset=utf-8`,
-  `Content-Disposition: attachment`), зеркало `export_full`/`stream_export_full`:
-  `club_member_list_enriched(фильтр)` → `csv_business_rows()` → потоковая запись. BOM для Excel-кириллицы.
+- **`POST /club/export.csv`** (новый, CSRF + аудит) → `StreamingResponse` (`text/csv; charset=utf-8`,
+  `Content-Disposition: attachment`), зеркало `export_masked`/`export_full` (POST+CSRF+`db.audit` — домовой
+  паттерн CSV-экспорта, фиксирует факт выгрузки): `club_member_list_enriched(фильтр)` → `filter_members` →
+  `csv_business_rows()` через `_csv_line` (formula-guard) → потоковая запись. BOM для Excel-кириллицы.
 
 Навигация: вкладки в шапке `/club` ↔ `/club/dashboard` (как разделы панели). Аудит-лог операторского
 экспорта — по образцу `export_full` (кто/когда выгрузил), без ПДн в строке лога.
