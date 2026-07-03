@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import help_card %}
+{% from "_macros.html" import help_card, flash %}
 {% block title %}Клуб{% endblock %}
 {% block content %}
 <h1 class="page-title">Клуб предпринимателей</h1>
@@ -15,6 +15,9 @@
         "Первый контакт между участниками — только по взаимному согласию сторон.",
         dismiss_key="help_dismissed__club", csrf_token=csrf_token, back="/club") }}
   {% endif %}
+
+  {% if intro_flash %}{{ flash('Знакомство предложено.', 'ok') }}{% endif %}
+  {% if intro_err %}{{ flash(intro_err, 'error') }}{% endif %}
 
   <form class="filters" method="get" action="/club">
     <div class="filters__row">
@@ -73,6 +76,14 @@
                   <li class="club-match">
                     <b>{{ rec.display_name or "—" }}</b>
                     <span class="club-match__reason">{{ rec.match_reason }}</span>
+                    {% if m.lead_id and rec.lead_id %}
+                      <form class="club-match__intro-form" method="post" action="/club/intro">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="from_member" value="{{ m.id }}">
+                        <input type="hidden" name="to_member" value="{{ rec.id }}">
+                        <button class="btn btn--ghost btn--sm" type="submit">Предложить знакомство</button>
+                      </form>
+                    {% endif %}
                   </li>
                 {% endfor %}
               </ul>
@@ -83,6 +94,42 @@
     </div>
   {% else %}
     <p class="empty-state">Пока нет участников. Приглашение в клуб — через бота (воронка согласия).</p>
+  {% endif %}
+
+  <h2 class="section__title">Предложенные знакомства</h2>
+  {% if intros %}
+    <div class="intro-list">
+      {% for i in intros %}
+        <div class="intro-card">
+          <div class="intro-card__head">
+            <b>{{ (i.from.display_name if i.from else "—") }}</b>
+            <span class="intro-card__arrow">→</span>
+            <b>{{ (i.to.display_name if i.to else "—") }}</b>
+            {% if i.status == 'requested' %}
+              <span class="pill pill--warn">ожидает ответа</span>
+            {% elif i.status == 'accepted' %}
+              <span class="pill pill--ok">принято</span>
+            {% elif i.status == 'declined' %}
+              <span class="pill pill--bad">отклонено</span>
+            {% else %}
+              <span class="pill pill--muted">{{ i.status }}</span>
+            {% endif %}
+          </div>
+          {% if i.status == 'accepted' and i.reveal %}
+            <dl class="club-card__grid">
+              <dt>Контакт «{{ (i.from.display_name if i.from else "—") }}»</dt>
+              <dd>{{ (i.reveal.from.lead_phone if i.reveal.from else None) or "—" }}</dd>
+              <dt>Контакт «{{ (i.to.display_name if i.to else "—") }}»</dt>
+              <dd>{{ (i.reveal.to.lead_phone if i.reveal.to else None) or "—" }}</dd>
+            </dl>
+          {% elif i.status == 'requested' %}
+            <p class="muted">Ждём ответа получателя в боте — контакты появятся после согласия обеих сторон.</p>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty-state">Пока нет предложенных знакомств.</p>
   {% endif %}
 
   {% if support_url %}<p class="muted"><a href="{{ support_url }}">Нужна помощь?</a></p>{% endif %}

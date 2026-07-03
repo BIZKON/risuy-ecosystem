@@ -4273,7 +4273,21 @@ async def club_page(
     cities = sorted({(m.get("city") or "").strip() for m in all_members if m.get("city")})
     okveds = sorted({(m.get("okved") or "").strip() for m in all_members if m.get("okved")})
 
-    return templates.TemplateResponse(
+    # Task 7b-панель: предложенные знакомства тенанта + раскрытые контакты для accepted
+    # (оператору нужны контакты обоих, чтобы фасилитировать знакомство — это разрешено
+    # ПОСЛЕ взаимного согласия, см. club_intro_reveal). requested/declined — без контактов.
+    intros = await db.club_intro_list(tid) if tid else []
+    member_by_id = {str(m.get("id")): m for m in all_members}
+    for intro in intros:
+        intro["from"] = member_by_id.get(str(intro.get("from_member")))
+        intro["to"] = member_by_id.get(str(intro.get("to_member")))
+        intro["reveal"] = (
+            await db.club_intro_reveal(intro["id"], tid)
+            if tid and intro.get("status") == "accepted"
+            else None
+        )
+
+    resp = templates.TemplateResponse(
         request, "club.html",
         {
             "csrf_token": session.csrf_token,
@@ -4287,8 +4301,99 @@ async def club_page(
             "filter_okved": okved_q,
             "support_url": _safe_support_url(config.SUPPORT_URL),
             "help_dismissed": await _help_dismissed(session, "club"),
+            "intros": intros,
+            "intro_flash": request.query_params.get("intro"),
+            "intro_err": _club_intro_err_text(request.query_params.get("intro_err")),
         },
     )
+    if any(i.get("reveal") for i in intros):
+        # Раскрытые контакты (accepted intro) на странице — как /reveal (§3.8): жёстко
+        # гасим кэш/BFCache, чтобы полный телефон не осел в истории/шаред-кэше.
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+# ---- /club/intro — POST «Предложить знакомство» (Task 7b-панель) ---------- #
+def _club_intro_err_text(err: str | None) -> str | None:
+    return {
+        "bad_member": "Один из участников не найден в клубе этого клиента.",
+        "unreachable": "Знакомство создано, но уведомление не отправлено — у получателя нет Telegram-адреса.",
+        "no_bot": "Знакомство создано, но уведомление не отправлено — не задан username бота (раздел «Каналы»).",
+        "enqueue": "Знакомство создано, но не удалось поставить уведомление в очередь.",
+    }.get(err or "")
+
+
+def _build_intro_invite_text(bot_username: str, iid: str) -> str:
+    """Уведомление участнику-получателю (to_member) о предложенном знакомстве, с
+    deep-link на приём/отклонение внутри бота (7b-бот, вне этой панели — панель
+    только создаёт intro и кладёт уведомление в outbox)."""
+    link = f"https://t.me/{bot_username}?start=intro_{iid}"
+    return (
+        "В «Клубе предпринимателей» вам предлагают знакомство 🤝\n\n"
+        "Другой участник клуба хочет обменяться контактами. Посмотреть и ответить:\n"
+        f"{link}"
+    )
+
+
+@app.post("/club/intro")
+async def club_intro_propose(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    from_member: uuid.UUID = Form(...),
+    to_member: uuid.UUID = Form(...),
+    csrf_token: str = Form(""),
+):
+    """Оператор предлагает знакомство между двумя участниками клуба (из карточки
+    рекомендации «Рекомендуем познакомиться»). Красная линия: панель НЕ решает за
+    участника-получателя — только создаёт intro (status='requested') и кладёт
+    уведомление в его outbox. Согласие (accept/decline) — клик получателя в боте
+    (7b-бот, deep-link ?start=intro_<id>)."""
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        raise StarletteHTTPException(status_code=404, detail="Клиент не выбран")
+
+    iid = await db.club_intro_create(tid, from_member, to_member)
+    if iid is None:
+        return RedirectResponse(url=f"/club?intro_err=bad_member", status_code=303)
+
+    # Intro создан в любом случае — аудит пишем ПОСЛЕ определения исхода доставки,
+    # чтобы detail честно отражал не только факт создания, но и результат уведомления
+    # получателя (delivered=False + reason, если уведомление не ушло).
+    async def _audit_intro(*, delivered: bool, reason: str | None = None) -> None:
+        detail = {"intro_id": iid, "from_member": str(from_member), "to_member": str(to_member),
+                   "delivered": delivered}
+        if reason:
+            detail["reason"] = reason
+        await db.audit(actor=session.actor, action="club_intro_propose",
+                       ip=_ip(request), user_agent=_ua(request), detail=detail)
+
+    # Уведомление получателю — ТОЛЬКО если он достижим (lead_id есть → у него есть карточка
+    # лида с адресом канала). Недостижимый получатель: intro создан молча, мягкая ошибка —
+    # оператор должен понять, почему уведомление не ушло.
+    to_rec = await db.club_member_get(to_member, tid)
+    to_lead_id = to_rec.get("lead_id") if to_rec else None
+    if not to_lead_id:
+        await _audit_intro(delivered=False, reason="unreachable")
+        return RedirectResponse(url=f"/club?intro=1&intro_err=unreachable", status_code=303)
+
+    bot_username = await _bot_username()
+    if not bot_username:
+        await _audit_intro(delivered=False, reason="no_bot")
+        return RedirectResponse(url=f"/club?intro=1&intro_err=no_bot", status_code=303)
+
+    text = _build_intro_invite_text(bot_username, iid)
+    rows = await db.enqueue_manual_reply(
+        to_lead_id, text=text, actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request),
+    )
+    if rows is None:
+        await _audit_intro(delivered=False, reason="enqueue")
+        return RedirectResponse(url=f"/club?intro=1&intro_err=enqueue", status_code=303)
+
+    await _audit_intro(delivered=True)
+    return RedirectResponse(url="/club?intro=1", status_code=303)
 
 
 _INN_LENGTHS = frozenset({10, 12, 13, 15})  # ИНН ЮЛ 10 / ИП 12 / ОГРН 13 / ОГРНИП 15
