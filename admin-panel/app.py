@@ -40,6 +40,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import StreamingResponse
 
 import auth
+import club_match
 import config
 import dadata
 import db
@@ -4235,10 +4236,20 @@ async def club_page(
     городу/ОКВЭД — в Python (небольшой каталог, без пагинации, как /companies).
     ЕГРЮЛ-обогащение — опц. подстановка карточки prospects по member.inn (та же
     tenant-scoped RLS-выборка, что /companies; НЕ платный lookup — только то, что
-    уже сохранено ранее через /companies/lookup)."""
+    уже сохранено ранее через /companies/lookup). Рекомендации «Рекомендуем познакомиться» —
+    club_match.rank_matches по профильным полям (chain_position/okved_seek), ТОЛЬКО
+    среди участников этого же тенанта (Уровень 2, cross-tenant — вне Фазы 1)."""
     tid = session.active_tenant_id
-    members = await db.club_member_list(tid) if tid else []
+    all_members = await db.club_member_list_with_profile(tid) if tid else []
 
+    # Рекомендации считаются ДО фильтрации город/ОКВЭД (кандидаты — весь клуб тенанта,
+    # фильтр влияет только на то, что видно в основном списке карточек).
+    matches_by_member: dict[str, list[dict]] = {}
+    for m in all_members:
+        others = [o for o in all_members if o.get("id") != m.get("id")]
+        matches_by_member[str(m.get("id"))] = club_match.rank_matches(m, others)[:3]
+
+    members = all_members
     city_q = (city or "").strip()
     okved_q = (okved or "").strip()
     if city_q:
@@ -4256,9 +4267,9 @@ async def club_page(
                 prospect_by_inn[p["inn"]] = dict(p)
     for m in members:
         m["prospect"] = prospect_by_inn.get((m.get("inn") or "").strip()) if m.get("inn") else None
+        m["matches"] = matches_by_member.get(str(m.get("id")), [])
 
     # Опции фильтров — из текущего набора участников тенанта (до фильтрации), без БД-запроса.
-    all_members = await db.club_member_list(tid) if tid else []
     cities = sorted({(m.get("city") or "").strip() for m in all_members if m.get("city")})
     okveds = sorted({(m.get("okved") or "").strip() for m in all_members if m.get("okved")})
 

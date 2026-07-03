@@ -65,6 +65,19 @@
           {% if m.prospect %}
             {% with p = m.prospect %}{% include "_company_card.html" %}{% endwith %}
           {% endif %}
+          {% if m.matches %}
+            <div class="club-card__matches">
+              <p class="club-card__matches-title">Рекомендуем познакомиться</p>
+              <ul class="club-match-list">
+                {% for rec in m.matches %}
+                  <li class="club-match">
+                    <b>{{ rec.display_name or "—" }}</b>
+                    <span class="club-match__reason">{{ rec.match_reason }}</span>
+                  </li>
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
         </div>
       {% endfor %}
     </div>

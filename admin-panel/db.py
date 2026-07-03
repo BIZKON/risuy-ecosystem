@@ -4739,6 +4739,30 @@ async def club_member_list(tenant_id) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def club_member_list_with_profile(tenant_id) -> list[dict]:
+    """Участники клуба тенанта + карточка профиля (offering/seeking/chain_position/
+    okved_seek) для матчинга по цепочке потребления (Task 6, club_match.rank_matches).
+    LEFT JOIN club_profiles — участник без заполненного профиля тоже возвращается
+    (профильные поля будут NULL). Явный tenant_id = backstop (owner-DSN обходит RLS),
+    как club_member_list; JOIN дополнительно фильтрует club_profiles.tenant_id тем же
+    параметром (профиль чужого тенанта не подмешается даже гипотетически)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            select m.*,
+                   p.offering, p.seeking, p.chain_position, p.okved_seek,
+                   p.avg_check, p.description
+            from club_members m
+            left join club_profiles p
+                on p.member_id = m.id and p.tenant_id = $1
+            where m.tenant_id = $1
+            order by m.created_at desc
+            """,
+            tenant_id,
+        )
+    return [dict(r) for r in rows]
+
+
 async def club_member_get(member_id, tenant_id) -> dict | None:
     """Один участник клуба, только если принадлежит tenant_id (явный backstop-фильтр —
     иначе owner-DSN покажет чужого участника в обход RLS)."""
