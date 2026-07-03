@@ -233,19 +233,23 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     # только не даём ей стартовать на паузе (входящее уже залогировано middleware).
     if await db.is_bot_paused(message.from_user.id):
         return
+    # Нормализуем args один раз — оба deep-link'а (club/intro_) регистронезависимы.
+    args = (command.args or "").strip()
     # Deep-link ?start=club (регистронезависимо) → воронка «Клуба предпринимателей»
     # (Task 3b). Перехватываем ДО нормализации source: club — не рекламная площадка,
     # а отдельный лид-магнит. Обычный source-путь (reels/dzen/…) не затрагиваем.
-    if (command.args or "").strip().lower() == "club":
+    if args.lower() == "club":
         await _club_start(message, state)
         return
     # Deep-link ?start=intro_<intro_id> → приглашение на знакомство в клубе (Task 7b-бот-fsm).
     # Оператор из панели («Предложить знакомство») кладёт члену-цели в lead-канал ссылку
     # t.me/<bot>?start=intro_<id>; здесь член-цель открывает приглашение и жмёт Принять/Отклонить.
     # Перехватываем ДО нормализации source (intro — не рекламная площадка). На паузе не доходим:
-    # is_bot_paused отсекает выше (оператор ведёт вручную), как и для club.
-    if (command.args or "").startswith("intro_"):
-        intro_id = command.args[len("intro_"):]
+    # is_bot_paused отсекает выше (оператор ведёт вручную), как и для club. Регистронезависимо
+    # (как club): матчим префикс без учёта регистра, id берём из args ПОСЛЕ префикса как есть —
+    # uuid регистронезависим в Postgres, сам id не насилуем.
+    if args.lower().startswith("intro_"):
+        intro_id = args[len("intro_"):]
         await _club_intro_open(message, intro_id)
         return
     source = (command.args or "other").lower()
@@ -495,7 +499,7 @@ async def _intro_decide(cb: CallbackQuery, accept: bool) -> None:
     if intro is None:
         return
     cfg = await db.get_funnel_config(db.tenant_id())
-    operator = (cfg.get("company_name") or "").strip()
+    operator = (cfg.get("company_name") or config.CLUB_OPERATOR_NAME or "").strip()
     consent_text = build_club_consent_text("intro", operator)
     text_hash = hashlib.sha256(consent_text.encode("utf-8")).hexdigest()
     ok = await db.club_intro_decide(intro_id, accept, text_hash=text_hash)
@@ -517,30 +521,44 @@ async def _intro_decide(cb: CallbackQuery, accept: bool) -> None:
     from_contact = reveal.get("from") if reveal else None
     to_contact = reveal.get("to") if reveal else None
     # Получателю (этот юзер) — контакт инициатора (from). Guard: reveal/from может быть None
-    # (член удалён, 7a Minor #2) — деградируем мягко, не падаем.
-    if from_contact:
-        card = texts.club_intro_contact_card(from_contact)
-        await messaging.send_text(
-            cb.bot, cb.from_user.id, texts.CLUB_INTRO_MATCH.format(card=card), source="funnel"
-        )
-    else:
-        await messaging.send_text(
-            cb.bot, cb.from_user.id, texts.CLUB_INTRO_MATCH_NO_CONTACT, source="funnel"
+    # (член удалён, 7a Minor #2) — деградируем мягко, не падаем. Изолировано в try/except:
+    # сбой доставки получателю НЕ должен блокировать доставку инициатору (best-effort обе).
+    try:
+        if from_contact:
+            card = texts.club_intro_contact_card(from_contact)
+            await messaging.send_text(
+                cb.bot, cb.from_user.id, texts.CLUB_INTRO_MATCH.format(card=card), source="funnel"
+            )
+        else:
+            await messaging.send_text(
+                cb.bot, cb.from_user.id, texts.CLUB_INTRO_MATCH_NO_CONTACT, source="funnel"
+            )
+    except Exception:
+        logger.warning(
+            "intro %s: не удалось доставить контакт получателю to_member=%s",
+            intro_id, intro["to_member"],
         )
     # Инициатору (from_member) в его lead-канал — контакт получателя (to). Если недостижим
     # (chan None: не промоушен из лида / нет tg_user_id) — пропускаем, не падаем (лог).
+    # Изолировано в свой try/except — сбой здесь не влияет на уже отправленную доставку выше.
     chan = await db.club_member_lead_channel(intro["from_member"])
     if chan is None:
         logger.info("intro %s: инициатор from_member=%s недостижим — контакт to не доставлен",
                     intro_id, intro["from_member"])
         return
-    if to_contact:
-        card = texts.club_intro_contact_card(to_contact)
-        await messaging.send_text(
-            cb.bot, chan, texts.CLUB_INTRO_MATCH.format(card=card), source="funnel"
+    try:
+        if to_contact:
+            card = texts.club_intro_contact_card(to_contact)
+            await messaging.send_text(
+                cb.bot, chan, texts.CLUB_INTRO_MATCH.format(card=card), source="funnel"
+            )
+        else:
+            await messaging.send_text(cb.bot, chan, texts.CLUB_INTRO_MATCH_NO_CONTACT, source="funnel")
+    except Exception:
+        logger.warning(
+            "intro %s: не удалось доставить контакт инициатору from_member=%s",
+            intro_id, intro["from_member"],
         )
-    else:
-        await messaging.send_text(cb.bot, chan, texts.CLUB_INTRO_MATCH_NO_CONTACT, source="funnel")
 
 
 @router.callback_query(F.data.startswith("intro_ok:"))
