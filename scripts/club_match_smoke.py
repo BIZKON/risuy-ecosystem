@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Unit-смоук: матчинг по цепочке потребления (club_match.py). Чистые функции,
-без БД/сети:
+без БД/сети. Фаза 1 — 2 фактора скоринга (okved_seek НЕ участвует, мёртвый
+фактор убран — см. финал-ревью security-audit):
 - score_match: комплементарный партнёр (before/after) в ТОМ ЖЕ городе > комплементарный
-  партнёр в ДРУГОМ городе; причина человекочитаема (по-русски, отражает факторы совпадения);
+  партнёр в ДРУГОМ городе >> некомплементарный партнёр; причина человекочитаема
+  (по-русски, отражает факторы совпадения — цепочка/город, без ОКВЭД);
 - rank_matches: сортирует кандидатов по убыванию скора, лучший первым.
 Запуск:
   PYTHONPATH=. ./.venv-smoke/bin/python scripts/club_match_smoke.py
@@ -29,19 +31,17 @@ ME = {
     "display_name": "ИП Соколова Анна",
     "city": "Казань",
     "okved": "62.01",
-    "okved_seek": "41.20",
     "offering": "разработка сайтов",
     "seeking": "подрядчик по стройке",
     "chain_position": "after",
 }
 
-# Комплементарный партнёр (before), тот же город, встречное совпадение ОКВЭД.
+# Комплементарный партнёр (before), тот же город.
 PARTNER_SAME_CITY = {
     "id": "same_city",
     "display_name": "ООО «Стройсервис»",
     "city": "Казань",
     "okved": "41.20",
-    "okved_seek": "62.01",
     "offering": "строительство",
     "seeking": "разработка сайтов",
     "chain_position": "before",
@@ -53,19 +53,17 @@ PARTNER_OTHER_CITY = {
     "display_name": "ООО «Стройсервис-Москва»",
     "city": "Москва",
     "okved": "41.20",
-    "okved_seek": "62.01",
     "offering": "строительство",
     "seeking": "разработка сайтов",
     "chain_position": "before",
 }
 
-# Некомплементарный партнёр (тоже after, не смежная сфера, другой город) — низкий скор.
+# Некомплементарный партнёр (тоже after, не смежная сфера, другой город) — нулевой скор.
 PARTNER_WEAK = {
     "id": "weak",
     "display_name": "ИП Петров Пётр",
     "city": "Новосибирск",
     "okved": "47.11",
-    "okved_seek": "10.20",
     "offering": "розница",
     "seeking": "поставщик рыбы",
     "chain_position": "after",
@@ -82,22 +80,29 @@ check(
 check("скор в диапазоне 0..100 (same)", 0 <= score_same <= 100, str(score_same))
 check("скор в диапазоне 0..100 (other)", 0 <= score_other <= 100, str(score_other))
 
-# 2. Причина человекочитаема — непустая строка на русском, отражает факторы совпадения.
+# 2. Причина человекочитаема — непустая строка на русском, отражает факторы совпадения
+# (цепочка/город — БЕЗ ОКВЭД, фактор okved_seek убран как мёртвый).
 check("причина (same) — непустая строка", isinstance(reason_same, str) and len(reason_same) > 0)
 check(
-    "причина (same) упоминает цепочку/город/ОКВЭД",
-    any(kw in reason_same.lower() for kw in ["цепоч", "город", "оквэд"]),
+    "причина (same) упоминает цепочку/город",
+    any(kw in reason_same.lower() for kw in ["цепоч", "город"]),
+    reason_same,
+)
+check(
+    "причина (same) НЕ упоминает ОКВЭД (мёртвый фактор убран)",
+    "оквэд" not in reason_same.lower(),
     reason_same,
 )
 check("причина (other) — непустая строка", isinstance(reason_other, str) and len(reason_other) > 0)
 
-# Комплементарный партнёр должен явно превосходить некомплементарного слабого.
+# Комплементарный партнёр должен явно превосходить некомплементарного слабого (нулевой скор).
 score_weak, reason_weak = score_match(ME, PARTNER_WEAK)
 check(
     "комплементарный партнёр сильно превосходит некомплементарного",
     score_same > score_weak,
     f"same={score_same} weak={score_weak}",
 )
+check("некомплементарный партнёр без совпадений города — нулевой скор", score_weak == 0, str(score_weak))
 
 # 3. rank_matches — сортировка по убыванию скора, лучший первым.
 ranked = rank_matches(ME, [PARTNER_WEAK, PARTNER_OTHER_CITY, PARTNER_SAME_CITY])

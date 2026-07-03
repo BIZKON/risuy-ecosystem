@@ -6,14 +6,20 @@
 cross-tenant биржа — вне Фазы 1, здесь не реализуется).
 
 Ожидаемые поля участника (dict, из club_members + club_profiles):
-    display_name, city, okved, offering, seeking, chain_position, okved_seek.
+    display_name, city, okved, offering, seeking, chain_position.
 Любое поле может отсутствовать/быть None — считается «неизвестно», не участвует в скоре.
+
+Скоринг — 2 фактора (Фаза 1): комплементарность позиции в цепочке потребления
+(chain_position) + один город. okved_seek НЕ участвует в скоринге: поле не
+заполняется воронкой (FSM пишет okved_seek="" при регистрации, панель
+club_profile_upsert его не собирает) — фактор был мёртвым и обманывал скор
+(начислял баллы за пустое совпадение). См. финал-ревью security-audit.
+Заполнение okved_seek оператором/повторное включение фактора — Фаза 2.
 """
 
 # Веса скоринга (сумма компонентов ограничена до 100 в score_match).
-_CHAIN_COMPLEMENT_SCORE = 45   # комплементарная позиция в цепочке (before<->after, both<->*)
-_OKVED_CROSS_SCORE = 20        # за каждое направление пересечения okved_seek <-> okved (макс 2 = 40)
-_CITY_BONUS_SCORE = 15         # тот же город
+_CHAIN_COMPLEMENT_SCORE = 75   # комплементарная позиция в цепочке (before<->after, both<->*)
+_CITY_BONUS_SCORE = 25         # тот же город
 
 
 def _norm(value) -> str:
@@ -33,23 +39,10 @@ def _chain_complementary(me_pos: str, other_pos: str) -> bool:
     return {me_pos, other_pos} == {"before", "after"}
 
 
-def _okved_cross_matches(me: dict, other: dict) -> tuple[bool, bool]:
-    """Возвращает (я_ищу_его_сферу, он_ищет_мою_сферу) — подстрочное совпадение
-    (okved_seek — свободный текст, не обязан быть точным кодом ОКВЭД)."""
-    me_seek = _norm(me.get("okved_seek"))
-    other_seek = _norm(other.get("okved_seek"))
-    me_okved = _norm(me.get("okved"))
-    other_okved = _norm(other.get("okved"))
-
-    i_seek_them = bool(me_seek and other_okved) and (me_seek in other_okved or other_okved in me_seek)
-    they_seek_me = bool(other_seek and me_okved) and (other_seek in me_okved or me_okved in other_seek)
-    return i_seek_them, they_seek_me
-
-
 def score_match(me: dict, other: dict) -> tuple[int, str]:
     """Скор 0..100 совместимости `other` как партнёра для `me` + человекочитаемая причина
-    на русском. Факторы: комплементарность цепочки потребления, пересечение ОКВЭД/окведа-
-    поиска (в любую сторону), один город."""
+    на русском. Факторы (Фаза 1, только 2): комплементарность цепочки потребления,
+    один город. okved_seek намеренно не участвует — см. docstring модуля."""
     reasons: list[str] = []
     score = 0
 
@@ -64,17 +57,6 @@ def score_match(me: dict, other: dict) -> tuple[int, str]:
         else:
             reasons.append("комплементарная позиция в цепочке потребления")
 
-    i_seek_them, they_seek_me = _okved_cross_matches(me, other)
-    if i_seek_them and they_seek_me:
-        score += _OKVED_CROSS_SCORE * 2
-        reasons.append("встречный комплементарный ОКВЭД (вы ищете его сферу, он — вашу)")
-    elif i_seek_them:
-        score += _OKVED_CROSS_SCORE
-        reasons.append("вы ищете именно его сферу (ОКВЭД)")
-    elif they_seek_me:
-        score += _OKVED_CROSS_SCORE
-        reasons.append("он ищет именно вашу сферу (ОКВЭД)")
-
     same_city = bool(_norm(me.get("city"))) and _norm(me.get("city")) == _norm(other.get("city"))
     if same_city:
         score += _CITY_BONUS_SCORE
@@ -86,7 +68,7 @@ def score_match(me: dict, other: dict) -> tuple[int, str]:
         reason = ", ".join(reasons)
         reason = reason[0].upper() + reason[1:]
     else:
-        reason = "Совпадений по цепочке, ОКВЭД и городу не найдено"
+        reason = "Совпадений по цепочке потребления и городу не найдено"
 
     return score, reason
 
