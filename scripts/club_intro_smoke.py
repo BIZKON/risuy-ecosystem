@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Смоук db-ядра знакомств (Task 7a) на risuy_dev: create/decide/reveal, взаимное
-согласие, tenant-изоляция, идемпотентность decide, красная линия reveal (контакты
-ТОЛЬКО при status='accepted').
+"""Смоук db-ядра знакомств на risuy_dev: create / ДВУСТОРОННИЙ accept_side / decline /
+reveal. Красная линия (152-ФЗ): каждая сторона принимает СВОИМ действием, контакты
+раскрываются ТОЛЬКО когда ОБЕ приняли (status='accepted'). Покрыто: accept одной стороны
+(status ЕЩЁ requested, reveal None), accept второй (both=True, 2 consent, reveal обоих),
+идемпотентность (already, дубль consent не пишется), not_party (не участник), decline
+(один decline убивает intro).
 Гоняет КОНТРОЛЛЕР (нужен TEAM_DSN — owner-DSN risuy_dev, доступа у автора хелперов нет).
 
   TEAM_DSN="postgresql://gen_user:...@81.31.246.136:5432/risuy_dev?sslmode=require" \\
@@ -53,7 +56,7 @@ async def main():
             "('smoke-intro-c-'||substr(md5(random()::text),1,8),'SMOKE INTRO C','active') returning id"
         )
 
-    mid_a = mid_b = mid_c = None
+    mid_a = mid_b = mid_c = mid_np = None
     try:
         # ── тенант A: два участника (A, B) с профилями, для непустых контактов в reveal ──
         db.set_active_tenant(ta)
@@ -105,57 +108,119 @@ async def main():
             )
         check("cross-tenant intro отсутствует в БД", n_cross == 0, f"n={n_cross}")
 
-        # ── 4. decide(accept=True) → accepted + 2 consent_events ─────────────
-        decided = await db.club_intro_decide(intro_id, ta, True, text_hash="abc")
-        check("decide(accept=True) вернул True", decided is True)
+        # ── 4a. accept_side(from) → status ЕЩЁ requested, 1 consent, reveal None ─
+        r_from = await db.club_intro_accept_side(intro_id, mid_a, ta, text_hash="hash-from")
+        check("accept_side(from) → ok/both=False/side=from",
+              r_from == {"ok": True, "both": False, "side": "from"}, f"got={r_from}")
+
+        async with db.pool.acquire() as c:
+            row_a = await c.fetchrow(
+                "select status, from_accepted_at, to_accepted_at from club_intros where id=$1",
+                intro_id,
+            )
+            n_from = await c.fetchval(
+                "select count(*) from consent_events "
+                "where tenant_id=$1 and doc_type='intro_accept' and member_id=$2",
+                ta, mid_a,
+            )
+        check("после accept(from): status ЕЩЁ requested",
+              row_a is not None and row_a["status"] == "requested")
+        check("после accept(from): from_accepted_at проставлен",
+              row_a is not None and row_a["from_accepted_at"] is not None)
+        check("после accept(from): to_accepted_at ещё NULL",
+              row_a is not None and row_a["to_accepted_at"] is None)
+        check("после accept(from): ровно 1 consent_event (member=from)", n_from == 1, f"n={n_from}")
+
+        reveal_mid = await db.club_intro_reveal(intro_id, ta)
+        check("reveal при одном accept → None (оба ещё не приняли!)", reveal_mid is None)
+
+        # ── 4b. accept_side(to) → both=True, status accepted, 2 consent ──────
+        r_to = await db.club_intro_accept_side(intro_id, mid_b, ta, text_hash="hash-to")
+        check("accept_side(to) → ok/both=True/side=to",
+              r_to == {"ok": True, "both": True, "side": "to"}, f"got={r_to}")
 
         async with db.pool.acquire() as c:
             row2 = await c.fetchrow(
-                "select status, decided_at from club_intros where id=$1", intro_id
+                "select status, decided_at, to_accepted_at from club_intros where id=$1", intro_id
             )
             n_consent = await c.fetchval(
                 "select count(*) from consent_events "
                 "where tenant_id=$1 and doc_type='intro_accept' and member_id = any($2::uuid[])",
                 ta, [mid_a, mid_b],
             )
-        check("status после accept = accepted", row2 is not None and row2["status"] == "accepted")
-        check("decided_at проставлен", row2 is not None and row2["decided_at"] is not None)
-        check("ровно 2 consent_events (from_member + to_member)", n_consent == 2, f"n={n_consent}")
+        check("после accept(to): status = accepted", row2 is not None and row2["status"] == "accepted")
+        check("после accept(to): decided_at проставлен", row2 is not None and row2["decided_at"] is not None)
+        check("после accept(to): to_accepted_at проставлен",
+              row2 is not None and row2["to_accepted_at"] is not None)
+        check("ровно 2 consent_events (from + to)", n_consent == 2, f"n={n_consent}")
 
-        # ── 5. reveal ПОСЛЕ accept → непустые контакты обоих участников ──────
+        # ── 5. reveal ПОСЛЕ обоих accept → непустые контакты обоих участников ──
         reveal_after = await db.club_intro_reveal(intro_id, ta)
         check(
-            "reveal ПОСЛЕ accept возвращает контакты обоих участников",
+            "reveal ПОСЛЕ обоих accept возвращает контакты обоих участников",
             reveal_after is not None
             and reveal_after.get("from", {}).get("display_name") == "ООО Тест-А"
             and reveal_after.get("to", {}).get("display_name") == "ООО Тест-Б",
         )
 
-        # ── 6. идемпотентность: повторный decide на решённый intro → False ───
-        decided_again = await db.club_intro_decide(intro_id, ta, True, text_hash="xyz")
-        check("повторный decide на уже решённый intro → False (ничего не меняется)",
-              decided_again is False)
+        # ── 6. идемпотентность: повторный accept_side(from) → both=True, без дубля ─
+        r_from_again = await db.club_intro_accept_side(intro_id, mid_a, ta, text_hash="hash-dup")
+        check("повторный accept_side(from) на accepted intro → not_open (уже решён)",
+              r_from_again.get("ok") is False and r_from_again.get("reason") == "not_open",
+              f"got={r_from_again}")
         async with db.pool.acquire() as c:
             n_consent_2 = await c.fetchval(
                 "select count(*) from consent_events "
                 "where tenant_id=$1 and doc_type='intro_accept' and member_id = any($2::uuid[])",
                 ta, [mid_a, mid_b],
             )
-        check("повторный decide НЕ добавил новых consent_events", n_consent_2 == 2, f"n={n_consent_2}")
+        check("повторный accept НЕ добавил новых consent_events", n_consent_2 == 2, f"n={n_consent_2}")
 
-        # ── 7. decline-путь на отдельном intro ────────────────────────────────
+        # ── 6b. accept_side чужого члена (не from/to) → not_party ─────────────
+        intro_np = await db.club_intro_create(ta, mid_a, mid_b, message="Для проверки not_party")
+        # mid_c — участник ДРУГОГО тенанта; для чистоты проверяем на не-участнике этого intro.
+        # Возьмём mid_b как to и mid_a как from — сторонним будет любой третий член того же
+        # тенанта; создадим его.
+        mid_np = await db.club_member_create(ta, display_name="ООО Тест-НП", city="Тула", okved="70.22")
+        r_np = await db.club_intro_accept_side(intro_np, mid_np, ta, text_hash="hash-np")
+        check("accept_side(не участник) → not_party",
+              r_np.get("ok") is False and r_np.get("reason") == "not_party", f"got={r_np}")
+        await db.club_intro_decline(intro_np, mid_a, ta)  # прибираем этот intro
+
+        # ── 7. идемпотентность одной стороны на ОТКРЫТОМ intro (already) ──────
+        intro_idem = await db.club_intro_create(ta, mid_a, mid_b, message="Idem-проверка")
+        await db.club_intro_accept_side(intro_idem, mid_a, ta, text_hash="idem-1")
+        r_idem = await db.club_intro_accept_side(intro_idem, mid_a, ta, text_hash="idem-2")
+        check("повторный accept той же стороны на открытом intro → already, both=False",
+              r_idem == {"ok": True, "both": False, "side": "from", "already": True},
+              f"got={r_idem}")
+        async with db.pool.acquire() as c:
+            n_idem = await c.fetchval(
+                "select count(*) from consent_events "
+                "where tenant_id=$1 and doc_type='intro_accept' and member_id=$2 "
+                "and text_hash like 'idem-%'",
+                ta, mid_a,
+            )
+        check("idem-accept: ровно 1 consent (дубль не записан)", n_idem == 1, f"n={n_idem}")
+        await db.club_intro_decline(intro_idem, mid_b, ta)  # прибираем
+
+        # ── 8. decline-путь: accept(from) → decline(to) → declined, reveal None ─
         intro_id_2 = await db.club_intro_create(ta, mid_b, mid_a, message="Второе знакомство")
         check("создан второй intro для decline-пути", intro_id_2 is not None)
 
-        declined = await db.club_intro_decide(intro_id_2, ta, False)
-        check("decide(accept=False) вернул True", declined is True)
+        r2_from = await db.club_intro_accept_side(intro_id_2, mid_b, ta, text_hash="d-from")
+        check("accept_side(from) на decline-intro → ok/both=False",
+              r2_from == {"ok": True, "both": False, "side": "from"}, f"got={r2_from}")
+
+        declined = await db.club_intro_decline(intro_id_2, mid_a, ta)
+        check("decline(to) вернул True", declined is True)
 
         async with db.pool.acquire() as c:
             row3 = await c.fetchrow("select status from club_intros where id=$1", intro_id_2)
         check("status после decline = declined", row3 is not None and row3["status"] == "declined")
 
         reveal_declined = await db.club_intro_reveal(intro_id_2, ta)
-        check("reveal на declined intro → None", reveal_declined is None)
+        check("reveal на declined intro (был 1 accept) → None", reveal_declined is None)
 
         # ── список ──────────────────────────────────────────────────────────
         intros = await db.club_intro_list(ta)
@@ -166,7 +231,7 @@ async def main():
         async with db.pool.acquire() as c:
             # Порядок FK: consent_events (по member_id/tenant) → club_intros →
             # club_profiles → club_members → leads → tenants.
-            member_ids = [m for m in (mid_a, mid_b, mid_c) if m]
+            member_ids = [m for m in (mid_a, mid_b, mid_c, mid_np) if m]
             if member_ids:
                 await c.execute(
                     "delete from consent_events where member_id = any($1::uuid[])", member_ids

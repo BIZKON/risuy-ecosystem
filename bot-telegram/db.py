@@ -2304,20 +2304,24 @@ async def club_consent_record(*, doc_type, member_id=None, lead_id=None, text_ha
 
 
 # ── club: знакомства — бот-side data-слой (Задача 7b-БОТ-DB) ─────────────────────
-# Зеркала панельных club_intro_decide/club_intro_reveal (admin-panel/db.py:4819-4889) для
-# FSM знакомств бота (7b-бот-fsm, отдельно): член кликает Принять/Отклонить в lead-канале →
-# бот решает intro и (при accept) раскрывает контакты. Как и club_member_create выше — бот
+# Зеркала панельных club_intro_accept_side/club_intro_decline/club_intro_reveal
+# (admin-panel/db.py) для FSM знакомств бота (7b-бот-fsm, отдельно): КАЖДАЯ сторона кликает
+# Принять/Отклонить в своём lead-канале → бот фиксирует accept ЭТОЙ стороны; контакты
+# раскрываются только когда ОБЕ приняли (двусторонний accept). Как и club_member_create — бот
 # резолвит СВОЙ единственный активный тенант через tenant_id() (мультиплекс-контекст либо
 # env-дефолт), а не принимает tenant_id параметром (в отличие от панели, где вызывающая
 # сторона — оператор в UI). Доставка (владелец задачи): «Основной бот, только достижимые» —
 # club_member_lead_channel резолвит lead-канал члена для отправки уведомления/контакта.
 async def club_intro_get(intro_id) -> dict | None:
-    """Строка club_intros (id, from_member, to_member, status, message), tenant-scoped через
-    tenant_id() активного тенанта бота. None — не найден/чужой тенант."""
+    """Строка club_intros (id, from_member, to_member, status, message, from_accepted_at,
+    to_accepted_at), tenant-scoped через tenant_id() активного тенанта бота. Поля
+    from_accepted_at/to_accepted_at — чтобы FSM знал, кто из сторон уже принял (двусторонний
+    accept). None — не найден/чужой тенант."""
     async with pool.acquire() as c:
         row = await c.fetchrow(
             """
-            select id, from_member, to_member, status, message
+            select id, from_member, to_member, status, message,
+                   from_accepted_at, to_accepted_at
             from club_intros
             where id = $1 and tenant_id = $2
             """,
@@ -2355,38 +2359,92 @@ async def club_member_lead_channel(member_id) -> int | None:
         )
 
 
-async def club_intro_decide(intro_id, accept: bool, *, text_hash=None) -> bool:
-    """ЗЕРКАЛО admin-panel/db.py::club_intro_decide (4819-4850) — tenant_id() активного
-    тенанта бота вместо параметра. Идемпотентно: апдейт срабатывает ТОЛЬКО если текущий
-    status='requested' — повторный вызов на уже решённом (или чужом тенанту) intro ничего не
-    меняет, возвращает False. При accept=True (взаимное согласие) — статус 'accepted' + ДВЕ
-    строки в consent_events (doc_type='intro_accept', action='granted', channel='tg' — бот
-    регистрирует из Telegram) — одна на from_member, одна на to_member. При accept=False —
-    статус 'declined', consent_events не пишем. Всё в одной транзакции."""
-    status = "accepted" if accept else "declined"
+async def club_intro_accept_side(intro_id, member_id, *, text_hash) -> dict:
+    """ЗЕРКАЛО admin-panel/db.py::club_intro_accept_side — tenant_id() активного тенанта бота
+    вместо параметра, channel='tg'. 🔴 КРАСНАЯ ЛИНИЯ (152-ФЗ): ДВУСТОРОННИЙ accept — каждая
+    сторона (from_member И to_member) принимает intro СВОИМ действием; согласие одной стороны
+    НЕ фабрикуется за другую. Контакты (club_intro_reveal) раскрываются ТОЛЬКО когда ОБЕ
+    приняли.
+
+    В ОДНОЙ транзакции: intro читается FOR UPDATE под tenant-scope backstop. Исходы (dict):
+      - не найден/чужой тенант → {"ok": False, "both": False, "reason": "not_found"}
+      - status != 'requested' → {"ok": False, "both": False, "reason": "not_open"}
+      - member_id не from/to → {"ok": False, "both": False, "reason": "not_party"}
+      - сторона УЖЕ приняла → идемпотентно {"ok": True, "both": <оба?>, "side": ..., "already": True}
+      - иначе: set соотв. accepted_at=now(); ОДНА строка consent_events (intro_accept, granted,
+        channel='tg', member_id=ЭТА сторона, text_hash=ТЕКСТ этой стороны). Если ОБЕ accepted_at
+        не NULL → status='accepted', decided_at=now(). → {"ok": True, "both": <оба?>, "side": ...}
+
+    text_hash — sha256 текста согласия, показанного ИМЕННО ЭТОЙ стороне."""
+    tid = tenant_id()
     async with pool.acquire() as c:
         async with c.transaction():
-            row = await c.fetchrow(
+            intro = await c.fetchrow(
                 """
-                update club_intros set status = $3, decided_at = now()
-                where id = $1 and tenant_id = $2 and status = 'requested'
-                returning from_member, to_member
+                select from_member, to_member, status,
+                       from_accepted_at, to_accepted_at
+                from club_intros
+                where id = $1 and tenant_id = $2
+                for update
                 """,
-                intro_id, tenant_id(), status,
+                intro_id, tid,
             )
-            if row is None:
-                return False
-            if accept:
+            if intro is None:
+                return {"ok": False, "both": False, "reason": "not_found"}
+            if intro["status"] != "requested":
+                return {"ok": False, "both": False, "reason": "not_open"}
+
+            if str(member_id) == str(intro["from_member"]):
+                side, my_ts, other_ts = "from", intro["from_accepted_at"], intro["to_accepted_at"]
+            elif str(member_id) == str(intro["to_member"]):
+                side, my_ts, other_ts = "to", intro["to_accepted_at"], intro["from_accepted_at"]
+            else:
+                return {"ok": False, "both": False, "reason": "not_party"}
+
+            if my_ts is not None:
+                return {"ok": True, "both": other_ts is not None, "side": side, "already": True}
+
+            ts_col = "from_accepted_at" if side == "from" else "to_accepted_at"
+            await c.execute(
+                f"update club_intros set {ts_col} = now() where id = $1 and tenant_id = $2",
+                intro_id, tid,
+            )
+            await c.execute(
+                """
+                insert into consent_events (tenant_id, member_id, doc_type, action,
+                    text_hash, channel)
+                values ($1, $2, 'intro_accept', 'granted', $3, 'tg')
+                """,
+                tid, member_id, text_hash,
+            )
+            both = other_ts is not None
+            if both:
                 await c.execute(
                     """
-                    insert into consent_events (tenant_id, member_id, doc_type, action,
-                        text_hash, channel)
-                    values ($1, $2, 'intro_accept', 'granted', $3, 'tg'),
-                           ($1, $4, 'intro_accept', 'granted', $3, 'tg')
+                    update club_intros set status = 'accepted', decided_at = now()
+                    where id = $1 and tenant_id = $2
                     """,
-                    tenant_id(), row["from_member"], text_hash, row["to_member"],
+                    intro_id, tid,
                 )
-    return True
+    return {"ok": True, "both": both, "side": side}
+
+
+async def club_intro_decline(intro_id, member_id) -> bool:
+    """ЗЕРКАЛО admin-panel/db.py::club_intro_decline — tenant_id() активного тенанта бота.
+    Участник (from_member ИЛИ to_member) отклоняет — ОДИН decline убивает intro для обеих
+    сторон. tenant-scope backstop + проверка стороны в WHERE. Апдейт только если
+    status='requested'. True — обновил, иначе False."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            """
+            update club_intros set status = 'declined', decided_at = now()
+            where id = $1 and tenant_id = $2 and status = 'requested'
+              and $3 in (from_member, to_member)
+            returning id
+            """,
+            intro_id, tenant_id(), member_id,
+        )
+    return row is not None
 
 
 async def club_intro_reveal(intro_id) -> dict | None:

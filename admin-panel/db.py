@@ -4816,38 +4816,94 @@ async def club_intro_create(tenant_id, from_member, to_member, message=None) -> 
     return str(iid) if iid is not None else None
 
 
-async def club_intro_decide(intro_id, tenant_id, accept: bool, *, text_hash=None) -> bool:
-    """Решение по запросу на знакомство. tenant-scope backstop — WHERE id=$1 and tenant_id=$2
-    (чужой intro не тронется). Идемпотентно: апдейт срабатывает ТОЛЬКО если текущий
-    status='requested' — повторный вызов на уже решённом intro ничего не меняет, возвращает
-    False. При accept=True (взаимное согласие) — статус 'accepted' + ДВЕ строки в
-    consent_events (doc_type='intro_accept', action='granted') — одна на from_member, одна
-    на to_member: оба участника фиксируют согласие на раскрытие контакта. При accept=False —
-    статус 'declined', consent_events не пишем. Всё в одной транзакции."""
-    status = "accepted" if accept else "declined"
+async def club_intro_accept_side(intro_id, member_id, tenant_id, *, text_hash) -> dict:
+    """🔴 КРАСНАЯ ЛИНИЯ (152-ФЗ): ДВУСТОРОННИЙ accept знакомства. Каждая сторона (from_member
+    И to_member) принимает intro СВОИМ действием — согласие одной стороны НЕ фабрикуется за
+    другую. Контакты (club_intro_reveal) раскрываются ТОЛЬКО когда ОБЕ стороны приняли.
+
+    В ОДНОЙ транзакции: intro читается FOR UPDATE под tenant-scope backstop (id=$1 and
+    tenant_id=$2 — чужой не тронется). Возможные исходы (dict):
+      - не найден/чужой тенант → {"ok": False, "both": False, "reason": "not_found"}
+      - status != 'requested' (уже решён/отклонён) → {"ok": False, "both": False, "reason": "not_open"}
+      - member_id не from/to этого intro → {"ok": False, "both": False, "reason": "not_party"}
+      - сторона УЖЕ приняла → идемпотентно: {"ok": True, "both": <оба?>, "side": ..., "already": True}
+        (intro_accept НЕ дублируется)
+      - иначе: set соотв. accepted_at=now(); ОДНА строка consent_events (doc_type='intro_accept',
+        action='granted', channel='web', member_id=ЭТА сторона, text_hash=ТЕКСТ этой стороны).
+        Если ОБЕ accepted_at теперь НЕ NULL → status='accepted', decided_at=now().
+        → {"ok": True, "both": <оба приняли>, "side": 'from'|'to'}
+
+    text_hash — sha256 текста согласия, ПОКАЗАННОГО ИМЕННО ЭТОЙ стороне (каждая сторона видит
+    и хеширует свой текст)."""
     async with pool.acquire() as c:
         async with c.transaction():
-            row = await c.fetchrow(
+            intro = await c.fetchrow(
                 """
-                update club_intros set status = $3, decided_at = now()
-                where id = $1 and tenant_id = $2 and status = 'requested'
-                returning from_member, to_member
+                select from_member, to_member, status,
+                       from_accepted_at, to_accepted_at
+                from club_intros
+                where id = $1 and tenant_id = $2
+                for update
                 """,
-                intro_id, tenant_id, status,
+                intro_id, tenant_id,
             )
-            if row is None:
-                return False
-            if accept:
+            if intro is None:
+                return {"ok": False, "both": False, "reason": "not_found"}
+            if intro["status"] != "requested":
+                return {"ok": False, "both": False, "reason": "not_open"}
+
+            if str(member_id) == str(intro["from_member"]):
+                side, my_ts, other_ts = "from", intro["from_accepted_at"], intro["to_accepted_at"]
+            elif str(member_id) == str(intro["to_member"]):
+                side, my_ts, other_ts = "to", intro["to_accepted_at"], intro["from_accepted_at"]
+            else:
+                return {"ok": False, "both": False, "reason": "not_party"}
+
+            # Идемпотентность: сторона уже приняла — не дублируем intro_accept.
+            if my_ts is not None:
+                return {"ok": True, "both": other_ts is not None, "side": side, "already": True}
+
+            ts_col = "from_accepted_at" if side == "from" else "to_accepted_at"
+            await c.execute(
+                f"update club_intros set {ts_col} = now() where id = $1 and tenant_id = $2",
+                intro_id, tenant_id,
+            )
+            await c.execute(
+                """
+                insert into consent_events (tenant_id, member_id, doc_type, action,
+                    text_hash, channel)
+                values ($1, $2, 'intro_accept', 'granted', $3, 'web')
+                """,
+                tenant_id, member_id, text_hash,
+            )
+            both = other_ts is not None  # другая сторона приняла ранее → теперь обе
+            if both:
                 await c.execute(
                     """
-                    insert into consent_events (tenant_id, member_id, doc_type, action,
-                        text_hash, channel)
-                    values ($1, $2, 'intro_accept', 'granted', $3, 'web'),
-                           ($1, $4, 'intro_accept', 'granted', $3, 'web')
+                    update club_intros set status = 'accepted', decided_at = now()
+                    where id = $1 and tenant_id = $2
                     """,
-                    tenant_id, row["from_member"], text_hash, row["to_member"],
+                    intro_id, tenant_id,
                 )
-    return True
+    return {"ok": True, "both": both, "side": side}
+
+
+async def club_intro_decline(intro_id, member_id, tenant_id) -> bool:
+    """Участник (from_member ИЛИ to_member) отклоняет знакомство — ОДИН decline убивает intro
+    для обеих сторон. tenant-scope backstop + проверка стороны прямо в WHERE (member_id обязан
+    быть from/to). Апдейт срабатывает ТОЛЬКО если status='requested'. True — если обновил,
+    иначе False (не найден/чужой/не участник/уже решён)."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            """
+            update club_intros set status = 'declined', decided_at = now()
+            where id = $1 and tenant_id = $2 and status = 'requested'
+              and $3 in (from_member, to_member)
+            returning id
+            """,
+            intro_id, tenant_id, member_id,
+        )
+    return row is not None
 
 
 async def club_intro_reveal(intro_id, tenant_id) -> dict | None:
