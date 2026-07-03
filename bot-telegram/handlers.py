@@ -22,6 +22,11 @@ import messaging
 import texts
 import triggers
 import yookassa
+from shared.club import (
+    CLUB_CHAIN_POSITIONS,
+    build_club_consent_text,
+    validate_club_registration,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -42,6 +47,19 @@ class Funnel(StatesGroup):
     name = State()
     phone = State()
     gate = State()
+
+
+class ClubSignup(StatesGroup):
+    """FSM-воронка регистрации в «Клуб предпринимателей» (Task 3b). Отдельная от Funnel:
+    свой лид-магнит (клуб), свой набор шагов. Вход — deep-link ?start=club или /club.
+    Шаги собирают карточку бизнеса; на завершении вызываются club-хелперы (Task 3a)."""
+    consent = State()
+    display_name = State()
+    city = State()
+    okved = State()
+    offering = State()
+    seeking = State()
+    chain = State()
 
 
 # ⚠️ ИДЕНТИЧНО панели admin-panel/db.py::phone_query_hash (sha256 только-цифры). Любое расхождение
@@ -79,12 +97,83 @@ def _guide_kb(guide_url: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _club_consent_kb() -> InlineKeyboardMarkup:
+    """Кнопка согласия для входа в клуб + (опц.) политика ПДн. Согласие — callback
+    club_consent_yes; политика — та же PRIVACY_URL, что и в основной воронке."""
+    rows = [[InlineKeyboardButton(text=texts.CLUB_JOIN_BTN, callback_data="club_consent_yes")]]
+    if config.PRIVACY_URL:
+        rows.append([InlineKeyboardButton(text=texts.PRIVACY_BTN, url=config.PRIVACY_URL)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _club_chain_kb() -> InlineKeyboardMarkup:
+    """Inline-кнопки выбора позиции в цепочке поставки из CLUB_CHAIN_POSITIONS (Task 3a).
+    callback_data='club_chain:<code>' — code валидируется через validate_club_registration."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"club_chain:{code}")]
+        for code, label in CLUB_CHAIN_POSITIONS
+    ])
+
+
+async def _club_start(message: Message, state: FSMContext) -> None:
+    """Общий вход в воронку клуба (из deep-link ?start=club и из /club). Операторское имя
+    берём из funnel-config активного тенанта (панель, «Интеграции») поверх env-фолбэка
+    config.CLUB_OPERATOR_NAME — как и в остальных 152-ФЗ-текстах бота. Текст согласия
+    строим один раз и кладём в FSM data — на финале хешируем ИМЕННО то, что показали
+    человеку (club_consent_record.text_hash)."""
+    cfg = await db.get_funnel_config(db.tenant_id())
+    operator = (cfg.get("operator_name") or config.CLUB_OPERATOR_NAME or "оператор").strip()
+    consent_text = build_club_consent_text("club_join", operator)
+    await state.set_state(ClubSignup.consent)
+    await state.update_data(club_consent_text=consent_text)
+    await messaging.reply_text(
+        message, texts.CLUB_INTRO + consent_text, source="funnel", reply_markup=_club_consent_kb()
+    )
+
+
+async def _club_finish(user_id: int, bot: Bot, state: FSMContext) -> None:
+    """Финал воронки клуба: валидация → создание карточки участника (club_members +
+    club_profiles) → фиксация согласия (consent_events). club-member — БЕЗ lead_id: клуб
+    отдельный лид-магнит, не привязан к воронке основного гайда."""
+    data = await state.get_data()
+    reg = {k: data.get(k) for k in ("display_name", "city", "okved", "offering", "seeking", "chain_position")}
+    errs = validate_club_registration(reg)
+    if errs:
+        await messaging.send_text(
+            bot, user_id, "Проверьте данные:\n• " + "\n• ".join(errs), source="funnel"
+        )
+        await state.clear()
+        return
+    try:
+        mid = await db.club_member_create(
+            display_name=reg["display_name"], city=reg["city"], okved=reg["okved"]
+        )
+        await db.club_profile_upsert(
+            mid, offering=reg["offering"], seeking=reg["seeking"],
+            chain_position=reg["chain_position"], okved_seek="",
+        )
+        text_hash = hashlib.sha256((data.get("club_consent_text") or "").encode("utf-8")).hexdigest()
+        await db.club_consent_record(doc_type="club_join", member_id=mid, text_hash=text_hash, channel="tg")
+        await messaging.send_text(bot, user_id, texts.CLUB_DONE, source="funnel")
+    except Exception as e:
+        logger.warning("club: не удалось сохранить карточку: %s", e)
+        await messaging.send_text(bot, user_id, texts.CLUB_ERROR, source="system")
+    finally:
+        await state.clear()
+
+
 @router.message(Command("start", ignore_case=True))
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
     # Перехват (§4 плана): оператор держит ручное управление → бот молчит. Закрывает
     # единственный обход паузы — повторный /start на тёплом лиде. Логику воронки НЕ трогаем,
     # только не даём ей стартовать на паузе (входящее уже залогировано middleware).
     if await db.is_bot_paused(message.from_user.id):
+        return
+    # Deep-link ?start=club (регистронезависимо) → воронка «Клуба предпринимателей»
+    # (Task 3b). Перехватываем ДО нормализации source: club — не рекламная площадка,
+    # а отдельный лид-магнит. Обычный source-путь (reels/dzen/…) не затрагиваем.
+    if (command.args or "").strip().lower() == "club":
+        await _club_start(message, state)
         return
     source = (command.args or "other").lower()
     if source not in VALID_SOURCES:
@@ -197,6 +286,103 @@ async def on_check_sub_fallback(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await _deliver(cb.from_user.id, cb.message, state, bot)
     else:
         await cb.answer(texts.NOT_SUBSCRIBED_ALERT, show_alert=True)
+
+
+@router.message(Command("club", ignore_case=True))
+async def cmd_club(message: Message, state: FSMContext):
+    """Явный вход в воронку клуба командой /club (доп. к deep-link ?start=club)."""
+    if await db.is_bot_paused(message.from_user.id):
+        return
+    await _club_start(message, state)
+
+
+@router.callback_query(ClubSignup.consent, F.data == "club_consent_yes")
+async def on_club_consent(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await state.set_state(ClubSignup.display_name)
+    await messaging.send_text(cb.bot, cb.from_user.id, texts.CLUB_ASK_NAME, source="funnel")
+
+
+@router.message(ClubSignup.display_name, F.text)
+async def on_club_display_name(message: Message, state: FSMContext):
+    val = (message.text or "").strip()
+    if not val:
+        await message.answer(texts.CLUB_EMPTY_HINT)
+        return
+    await state.update_data(display_name=val)
+    await state.set_state(ClubSignup.city)
+    await messaging.reply_text(message, texts.CLUB_ASK_CITY, source="funnel")
+
+
+@router.message(ClubSignup.city, F.text)
+async def on_club_city(message: Message, state: FSMContext):
+    val = (message.text or "").strip()
+    if not val:
+        await message.answer(texts.CLUB_EMPTY_HINT)
+        return
+    await state.update_data(city=val)
+    await state.set_state(ClubSignup.okved)
+    await messaging.reply_text(message, texts.CLUB_ASK_OKVED, source="funnel")
+
+
+@router.message(ClubSignup.okved, F.text)
+async def on_club_okved(message: Message, state: FSMContext):
+    val = (message.text or "").strip()
+    if not val:
+        await message.answer(texts.CLUB_EMPTY_HINT)
+        return
+    await state.update_data(okved=val)
+    await state.set_state(ClubSignup.offering)
+    await messaging.reply_text(message, texts.CLUB_ASK_OFFERING, source="funnel")
+
+
+@router.message(ClubSignup.offering, F.text)
+async def on_club_offering(message: Message, state: FSMContext):
+    val = (message.text or "").strip()
+    if not val:
+        await message.answer(texts.CLUB_EMPTY_HINT)
+        return
+    await state.update_data(offering=val)
+    await state.set_state(ClubSignup.seeking)
+    await messaging.reply_text(message, texts.CLUB_ASK_SEEKING, source="funnel")
+
+
+@router.message(ClubSignup.seeking, F.text)
+async def on_club_seeking(message: Message, state: FSMContext):
+    val = (message.text or "").strip()
+    if not val:
+        await message.answer(texts.CLUB_EMPTY_HINT)
+        return
+    await state.update_data(seeking=val)
+    await state.set_state(ClubSignup.chain)
+    await messaging.reply_text(
+        message, texts.CLUB_ASK_CHAIN, source="funnel", reply_markup=_club_chain_kb()
+    )
+
+
+@router.message(StateFilter(
+    ClubSignup.display_name, ClubSignup.city, ClubSignup.okved,
+    ClubSignup.offering, ClubSignup.seeking,
+))
+async def on_club_text_wrong(message: Message):
+    """Не-текстовый фолбэк для всех текстовых шагов воронки клуба (фото/стикер/voice и т.п.)."""
+    await message.answer(texts.CLUB_EMPTY_HINT)
+
+
+@router.callback_query(ClubSignup.chain, F.data.startswith("club_chain:"))
+async def on_club_chain(cb: CallbackQuery, state: FSMContext):
+    code = (cb.data or "").split(":", 1)[1]
+    await state.update_data(chain_position=code)
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _club_finish(cb.from_user.id, cb.bot, state)
 
 
 @router.callback_query(F.data.startswith("buy:"))

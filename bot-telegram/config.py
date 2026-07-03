@@ -27,6 +27,13 @@ GUIDE_URL = _req("GUIDE_URL")
 # Ссылка на политику обработки ПДн (необязательно, но желательно для 152-ФЗ).
 PRIVACY_URL = os.environ.get("PRIVACY_URL", "")
 
+# Имя оператора для текста согласия «Клуба предпринимателей» (152-ФЗ ст.9 + ФЗ-38).
+# Подставляется в shared.club.build_club_consent_text(...) ТОЛЬКО как фолбэк, если
+# funnel-config тенанта (панель, «Интеграции», operator_name) не задан — приоритет у
+# него (см. handlers._club_start). Дефолт — пустая строка: реальное юрлицо тенанта
+# нельзя захардкодить фейком, "оператор" в build_club_consent_text подставит handlers.
+CLUB_OPERATOR_NAME = os.environ.get("CLUB_OPERATOR_NAME", "")
+
 # file_id видео-кружка Насти (необязательно). Записывается заранее, см. README.
 VIDEO_NOTE_FILE_ID = os.environ.get("VIDEO_NOTE_FILE_ID", "")
 
