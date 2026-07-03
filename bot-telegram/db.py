@@ -2301,3 +2301,129 @@ async def club_consent_record(*, doc_type, member_id=None, lead_id=None, text_ha
             """,
             tenant_id(), member_id, lead_id, doc_type, text_hash, channel,
         )
+
+
+# ── club: знакомства — бот-side data-слой (Задача 7b-БОТ-DB) ─────────────────────
+# Зеркала панельных club_intro_decide/club_intro_reveal (admin-panel/db.py:4819-4889) для
+# FSM знакомств бота (7b-бот-fsm, отдельно): член кликает Принять/Отклонить в lead-канале →
+# бот решает intro и (при accept) раскрывает контакты. Как и club_member_create выше — бот
+# резолвит СВОЙ единственный активный тенант через tenant_id() (мультиплекс-контекст либо
+# env-дефолт), а не принимает tenant_id параметром (в отличие от панели, где вызывающая
+# сторона — оператор в UI). Доставка (владелец задачи): «Основной бот, только достижимые» —
+# club_member_lead_channel резолвит lead-канал члена для отправки уведомления/контакта.
+async def club_intro_get(intro_id) -> dict | None:
+    """Строка club_intros (id, from_member, to_member, status, message), tenant-scoped через
+    tenant_id() активного тенанта бота. None — не найден/чужой тенант."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            """
+            select id, from_member, to_member, status, message
+            from club_intros
+            where id = $1 and tenant_id = $2
+            """,
+            intro_id, tenant_id(),
+        )
+    return dict(row) if row is not None else None
+
+
+async def club_member_by_lead(lead_id) -> dict | None:
+    """Участник клуба по lead_id (для проверки «кликнувший юзер = to_member»: юзер →
+    get_lead_id → lead_id → этот член), tenant-scoped через tenant_id(). None — нет члена
+    с таким лидом в активном тенанте бота."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select * from club_members where lead_id = $1 and tenant_id = $2",
+            lead_id, tenant_id(),
+        )
+    return dict(row) if row is not None else None
+
+
+async def club_member_lead_channel(member_id) -> int | None:
+    """tg_user_id лида члена (member.lead_id → leads.tg_user_id) — адрес доставки
+    уведомления/контакта в lead-канал члена («Основной бот, только достижимые»).
+    tenant-scoped через tenant_id(). None — член не найден/чужой тенант, lead_id не задан
+    (член ещё не промоушен из лида), или у лида нет tg_user_id."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            """
+            select l.tg_user_id
+            from club_members m
+            join leads l on l.id = m.lead_id and l.tenant_id = $2
+            where m.id = $1 and m.tenant_id = $2
+            """,
+            member_id, tenant_id(),
+        )
+
+
+async def club_intro_decide(intro_id, accept: bool, *, text_hash=None) -> bool:
+    """ЗЕРКАЛО admin-panel/db.py::club_intro_decide (4819-4850) — tenant_id() активного
+    тенанта бота вместо параметра. Идемпотентно: апдейт срабатывает ТОЛЬКО если текущий
+    status='requested' — повторный вызов на уже решённом (или чужом тенанту) intro ничего не
+    меняет, возвращает False. При accept=True (взаимное согласие) — статус 'accepted' + ДВЕ
+    строки в consent_events (doc_type='intro_accept', action='granted', channel='tg' — бот
+    регистрирует из Telegram) — одна на from_member, одна на to_member. При accept=False —
+    статус 'declined', consent_events не пишем. Всё в одной транзакции."""
+    status = "accepted" if accept else "declined"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                """
+                update club_intros set status = $3, decided_at = now()
+                where id = $1 and tenant_id = $2 and status = 'requested'
+                returning from_member, to_member
+                """,
+                intro_id, tenant_id(), status,
+            )
+            if row is None:
+                return False
+            if accept:
+                await c.execute(
+                    """
+                    insert into consent_events (tenant_id, member_id, doc_type, action,
+                        text_hash, channel)
+                    values ($1, $2, 'intro_accept', 'granted', $3, 'tg'),
+                           ($1, $4, 'intro_accept', 'granted', $3, 'tg')
+                    """,
+                    tenant_id(), row["from_member"], text_hash, row["to_member"],
+                )
+    return True
+
+
+async def club_intro_reveal(intro_id) -> dict | None:
+    """ЗЕРКАЛО admin-panel/db.py::club_intro_reveal (4853-4889) — tenant_id() активного
+    тенанта бота вместо параметра. КРАСНАЯ ЛИНИЯ: контакты раскрываются ТОЛЬКО при
+    status='accepted' (взаимное согласие). Если intro не найден, чужого тенанта, или
+    status != 'accepted' — None. Контакт каждого участника — из club_members (+ club_profiles,
+    если профиль заполнен) с LEFT JOIN на leads под явным tenant-скоупом, чтобы подтянуть
+    имя/телефон лида, если участник был промоушен из лида. Если контакт члена не нашёлся
+    (член удалён) — соответствующее поле None (деградация, не падаем и не утекаем)."""
+    async with pool.acquire() as c:
+        intro = await c.fetchrow(
+            """
+            select from_member, to_member
+            from club_intros
+            where id = $1 and tenant_id = $2 and status = 'accepted'
+            """,
+            intro_id, tenant_id(),
+        )
+        if intro is None:
+            return None
+
+        async def _contact(member_id):
+            row = await c.fetchrow(
+                """
+                select m.id, m.display_name, m.city, m.okved, m.inn,
+                       p.offering, p.seeking, p.chain_position, p.okved_seek, p.description,
+                       l.name as lead_name, l.phone as lead_phone
+                from club_members m
+                left join club_profiles p on p.member_id = m.id and p.tenant_id = $2
+                left join leads l on l.id = m.lead_id and l.tenant_id = $2
+                where m.id = $1 and m.tenant_id = $2
+                """,
+                member_id, tenant_id(),
+            )
+            return dict(row) if row is not None else None
+
+        from_contact = await _contact(intro["from_member"])
+        to_contact = await _contact(intro["to_member"])
+    return {"from": from_contact, "to": to_contact}
