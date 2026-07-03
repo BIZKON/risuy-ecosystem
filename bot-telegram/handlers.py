@@ -183,6 +183,49 @@ async def _club_finish(user_id: int, bot: Bot, state: FSMContext) -> None:
         await state.clear()
 
 
+def _intro_decide_kb(intro_id: str) -> InlineKeyboardMarkup:
+    """Кнопки «Принять»/«Отклонить» под приглашением на знакомство. callback_data несёт
+    intro_id — callback переперепроверит to_member+status='requested' (защита от утёкшей/
+    устаревшей кнопки), поэтому доверять самому intro_id в кнопке безопасно."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=texts.CLUB_INTRO_OK_BTN, callback_data=f"intro_ok:{intro_id}"),
+        InlineKeyboardButton(text=texts.CLUB_INTRO_NO_BTN, callback_data=f"intro_no:{intro_id}"),
+    ]])
+
+
+async def _club_intro_open(message: Message, intro_id: str) -> None:
+    """Открытие приглашения на знакомство по deep-link ?start=intro_<id> (Task 7b-бот-fsm).
+    Кликнувший должен быть членом клуба (лид → club_member_by_lead) И именно to_member этого
+    intro в статусе 'requested' — иначе мягкий отказ (утёкшая/чужая ссылка). Имя бизнеса
+    инициатора НЕ раскрываем: контакты — только после взаимного accept (club_intro_reveal
+    гейтит status='accepted'). До accept показываем лишь факт предложения + кнопки."""
+    lead_id = await db.get_lead_id(message.from_user.id, messenger="tg")
+    if lead_id is None:
+        await messaging.reply_text(message, texts.CLUB_INTRO_UNAVAILABLE, source="system")
+        return
+    intro = await db.club_intro_get(intro_id)
+    if intro is None:
+        await messaging.reply_text(message, texts.CLUB_INTRO_NOT_FOUND, source="system")
+        return
+    member = await db.club_member_by_lead(lead_id)
+    if member is None:
+        await messaging.reply_text(message, texts.CLUB_INTRO_UNAVAILABLE, source="system")
+        return
+    # 🔒 ТОЛЬКО получатель (to_member) может принять; и только пока intro не решён.
+    if str(intro["to_member"]) != str(member["id"]):
+        await messaging.reply_text(message, texts.CLUB_INTRO_NOT_YOURS, source="system")
+        return
+    if intro["status"] != "requested":
+        await messaging.reply_text(message, texts.CLUB_INTRO_ALREADY, source="system")
+        return
+    # Имя бизнеса инициатора до accept недоступно (бот-side club_member_get нет, reveal гейтит
+    # до accepted, панель создаёт intro без message в Фазе 1) — показываем обобщённо.
+    text = texts.CLUB_INTRO_OFFER.format(from_line=texts.CLUB_INTRO_FROM_ANON)
+    await messaging.reply_text(
+        message, text, source="funnel", reply_markup=_intro_decide_kb(intro_id)
+    )
+
+
 @router.message(Command("start", ignore_case=True))
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
     # Перехват (§4 плана): оператор держит ручное управление → бот молчит. Закрывает
@@ -195,6 +238,15 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     # а отдельный лид-магнит. Обычный source-путь (reels/dzen/…) не затрагиваем.
     if (command.args or "").strip().lower() == "club":
         await _club_start(message, state)
+        return
+    # Deep-link ?start=intro_<intro_id> → приглашение на знакомство в клубе (Task 7b-бот-fsm).
+    # Оператор из панели («Предложить знакомство») кладёт члену-цели в lead-канал ссылку
+    # t.me/<bot>?start=intro_<id>; здесь член-цель открывает приглашение и жмёт Принять/Отклонить.
+    # Перехватываем ДО нормализации source (intro — не рекламная площадка). На паузе не доходим:
+    # is_bot_paused отсекает выше (оператор ведёт вручную), как и для club.
+    if (command.args or "").startswith("intro_"):
+        intro_id = command.args[len("intro_"):]
+        await _club_intro_open(message, intro_id)
         return
     source = (command.args or "other").lower()
     if source not in VALID_SOURCES:
@@ -404,6 +456,101 @@ async def on_club_chain(cb: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await _club_finish(cb.from_user.id, cb.bot, state)
+
+
+async def _intro_resolve(cb: CallbackQuery, intro_id: str) -> dict | None:
+    """Повторно резолвит член-получателя + intro и ПЕРЕПРОВЕРЯЕТ, что кликнувший — именно
+    to_member этого intro в статусе 'requested' (защита от подделки/устаревшей кнопки при
+    callback, не только при open). Возвращает строку intro при успехе; иначе показывает
+    cb.answer(alert) и возвращает None."""
+    lead_id = await db.get_lead_id(cb.from_user.id, messenger="tg")
+    if lead_id is None:
+        await cb.answer(texts.CLUB_INTRO_UNAVAILABLE, show_alert=True)
+        return None
+    intro = await db.club_intro_get(intro_id)
+    if intro is None:
+        await cb.answer(texts.CLUB_INTRO_NOT_FOUND, show_alert=True)
+        return None
+    member = await db.club_member_by_lead(lead_id)
+    if member is None:
+        await cb.answer(texts.CLUB_INTRO_UNAVAILABLE, show_alert=True)
+        return None
+    # 🔒 Двойная проверка to_member (та же, что в _club_intro_open) — чужой не примет чужое.
+    if str(intro["to_member"]) != str(member["id"]):
+        await cb.answer(texts.CLUB_INTRO_NOT_YOURS, show_alert=True)
+        return None
+    if intro["status"] != "requested":
+        await cb.answer(texts.CLUB_INTRO_ALREADY, show_alert=True)
+        return None
+    return intro
+
+
+async def _intro_decide(cb: CallbackQuery, accept: bool) -> None:
+    """Общая обработка Принять/Отклонить приглашения на знакомство (Task 7b-бот-fsm).
+    Красная линия: контакты доставляются ТОЛЬКО после club_intro_decide(accept)+reveal
+    (reveal сам гейтит status='accepted'). Идемпотентно: decide вернёт False, если intro
+    уже решён (повторный клик) → показываем «уже обработано»."""
+    intro_id = (cb.data or "").split(":", 1)[1]
+    intro = await _intro_resolve(cb, intro_id)
+    if intro is None:
+        return
+    cfg = await db.get_funnel_config(db.tenant_id())
+    operator = (cfg.get("company_name") or "").strip()
+    consent_text = build_club_consent_text("intro", operator)
+    text_hash = hashlib.sha256(consent_text.encode("utf-8")).hexdigest()
+    ok = await db.club_intro_decide(intro_id, accept, text_hash=text_hash)
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    # decide=False → intro уже решён между resolve и decide (гонка/повтор). Не accept →
+    # decline. В обоих не-accept случаях контакты НЕ раскрываем.
+    if not accept:
+        await messaging.send_text(cb.bot, cb.from_user.id, texts.CLUB_INTRO_DECLINED, source="funnel")
+        return
+    if not ok:
+        await messaging.send_text(cb.bot, cb.from_user.id, texts.CLUB_INTRO_ALREADY, source="funnel")
+        return
+    # accept + decide=True → взаимное согласие зафиксировано. Раскрываем контакты ОБОИМ.
+    reveal = await db.club_intro_reveal(intro_id)
+    from_contact = reveal.get("from") if reveal else None
+    to_contact = reveal.get("to") if reveal else None
+    # Получателю (этот юзер) — контакт инициатора (from). Guard: reveal/from может быть None
+    # (член удалён, 7a Minor #2) — деградируем мягко, не падаем.
+    if from_contact:
+        card = texts.club_intro_contact_card(from_contact)
+        await messaging.send_text(
+            cb.bot, cb.from_user.id, texts.CLUB_INTRO_MATCH.format(card=card), source="funnel"
+        )
+    else:
+        await messaging.send_text(
+            cb.bot, cb.from_user.id, texts.CLUB_INTRO_MATCH_NO_CONTACT, source="funnel"
+        )
+    # Инициатору (from_member) в его lead-канал — контакт получателя (to). Если недостижим
+    # (chan None: не промоушен из лида / нет tg_user_id) — пропускаем, не падаем (лог).
+    chan = await db.club_member_lead_channel(intro["from_member"])
+    if chan is None:
+        logger.info("intro %s: инициатор from_member=%s недостижим — контакт to не доставлен",
+                    intro_id, intro["from_member"])
+        return
+    if to_contact:
+        card = texts.club_intro_contact_card(to_contact)
+        await messaging.send_text(
+            cb.bot, chan, texts.CLUB_INTRO_MATCH.format(card=card), source="funnel"
+        )
+    else:
+        await messaging.send_text(cb.bot, chan, texts.CLUB_INTRO_MATCH_NO_CONTACT, source="funnel")
+
+
+@router.callback_query(F.data.startswith("intro_ok:"))
+async def on_intro_ok(cb: CallbackQuery):
+    await _intro_decide(cb, accept=True)
+
+
+@router.callback_query(F.data.startswith("intro_no:"))
+async def on_intro_no(cb: CallbackQuery):
+    await _intro_decide(cb, accept=False)
 
 
 @router.callback_query(F.data.startswith("buy:"))
