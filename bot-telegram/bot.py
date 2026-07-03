@@ -345,6 +345,36 @@ def _legal_html(title: str, body: str) -> str:
     )
 
 
+def _club_landing_html(operator_name: str, deeplink: str, policy_url: str) -> str:
+    """Минимальный самодостаточный HTML-лендинг клуба (без внешних ресурсов). Публичный,
+    inbound: посетитель приходит сам и жмёт «Вступить» → бот-воронка клуба (согласие 152-ФЗ)."""
+    import html as _html
+    name = _html.escape(operator_name or "")
+    if policy_url:
+        policy = (f'<p class="muted">Вступая, вы даёте согласие на обработку данных вашего '
+                  f'бизнеса. <a href="{_html.escape(policy_url)}">Политика конфиденциальности</a>.</p>')
+    else:
+        policy = '<p class="muted">Вступая, вы даёте согласие на обработку данных вашего бизнеса.</p>'
+    return (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>Клуб предпринимателей — {name}</title>'
+        '<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;'
+        'margin:0 auto;padding:32px 20px;color:#1F2937;line-height:1.55}'
+        '.btn{display:inline-block;background:#E63946;color:#fff;padding:14px 28px;'
+        'border-radius:12px;text-decoration:none;font-weight:600;margin:20px 0}'
+        '.muted{color:#6b7280;font-size:14px}h1{font-size:24px}</style></head><body>'
+        f'<h1>Клуб предпринимателей — {name}</h1>'
+        '<p>Сообщество предпринимателей для поиска комплементарных партнёров. Система сама '
+        'подбирает, кто может быть вам полезен, а знакомство происходит только по взаимному '
+        'согласию обеих сторон.</p>'
+        '<p>Вступление бесплатное. Ваши контакты не раскрываются, пока вы сами не согласитесь '
+        'на знакомство.</p>'
+        f'<a class="btn" href="{_html.escape(deeplink)}">Вступить в клуб</a>'
+        f'{policy}</body></html>'
+    )
+
+
 async def _legal_page(request: web.Request) -> web.StreamResponse:
     """Публичная юр-страница тенанта: GET /legal/{slug}/{doc_type} (privacy|consent), без авторизации.
     Генерит документ из реквизитов оператора (tenant_settings по слагу) — единый источник
