@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Дашборд клуба{% endblock %}
+{% block content %}
+<h1 class="page-title">Дашборд клуба</h1>
+
+<div class="club-tabs">
+  <a href="/club">Каталог</a>
+  <a href="/club/dashboard" class="is-active" aria-current="page">Дашборд</a>
+</div>
+
+{% if not has_tenant %}
+  <p class="empty-state">Выберите клиента в разделе «Клиенты» — клуб ведётся в кабинете клиента.</p>
+{% else %}
+
+  <section class="card" aria-label="KPI клуба">
+    <h2 class="card__title">KPI клуба</h2>
+    <div class="club-kpi club-kpi--tiles">
+      <div class="tile"><span class="num">{{ summary.kpi.total }}</span><span>Всего членов</span></div>
+      <div class="tile"><span class="num">{{ summary.kpi.active }}</span><span>Активных</span></div>
+      <div class="tile"><span class="num">{{ summary.kpi.paused }}</span><span>На паузе</span></div>
+      <div class="tile"><span class="num">{{ summary.kpi.left }}</span><span>Вышли</span></div>
+      <div class="tile"><span class="num">{{ summary.kpi.with_egrul }}</span><span>С ЕГРЮЛ</span></div>
+      <div class="tile"><span class="num">{{ summary.kpi.with_profile }}</span><span>С профилем</span></div>
+      <div class="tile"><span class="num">{{ summary.kpi.cities }}</span><span>Городов</span></div>
+    </div>
+  </section>
+
+  <section class="card" aria-label="Распределения по клубу">
+    <h2 class="card__title">Распределения</h2>
+    <div class="club-dist-grid">
+      <div>
+        <h3>По типу</h3>
+        <ul>
+          {% for t, n in summary.by_type.items() %}<li>{{ t }}: <b>{{ n }}</b></li>{% endfor %}
+        </ul>
+      </div>
+      <div>
+        <h3>По городу</h3>
+        {% if summary.by_city %}
+        <ul>
+          {% for city, n in summary.by_city %}<li>{{ city }}: <b>{{ n }}</b></li>{% endfor %}
+        </ul>
+        {% else %}<p class="empty-state">Нет данных по городам.</p>{% endif %}
+      </div>
+      <div>
+        <h3>По ОКВЭД</h3>
+        {% if summary.by_okved %}
+        <ul>
+          {% for ok, n in summary.by_okved %}<li>{{ ok }}: <b>{{ n }}</b></li>{% endfor %}
+        </ul>
+        {% else %}<p class="empty-state">Нет данных по ОКВЭД.</p>{% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-label="Покрытие цепочки потребления и средний чек">
+    <h2 class="card__title">Покрытие цепочки потребления</h2>
+    <ul>
+      <li>До вас: <b>{{ summary.chain.before }}</b></li>
+      <li>После вас: <b>{{ summary.chain.after }}</b></li>
+      <li>Оба направления: <b>{{ summary.chain.both }}</b></li>
+      <li>Нет профиля: <b>{{ summary.chain['нет профиля'] }}</b></li>
+    </ul>
+    <h3>Средний чек</h3>
+    <p class="muted">
+      по {{ summary.avg_check.count }} профилям: мин {{ summary.avg_check.min }} ·
+      медиана <b>{{ summary.avg_check.median }}</b> · макс {{ summary.avg_check.max }}
+    </p>
+  </section>
+
+  <section class="card" aria-label="Рост клуба">
+    <h2 class="card__title">Рост клуба</h2>
+    <div class="club-dist-grid">
+      <div>
+        <h3>По месяцам</h3>
+        {% if growth_month %}
+        <ul>{% for b in growth_month %}<li>{{ b.bucket }}: <b>{{ b.count }}</b></li>{% endfor %}</ul>
+        {% else %}<p class="empty-state">Пока нет вступлений.</p>{% endif %}
+      </div>
+      <div>
+        <h3>По неделям</h3>
+        {% if growth_week %}
+        <ul>{% for b in growth_week %}<li>{{ b.bucket }}: <b>{{ b.count }}</b></li>{% endfor %}</ul>
+        {% else %}<p class="empty-state">Пока нет вступлений.</p>{% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-label="Воронка знакомств">
+    <h2 class="card__title">Воронка знакомств</h2>
+    <ul>
+      <li>Предложено: <b>{{ funnel.requested + funnel.accepted + funnel.declined + funnel.cancelled }}</b></li>
+      <li>Принято (обоюдно): <b>{{ funnel.both_accepted }}</b></li>
+      <li>Отклонено: <b>{{ funnel.declined }}</b></li>
+      <li>В ожидании: <b>{{ funnel.requested }}</b></li>
+    </ul>
+  </section>
+
+  {% if support_url %}<p class="muted"><a href="{{ support_url }}">Нужна помощь?</a></p>{% endif %}
+{% endif %}
+{% endblock %}

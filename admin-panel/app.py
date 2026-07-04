@@ -4361,6 +4361,38 @@ async def club_page(
     return resp
 
 
+@app.get("/club/dashboard")
+async def club_dashboard(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+):
+    """Дашборд клуба по ВСЕМУ клубу тенанта (без фильтра): KPI + распределения +
+    покрытие цепочки + средний чек + рост + воронка знакомств."""
+    tid = session.active_tenant_id
+    members = await db.club_member_list_enriched(tid) if tid else []
+    for m in members:
+        m["prospect"] = _club_prospect(m)
+    summary = club_analytics.summarize(members)
+    growth_month = await db.club_growth(tid, "month") if tid else []
+    growth_week = await db.club_growth(tid, "week") if tid else []
+    funnel = await db.club_intro_funnel(tid) if tid else {
+        "requested": 0, "accepted": 0, "declined": 0, "cancelled": 0, "both_accepted": 0, "total": 0}
+    return templates.TemplateResponse(
+        request, "club_dashboard.html",
+        {
+            "csrf_token": session.csrf_token,
+            "session": session,
+            "active": "club",
+            "has_tenant": bool(tid),
+            "summary": summary,
+            "growth_month": growth_month,
+            "growth_week": growth_week,
+            "funnel": funnel,
+            "support_url": _safe_support_url(config.SUPPORT_URL),
+        },
+    )
+
+
 # ---- /club/intro — POST «Предложить знакомство» (Task 7b-панель) ---------- #
 def _club_intro_err_text(err: str | None) -> str | None:
     return {
