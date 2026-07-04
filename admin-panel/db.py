@@ -4780,6 +4780,84 @@ async def club_member_list_with_profile(tenant_id) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def club_member_list_enriched(tenant_id, *, status: str | None = None,
+                                    okved: str | None = None) -> list[dict]:
+    """Члены клуба + профиль + ЕГРЮЛ-обогащение (prospects по inn) одним запросом.
+    Явный tenant_id во ВСЕХ join/where = in-query backstop (owner-DSN обходит RLS),
+    как club_member_list_with_profile. Фильтры status/okved — в SQL (ложатся на индексы
+    (tenant_id,status)/(tenant_id,city,okved)); city/тип — в Python на стороне роута
+    (club_analytics.filter_members). prospects — LEFT JOIN по (inn, tenant_id): у члена
+    без inn/без сохранённой карточки prospect_*-поля = NULL."""
+    clauses = ["m.tenant_id = $1"]
+    args: list = [tenant_id]
+    if status:
+        args.append(status)
+        clauses.append(f"m.status = ${len(args)}")
+    if okved:
+        args.append(okved)
+        clauses.append(f"m.okved = ${len(args)}")
+    where = " and ".join(clauses)
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            f"""
+            select m.*,
+                   p.offering, p.seeking, p.chain_position, p.okved_seek,
+                   p.avg_check, p.description,
+                   pr.opf          as prospect_opf,
+                   pr.subject_type as prospect_subject_type,
+                   pr.name_short   as prospect_name_short,
+                   pr.okved_name   as prospect_okved_name,
+                   pr.status       as prospect_status
+            from club_members m
+            left join club_profiles p on p.member_id = m.id and p.tenant_id = $1
+            left join prospects    pr on pr.inn = m.inn and pr.tenant_id = $1
+            where {where}
+            order by m.created_at desc
+            """,
+            *args,
+        )
+    return [dict(r) for r in rows]
+
+
+async def club_growth(tenant_id, period: str = "month") -> list[dict]:
+    """Рост клуба: число вступлений по бакетам (period ∈ {'week','month'}, вайтлист —
+    безопасно инлайнить в date_trunc). Явный tenant_id-фильтр (backstop). Возвращает
+    [{'bucket':'YYYY-MM-DD','count':int}] по возрастанию даты."""
+    per = "week" if period == "week" else "month"
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            f"""
+            select date_trunc('{per}', created_at)::date as bucket, count(*) as count
+            from club_members where tenant_id = $1
+            group by bucket order by bucket
+            """,
+            tenant_id,
+        )
+    return [{"bucket": r["bucket"].isoformat(), "count": r["count"]} for r in rows]
+
+
+async def club_intro_funnel(tenant_id) -> dict:
+    """Воронка знакомств: счётчики по статусам club_intros + обоюдно принятые
+    (from_accepted_at И to_accepted_at NOT NULL). Явный tenant_id-фильтр (backstop)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select status, count(*) as count from club_intros where tenant_id = $1 group by status",
+            tenant_id,
+        )
+        both = await c.fetchval(
+            "select count(*) from club_intros where tenant_id = $1 "
+            "and from_accepted_at is not null and to_accepted_at is not null",
+            tenant_id,
+        )
+    d = {"requested": 0, "accepted": 0, "declined": 0, "cancelled": 0}
+    for r in rows:
+        if r["status"] in d:
+            d[r["status"]] = r["count"]
+    d["both_accepted"] = int(both or 0)
+    d["total"] = d["requested"] + d["accepted"] + d["declined"] + d["cancelled"]
+    return d
+
+
 async def club_member_get(member_id, tenant_id) -> dict | None:
     """Один участник клуба, только если принадлежит tenant_id (явный backstop-фильтр —
     иначе owner-DSN покажет чужого участника в обход RLS)."""
