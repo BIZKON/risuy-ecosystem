@@ -1522,3 +1522,88 @@ select.field__input {
 
 /* Недостающий вариант пилюли (предупреждение) — золото. */
 .pill--warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Клуб предпринимателей: вкладки, KPI, распределения, каталог, знакомства.
+   Токены и визуальный язык совпадают с .card / .stat / .chip / .pill панели.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Вкладки Каталог ↔ Дашборд (сегментированные ссылки, стиль .chip). */
+.club-tabs { display: flex; gap: 8px; margin: 0 0 18px; flex-wrap: wrap; }
+.club-tabs a {
+  padding: 7px 15px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--ink-soft);
+  font-size: 14px; font-weight: 500; text-decoration: none;
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.club-tabs a:hover { border-color: #cdd5e0; color: var(--ink); }
+.club-tabs a.is-active { background: var(--accent-soft); color: var(--accent); border-color: #cfddf8; }
+
+/* KPI-полоска над каталогом /club (горизонтальная сводка). */
+.club-kpi {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px;
+  padding: 12px 16px; margin: 16px 0;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  font-size: 14px; color: var(--ink-soft);
+}
+.club-kpi b { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.club-kpi a { margin-left: auto; color: var(--accent); text-decoration: none; font-weight: 500; }
+.club-kpi a:hover { text-decoration: underline; }
+
+/* KPI-плитки на дашборде (внутри .card; визуально = .stats/.stat). */
+.club-kpi--tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 12px;
+  padding: 0; margin: 0; background: none; border: 0; box-shadow: none;
+}
+.club-kpi--tiles .tile {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 14px 16px; background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.club-kpi--tiles .tile .num {
+  font-size: 26px; font-weight: 700; letter-spacing: -0.01em;
+  color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.club-kpi--tiles .tile > span:not(.num) { font-size: 13px; color: var(--ink-soft); }
+
+/* Распределения / рост: адаптивная сетка + строки «метка → число». */
+.club-dist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 22px; }
+.club-dist-grid h3 { font-size: 13px; font-weight: 600; color: var(--ink-soft); margin: 0 0 8px; }
+.club-dist-grid ul, .kv-list { list-style: none; margin: 0; padding: 0; }
+.club-dist-grid li, .kv-list li {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 6px 0; border-bottom: 1px solid var(--line-soft);
+  font-size: 14px; color: var(--ink-soft);
+}
+.club-dist-grid li:last-child, .kv-list li:last-child { border-bottom: 0; }
+.club-dist-grid li b, .kv-list li b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* Каталог участников: сетка карточек. */
+.club-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin: 8px 0 24px; }
+.club-card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px;
+}
+.club-card__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.club-card__head b { font-size: 15px; color: var(--ink); }
+.club-card__grid { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
+.club-card__grid dt { color: var(--ink-faint); }
+.club-card__grid dd { margin: 0; color: var(--ink); }
+.club-card__matches { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.club-card__matches-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-faint); margin: 0 0 8px; }
+.club-match-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.club-match { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13.5px; }
+.club-match b { color: var(--ink); }
+.club-match__reason { color: var(--ink-soft); font-size: 12.5px; }
+.club-match__intro-form { margin-left: auto; }
+
+/* Предложенные знакомства. */
+.intro-list { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 24px; }
+.intro-card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 18px;
+}
+.intro-card__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.intro-card__head b { color: var(--ink); }
+.intro-card__arrow { color: var(--ink-faint); }

@@ -55,7 +55,7 @@
 
   <section class="card" aria-label="Покрытие цепочки потребления и средний чек">
     <h2 class="card__title">Покрытие цепочки потребления</h2>
-    <ul>
+    <ul class="kv-list">
       <li>До вас: <b>{{ summary.chain.before }}</b></li>
       <li>После вас: <b>{{ summary.chain.after }}</b></li>
       <li>Оба направления: <b>{{ summary.chain.both }}</b></li>
@@ -88,7 +88,7 @@
 
   <section class="card" aria-label="Воронка знакомств">
     <h2 class="card__title">Воронка знакомств</h2>
-    <ul>
+    <ul class="kv-list">
       <li>Предложено: <b>{{ funnel.requested + funnel.accepted + funnel.declined + funnel.cancelled }}</b></li>
       <li>Принято (обоюдно): <b>{{ funnel.both_accepted }}</b></li>
       <li>Отклонено: <b>{{ funnel.declined }}</b></li>
