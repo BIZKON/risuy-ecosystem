@@ -4250,8 +4250,13 @@ async def club_page(
     status: str = "",
 ):
     """Каталог «Клуб предпринимателей» (Уровень 1, tenant-scoped) + фильтры + KPI.
-    Фильтры status/okved — в SQL (club_member_list_enriched), city/тип — в Python
-    (club_analytics.filter_members: normalize_city/entity_type). ЕГРЮЛ-обогащение —
+    Полная выборка клуба (club_member_list_enriched(tid) без фильтров) тянется один
+    раз — она нужна целиком для рекомендаций club_match.rank_matches и опций фасета
+    (города/ОКВЭД/типы). Поэтому фильтры каталога применяются в Python поверх неё:
+    city/тип — через club_analytics.filter_members (normalize_city/entity_type),
+    status/okved — точным сравнением здесь же. SQL-параметры status/okved у
+    club_member_list_enriched — для вызывающих, которым не нужен весь клуб (см.
+    scripts/club_dashboard_db_smoke.py), а не для этого каталога. ЕГРЮЛ-обогащение —
     LEFT JOIN prospects по inn (уже сохранённые карточки, без платного lookup)."""
     tid = session.active_tenant_id
     etype = (request.query_params.get("type") or "").strip()
