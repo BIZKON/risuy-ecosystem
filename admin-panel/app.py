@@ -1947,6 +1947,47 @@ async def export_consents(
     )
 
 
+# ---- /club/export.csv — POST, CSRF, аудит, ТОЛЬКО бизнес-поля (без контактов) ---- #
+@app.post("/club/export.csv")
+async def club_export(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    csrf_token: str = Form(""),
+    city: str = Form(""),
+    okved: str = Form(""),
+    type: str = Form(""),
+    status: str = Form(""),
+):
+    await _enforce_csrf(request, session, csrf_token)
+    tid = session.active_tenant_id
+    if not tid:
+        raise StarletteHTTPException(status_code=400, detail="Выберите клиента")
+
+    status_q = (status or "").strip() or None
+    okved_q = (okved or "").strip() or None
+    members = await db.club_member_list_enriched(tid, status=status_q, okved=okved_q)
+    for m in members:
+        m["prospect"] = _club_prospect(m)
+    members = club_analytics.filter_members(members, city=(city or "").strip(), etype=(type or "").strip())
+
+    # Аудит ДО стрима (fail-closed): факт выгрузки фиксируем; ПДн в лог не пишем.
+    await db.audit(actor=session.actor, action="club_export", ip=_ip(request), user_agent=_ua(request),
+                   detail={"filters": {"city": (city or "").strip(), "okved": okved_q or "",
+                                       "type": (type or "").strip(), "status": status_q or ""},
+                           "matched": len(members)})
+
+    def _rows():
+        yield _csv_line(club_analytics.CSV_HEADERS, bom=True)
+        for row in club_analytics.csv_business_rows(members):
+            yield _csv_line(row)
+
+    return StreamingResponse(
+        _rows(),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_headers("club_members"),
+    )
+
+
 async def _csv_consent_rows():
     header = ["occurred_at", "action", "doc_type", "doc_version", "text_hash", "channel", "lead_id"]
     yield _csv_line(header, bom=True)
