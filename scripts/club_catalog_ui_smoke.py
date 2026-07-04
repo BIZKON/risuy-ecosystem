@@ -72,6 +72,10 @@ BASE_CTX = dict(
     okveds=["41.20", "62.01"],
     filter_city="",
     filter_okved="",
+    filter_type="",
+    filter_status="",
+    types=["ИП", "ЮЛ", "Гос"],
+    kpi={"total": 2, "active": 1, "paused": 1, "left": 0, "with_egrul": 1, "with_profile": 1, "cities": 2},
     support_url="",
     help_dismissed=False,
 )
@@ -131,6 +135,14 @@ check("help_card — взаимное согласие на контакт", "в
 
 html_help_dismissed = render(help_dismissed=True)
 check("help_card скрыта при help_dismissed=True", "Зачем «Клуб»" not in html_help_dismissed)
+
+# 7. KPI-полоска + фильтры тип/статус + ссылка на дашборд + выгрузка CSV (Task 3).
+html = render()
+check("KPI-полоска: показан total", "Всего" in html or "kpi" in html.lower())
+check("фильтр по типу присутствует (name=type)", 'name="type"' in html)
+check("фильтр по статусу присутствует (name=status)", 'name="status"' in html)
+check("ссылка на дашборд есть", "/club/dashboard" in html)
+check("кнопка выгрузки CSV (форма POST /club/export.csv)", "/club/export.csv" in html)
 
 
 def _summary():

@@ -53,7 +53,7 @@ import security
 import timeweb_ai
 import yookassa
 
-from shared import anon, leadmagnet, money, nurture, vault
+from shared import anon, club_analytics, leadmagnet, money, nurture, vault
 
 
 # --------------------------------------------------------------------------- #
@@ -4224,61 +4224,67 @@ async def companies_page(
     )
 
 
+def _club_prospect(m: dict) -> dict | None:
+    """Собирает вложенную ЕГРЮЛ-карточку prospect из плоских prospect_*-колонок
+    club_member_list_enriched (для шаблона club.html и analytics). None — если ЕГРЮЛ
+    не подмешан (member без inn/без сохранённой карточки)."""
+    if not (m.get("prospect_name_short") or m.get("prospect_opf") or m.get("prospect_subject_type")):
+        return None
+    return {
+        "opf": m.get("prospect_opf"),
+        "subject_type": m.get("prospect_subject_type"),
+        "name_short": m.get("prospect_name_short"),
+        "okved_name": m.get("prospect_okved_name"),
+        "status": m.get("prospect_status"),
+        "inn": m.get("inn"),
+        "okved": m.get("okved"),
+    }
+
+
 @app.get("/club", response_class=HTMLResponse)
 async def club_page(
     request: Request,
     session: auth.Session = Depends(require_session),
     city: str = "",
     okved: str = "",
+    status: str = "",
 ):
-    """Каталог «Клуб предпринимателей» (Уровень 1, tenant-scoped). Только участники
-    активного тенанта (opt-in воронка бота — cmd_club/_club_finish). Фильтр по
-    городу/ОКВЭД — в Python (небольшой каталог, без пагинации, как /companies).
-    ЕГРЮЛ-обогащение — опц. подстановка карточки prospects по member.inn (та же
-    tenant-scoped RLS-выборка, что /companies; НЕ платный lookup — только то, что
-    уже сохранено ранее через /companies/lookup). Рекомендации «Рекомендуем познакомиться» —
-    club_match.rank_matches по профильным полям (chain_position/okved_seek), ТОЛЬКО
-    среди участников этого же тенанта (Уровень 2, cross-tenant — вне Фазы 1)."""
+    """Каталог «Клуб предпринимателей» (Уровень 1, tenant-scoped) + фильтры + KPI.
+    Фильтры status/okved — в SQL (club_member_list_enriched), city/тип — в Python
+    (club_analytics.filter_members: normalize_city/entity_type). ЕГРЮЛ-обогащение —
+    LEFT JOIN prospects по inn (уже сохранённые карточки, без платного lookup)."""
     tid = session.active_tenant_id
-    all_members = await db.club_member_list_with_profile(tid) if tid else []
+    etype = (request.query_params.get("type") or "").strip()
+    status_q = (status or "").strip()
+    okved_q = (okved or "").strip()
+    city_q = (city or "").strip()
 
-    # Рекомендации считаются ДО фильтрации город/ОКВЭД (кандидаты — весь клуб тенанта,
-    # фильтр влияет только на то, что видно в основном списке карточек).
+    all_members = await db.club_member_list_enriched(tid) if tid else []
+    for m in all_members:
+        m["prospect"] = _club_prospect(m)
+
+    # Рекомендации — по всему клубу тенанта (до фильтрации город/ОКВЭД/тип/статус).
     matches_by_member: dict[str, list[dict]] = {}
     for m in all_members:
         others = [o for o in all_members if o.get("id") != m.get("id")]
         matches_by_member[str(m.get("id"))] = club_match.rank_matches(m, others)[:3]
 
+    # Фильтрация основного списка: status/okved — по колонкам, city/тип — нормализованно.
     members = all_members
-    city_q = (city or "").strip()
-    okved_q = (okved or "").strip()
-    if city_q:
-        members = [m for m in members if (m.get("city") or "").strip().lower() == city_q.lower()]
+    if status_q:
+        members = [m for m in members if (m.get("status") or "") == status_q]
     if okved_q:
-        members = [m for m in members if (m.get("okved") or "").strip().lower() == okved_q.lower()]
-
-    # ЕГРЮЛ-обогащение по inn: только среди уже сохранённых карточек prospects тенанта
-    # (никаких новых платных dadata-запросов из каталога клуба).
-    # Doc-инвариант: prospect_list() БЕЗ явного tenant_id — изоляция тенанта здесь идёт
-    # через RLS/GUC (panel_rw-соединение + set_active_tenant/current_setting('app.tenant_id')),
-    # НЕ через явный tenant-фильтр в SQL, как у club_*-хелперов (club_member_get,
-    # club_intro_create и т.д.), которые несут tenant_id параметром как backstop против
-    # owner-DSN (owner-DSN обходит RLS). Вызов безопасен именно в панельном рантайме
-    # (panel_rw + активная сессия с выставленным GUC) — эту функцию НЕЛЬЗЯ вызывать из
-    # owner-DSN контекста (скрипты/миграции), там RLS-изоляция не сработает.
-    prospect_by_inn: dict[str, dict] = {}
-    if tid:
-        prospects = await db.prospect_list()
-        for p in prospects:
-            if p["inn"]:
-                prospect_by_inn[p["inn"]] = dict(p)
+        members = [m for m in members if (m.get("okved") or "").strip() == okved_q]
+    members = club_analytics.filter_members(members, city=city_q, etype=etype)
     for m in members:
-        m["prospect"] = prospect_by_inn.get((m.get("inn") or "").strip()) if m.get("inn") else None
         m["matches"] = matches_by_member.get(str(m.get("id")), [])
 
-    # Опции фильтров — из текущего набора участников тенанта (до фильтрации), без БД-запроса.
-    cities = sorted({(m.get("city") or "").strip() for m in all_members if m.get("city")})
+    # Опции фильтров (из всего клуба) + KPI по отфильтрованному набору.
+    cities = sorted({club_analytics.normalize_city(m.get("city")) for m in all_members
+                     if (m.get("city") or "").strip()})
     okveds = sorted({(m.get("okved") or "").strip() for m in all_members if m.get("okved")})
+    types = ["ИП", "ЮЛ", "Гос", "не указан"]
+    kpi = club_analytics.summarize(members)["kpi"]
 
     # Task 7b-панель: предложенные знакомства тенанта + раскрытые контакты для accepted
     # (оператору нужны контакты обоих, чтобы фасилитировать знакомство — это разрешено
@@ -4330,6 +4336,10 @@ async def club_page(
             "okveds": okveds,
             "filter_city": city_q,
             "filter_okved": okved_q,
+            "filter_status": status_q,
+            "filter_type": etype,
+            "types": types,
+            "kpi": kpi,
             "support_url": _safe_support_url(config.SUPPORT_URL),
             "help_dismissed": await _help_dismissed(session, "club"),
             "intros": intros,

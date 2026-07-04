@@ -64,12 +64,49 @@
         </select>
       </label>
 
+      <label class="field field--inline">
+        <span class="field__label">Тип</span>
+        <select class="field__input" name="type">
+          <option value="">Тип: любой</option>
+          {% for t in types %}
+          <option value="{{ t }}" {% if filter_type == t %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field field--inline">
+        <span class="field__label">Статус</span>
+        <select class="field__input" name="status">
+          <option value="">Статус: любой</option>
+          <option value="active" {% if filter_status == 'active' %}selected{% endif %}>активен</option>
+          <option value="paused" {% if filter_status == 'paused' %}selected{% endif %}>на паузе</option>
+          <option value="left"   {% if filter_status == 'left'   %}selected{% endif %}>вышел</option>
+        </select>
+      </label>
+
       <button class="btn btn--primary" type="submit">Фильтровать</button>
-      {% if filter_city or filter_okved %}
+      {% if filter_city or filter_okved or filter_type or filter_status %}
       <a class="btn btn--ghost" href="/club">Сбросить</a>
       {% endif %}
     </div>
   </form>
+
+  <form method="post" action="/club/export.csv" style="display:inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="city" value="{{ filter_city }}">
+    <input type="hidden" name="okved" value="{{ filter_okved }}">
+    <input type="hidden" name="type" value="{{ filter_type }}">
+    <input type="hidden" name="status" value="{{ filter_status }}">
+    <button class="btn btn--ghost" type="submit">Выгрузить CSV</button>
+  </form>
+
+  <div class="club-kpi">
+    <span>Всего: <b>{{ kpi.total }}</b></span>
+    <span>Активных: <b>{{ kpi.active }}</b></span>
+    <span>С ЕГРЮЛ: <b>{{ kpi.with_egrul }}</b></span>
+    <span>Городов: <b>{{ kpi.cities }}</b></span>
+    <a href="/club/dashboard">Дашборд →</a>
+  </div>
 
   {% if members %}
     <div class="club-list">
