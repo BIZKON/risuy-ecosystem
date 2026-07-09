@@ -1740,6 +1740,48 @@ async def get_legal_doc_data(slug: str) -> dict | None:
     return kv
 
 
+# ── Бриф-онбординг тенанта (tenant_brief) — идентично admin-panel/db.py ───────
+# Бот ходит owner-DSN (как и tenant_settings в get_legal_doc_data выше) — доп.
+# GRANT на tenant_brief боту не требуется (см. db/migrate_tenant_brief.sql).
+
+
+async def get_brief_by_token(token: str) -> dict | None:
+    """По секретному токену → бриф (для рендера/сабмита). None если неизвестен."""
+    from datetime import datetime, timezone
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select b.id, b.tenant_id, t.name as tenant_name, b.status, b.expires_at "
+            "from tenant_brief b join tenants t on t.id = b.tenant_id where b.token = $1",
+            token)
+    if not row:
+        return None
+    d = dict(row)
+    exp = d.get("expires_at")
+    d["expired"] = bool(exp and exp < datetime.now(timezone.utc))
+    return d
+
+
+async def submit_brief(token: str, answers: dict) -> str:
+    """Пишет ответы по токену. Возвращает ok|already|expired|unknown."""
+    from datetime import datetime, timezone
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "select id, status, expires_at from tenant_brief where token = $1 for update",
+                token)
+            if not row:
+                return "unknown"
+            if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
+                return "expired"
+            if row["status"] != "pending":
+                return "already"
+            await c.execute(
+                "update tenant_brief set answers = $2::jsonb, status = 'submitted', "
+                "submitted_at = now() where id = $1",
+                row["id"], json.dumps(answers, ensure_ascii=False))
+    return "ok"
+
+
 async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
     """Конфиг ИИ демо-тенанта для ВЕБ-чата на сайте (зеркало Telegram-демо): system_prompt + model
     (gateway-бэкенд). None — демо-тенанта нет или Лия выключена. Бот=owner, RLS обходит; читаем

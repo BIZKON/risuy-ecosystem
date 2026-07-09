@@ -22,7 +22,7 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
@@ -5063,3 +5063,106 @@ async def dadata_quota_take(limit: int) -> bool:
             "                                updated_at = now() "
             "returning value::int", key)
         return cur <= limit
+
+
+# ── Бриф-онбординг тенанта (tenant_brief) ─────────────────────────────────────
+# json/secrets/datetime/timedelta/timezone уже импортированы модульно вверху файла.
+
+
+async def create_tenant_brief(tenant_id, *, actor: str, ip: str | None,
+                              user_agent: str | None, ttl_days: int = 30) -> tuple[str, str]:
+    """Создаёт бриф со статусом pending и секретным токеном. Возвращает (id, token)."""
+    token = secrets.token_hex(16)
+    expires = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "insert into tenant_brief(tenant_id, token, status, created_by, expires_at) "
+                "values($1,$2,'pending',$3,$4) returning id",
+                tenant_id, token, actor, expires,
+            )
+            await _insert_audit(c, actor=actor, action="brief_created", ip=ip,
+                                user_agent=user_agent, detail={"tenant_id": str(tenant_id)})
+    return str(row["id"]), token
+
+
+async def list_tenant_briefs() -> list[dict]:
+    """Кросс-тенантный список брифов (для платформенного бриф-центра)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select b.id, b.tenant_id, t.name as tenant_name, t.slug as tenant_slug, "
+            "b.status, b.created_at, b.submitted_at, b.applied_at "
+            "from tenant_brief b join tenants t on t.id = b.tenant_id "
+            "order by b.created_at desc")
+    return [dict(r) for r in rows]
+
+
+async def get_tenant_brief(brief_id: str) -> dict | None:
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select b.*, t.name as tenant_name, t.slug as tenant_slug "
+            "from tenant_brief b join tenants t on t.id = b.tenant_id where b.id = $1",
+            brief_id)
+    if not row:
+        return None
+    d = dict(row)
+    for k in ("answers", "proposal", "applied"):
+        if isinstance(d.get(k), str):
+            d[k] = json.loads(d[k]) if d[k] else None
+    return d
+
+
+async def set_brief_proposal(brief_id: str, proposal: dict) -> None:
+    async with pool.acquire() as c:
+        await c.execute(
+            "update tenant_brief set proposal = $2::jsonb, status = 'proposed', "
+            "proposed_at = now() where id = $1",
+            brief_id, json.dumps(proposal, ensure_ascii=False))
+
+
+async def mark_brief_applied(brief_id: str, applied: dict, *, actor: str,
+                             ip: str | None, user_agent: str | None) -> None:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "update tenant_brief set applied = $2::jsonb, status = 'applied', "
+                "applied_at = now() where id = $1",
+                brief_id, json.dumps(applied, ensure_ascii=False))
+            await _insert_audit(c, actor=actor, action="brief_applied", ip=ip,
+                                user_agent=user_agent,
+                                detail={"brief_id": brief_id, "sections": applied.get("sections", [])})
+
+
+async def get_brief_by_token(token: str) -> dict | None:
+    """По секретному токену → бриф (для рендера/сабмита). None если неизвестен."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select b.id, b.tenant_id, t.name as tenant_name, b.status, b.expires_at "
+            "from tenant_brief b join tenants t on t.id = b.tenant_id where b.token = $1",
+            token)
+    if not row:
+        return None
+    d = dict(row)
+    exp = d.get("expires_at")
+    d["expired"] = bool(exp and exp < datetime.now(timezone.utc))
+    return d
+
+
+async def submit_brief(token: str, answers: dict) -> str:
+    """Пишет ответы по токену. Возвращает ok|already|expired|unknown."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "select id, status, expires_at from tenant_brief where token = $1 for update",
+                token)
+            if not row:
+                return "unknown"
+            if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
+                return "expired"
+            if row["status"] != "pending":
+                return "already"
+            await c.execute(
+                "update tenant_brief set answers = $2::jsonb, status = 'submitted', "
+                "submitted_at = now() where id = $1",
+                row["id"], json.dumps(answers, ensure_ascii=False))
+    return "ok"
