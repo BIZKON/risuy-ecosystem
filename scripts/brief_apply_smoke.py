@@ -63,7 +63,8 @@ async def main() -> None:
                          "triggers": [{"kind": "stopword", "value": "конкурент"}],
                          "channels": {"telegram": "a-agent"}},
             "products": [{"name": "Абонемент", "price": 3000, "currency": "RUB",
-                          "caption": "30 чашек", "kind": "main"}],
+                          "caption": "30 чашек", "kind": "main",
+                          "link": "https://example.com/abonement"}],
             "recommendations": [{"title": "Проверьте черновик", "why": "собрано автоматически"}],
             "gaps": []}
 
@@ -114,7 +115,8 @@ async def main() -> None:
         bad_proposal = {"settings": {"funnel": {"funnel_enabled": "1", "operator_inn": "не-инн"},
                                      "persona": {}, "triggers": [], "channels": {}},
                         "products": [{"name": "Продукт-2", "price": 500, "currency": "RUB",
-                                     "caption": "", "kind": "main"}],
+                                     "caption": "", "kind": "main",
+                                     "link": "https://example.com/product-2"}],
                         "recommendations": [], "gaps": []}
         res3 = await brief_apply.apply_proposal(
             ta, bad_proposal, ["funnel", "products"], actor="smoke", ip=None, user_agent=None)
@@ -126,6 +128,29 @@ async def main() -> None:
             await c.execute("select set_config('app.tenant_id', $1, true)", str(ta))
             nprod2 = await c.fetchval("select count(*) from products where tenant_id=$1", ta)
         check("второй продукт создан (products не зависит от funnel)", nprod2 == 2, f"n={nprod2}")
+
+        print("6. продукт без ссылки НЕ создаётся (инвариант «файл ИЛИ ссылка»), "
+              "остальные продукты секции всё равно применяются:")
+        no_link_proposal = {"settings": {"persona": {}, "triggers": [], "channels": {}},
+                             "products": [
+                                 {"name": "Продукт-без-ссылки", "price": 100, "currency": "RUB",
+                                  "caption": "", "kind": "main"},
+                                 {"name": "Продукт-3", "price": 200, "currency": "RUB",
+                                  "caption": "", "kind": "main",
+                                  "link": "https://example.com/product-3"},
+                             ],
+                             "recommendations": [], "gaps": []}
+        res4 = await brief_apply.apply_proposal(
+            ta, no_link_proposal, ["products"], actor="smoke", ip=None, user_agent=None)
+        check("products отмечена применённой (Продукт-3 создался)", "products" in res4["sections"],
+              str(res4))
+        check("ошибка про продукт без ссылки записана",
+              any("Продукт-без-ссылки" in e for e in res4["errors"]), str(res4["errors"]))
+        async with db.pool.acquire() as c:
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(ta))
+            nprod3 = await c.fetchval("select count(*) from products where tenant_id=$1", ta)
+        check("продукт без ссылки не создан, создан только валидный (2+1=3)", nprod3 == 3,
+              f"n={nprod3}")
 
     finally:
         db.set_active_tenant(None)

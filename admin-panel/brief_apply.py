@@ -9,7 +9,33 @@
 """
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
+
+import config
 import db
+
+
+def _parse_price(raw) -> tuple[Decimal | None, bool]:
+    """Зеркало admin-panel/app.py:_parse_price — та же валидация цены, что у ручной формы
+    product_save. raw может быть числом/строкой из JSON черновика. Пусто/None → (None, True)
+    — цена опциональна (бесплатный продукт). Отрицательную, слишком большую (numeric(12,2):
+    целая часть ≤ 10 цифр) и непарсящуюся строку отвергаем (ok=False)."""
+    if raw is None:
+        return None, True
+    s = str(raw).strip()
+    if not s:
+        return None, True
+    s = s.replace(" ", "").replace(" ", "").replace(",", ".")
+    try:
+        val = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None, False
+    if val < 0:
+        return None, False
+    val = val.quantize(Decimal("0.01"))
+    if val >= Decimal("10000000000"):
+        return None, False
+    return val, True
 
 
 async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
@@ -32,19 +58,37 @@ async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
             errors.append(f"funnel: {e}")
 
     if "products" in sections:
-        try:
-            n = 0
-            for prod in proposal.get("products") or []:
+        n = 0
+        for prod in proposal.get("products") or []:
+            name_val = str(prod.get("name") or "")[: config.PRODUCT_NAME_MAX_LEN]
+            try:
+                # Инвариант «файл ИЛИ ссылка»: у brief-продуктов файла нет (file_meta=None),
+                # значит валиден только вариант с непустой link. Оркестратор ссылку не
+                # выдумывает — продукт без link помечается оператору для ручного добавления.
+                link_val = str(prod.get("link") or "").strip() or None
+                if not link_val:
+                    errors.append(
+                        f"products: продукт «{name_val}» — нужна ссылка, добавьте вручную в каталоге")
+                    continue
+
+                price_val, price_ok = _parse_price(prod.get("price"))
+                if not price_ok:
+                    errors.append(f"products: продукт «{name_val}» — цена указана неверно")
+                    continue
+
+                caption_val = str(prod.get("caption") or "").strip()[: config.PRODUCT_CAPTION_MAX_LEN] or None
+
                 await db.create_product_with_audit(
-                    name=str(prod.get("name") or "")[:200], kind=str(prod.get("kind") or "main"),
-                    price=prod.get("price"), currency=str(prod.get("currency") or "RUB"),
-                    caption=(prod.get("caption") or None), link=(prod.get("link") or None),
+                    name=name_val, kind=str(prod.get("kind") or "main"),
+                    price=price_val, currency=str(prod.get("currency") or "RUB"),
+                    caption=caption_val, link=link_val,
                     file_meta=None, status="active", tenant_id=tenant_id,
                     actor=actor, ip=ip, user_agent=user_agent)
                 n += 1
-            done.append("products") if n else None
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"products: {e}")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"products: продукт «{name_val}» — {e}")
+        if n:
+            done.append("products")
 
     if "triggers" in sections:
         try:
@@ -58,7 +102,8 @@ async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
                         intent_desc="", msg_count=None, notify_chat_id="", notify_topic_id=None,
                         reply_text="", actor=actor, ip=ip, user_agent=user_agent)
                     n += 1
-            done.append("triggers") if n else None
+            if n:
+                done.append("triggers")
         except Exception as e:  # noqa: BLE001
             errors.append(f"triggers: {e}")
 
@@ -70,7 +115,8 @@ async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
                     await db.set_channel_agent(tenant_id, source, str(slug),
                                                actor=actor, ip=ip, user_agent=user_agent)
                     n += 1
-            done.append("channels") if n else None
+            if n:
+                done.append("channels")
         except Exception as e:  # noqa: BLE001
             errors.append(f"channels: {e}")
 
