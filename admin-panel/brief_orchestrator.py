@@ -21,14 +21,26 @@ _EMPTY = {"settings": {"persona": {}, "funnel": {}, "triggers": [], "channels": 
           "products": [], "recommendations": [], "gaps": []}
 
 
+def _normalize_answer(v) -> str:
+    """Строка как есть; multichoice (список) → через запятую; иное → str().
+
+    Раньше нестроковые значения (напр. список из multichoice-вопроса) возвращались как
+    есть и утекали в текст промпта (_build_prompt) как python-repr списка (['a', 'b']).
+    """
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list):
+        return ", ".join(map(str, v))
+    return str(v)
+
+
 def _get(answers: dict, key: str) -> str:
     """Достаёт ответ по ключу вопроса из плоских или секционных answers."""
     if key in answers:
-        v = answers[key]
-        return v if isinstance(v, str) else v
+        return _normalize_answer(answers[key])
     for v in answers.values():
         if isinstance(v, dict) and key in v:
-            return v[key]
+            return _normalize_answer(v[key])
     return ""
 
 
@@ -163,7 +175,20 @@ def _merge_over_fallback(fb: dict, llm_obj: dict) -> dict:
             out["settings"].setdefault(grp, {}).update({k: v for k, v in s[grp].items() if v})
     if isinstance(s.get("triggers"), list):
         out["settings"]["triggers"] = s["triggers"]
-    for k in ("products", "recommendations", "gaps"):
+
+    # products: слияние, не замена — фолбэк парсит products_list клиента (сырые строки
+    # брифа), LLM-список не должен тихо терять эти продукты. LLM-версия приоритетна для
+    # совпадающих имён (регистронезависимо/trim); фолбэк-продукты с непокрытым именем
+    # сохраняются, чтобы не терять то, что клиент реально написал в брифе.
+    llm_products = llm_obj.get("products")
+    if isinstance(llm_products, list) and llm_products:
+        llm_names = {str(p.get("name") or "").strip().casefold()
+                     for p in llm_products if isinstance(p, dict)}
+        kept_fallback = [p for p in out["products"]
+                         if str(p.get("name") or "").strip().casefold() not in llm_names]
+        out["products"] = kept_fallback + llm_products
+
+    for k in ("recommendations", "gaps"):
         if isinstance(llm_obj.get(k), list) and llm_obj[k]:
             out[k] = llm_obj[k]
     return out

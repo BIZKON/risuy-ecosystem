@@ -64,6 +64,33 @@ async def main() -> None:
     p2 = await orch.analyze(ANSWERS_NO_INN, llm=ok_llm)
     check("распарсил LLM-ответ", _valid_shape(p2) and p2["settings"]["persona"]["name"] == "Бариста")
 
+    print("5. merge продуктов: LLM вернул часть продуктов → непокрытый фолбэк-продукт сохраняется:")
+    answers_two_products = dict(ANSWERS_NO_INN)
+    answers_two_products["products_list"] = (
+        "Абонемент — 3000 ₽ — 30 чашек\nДегустация — 500 ₽ — набор из 5 сортов")
+    fb2 = orch.fallback_proposal(answers_two_products)
+    check("фолбэк собрал 2 продукта", len(fb2["products"]) == 2, str(fb2["products"]))
+
+    async def partial_llm(prompt: str) -> str:
+        return ('{"settings":{"persona":{},"funnel":{},"triggers":[],"channels":{}},'
+                '"products":[{"name":"Абонемент","price":3500,"currency":"RUB",'
+                '"caption":"обновлено LLM","kind":"main"}],"recommendations":[],"gaps":[]}')
+    p3 = await orch.analyze(answers_two_products, llm=partial_llm)
+    names = {p.get("name") for p in p3["products"]}
+    check("LLM-продукт (Абонемент) присутствует и обновлён", "Абонемент" in names
+          and any(p.get("name") == "Абонемент" and p.get("price") == 3500 for p in p3["products"]),
+          str(p3["products"]))
+    check("непокрытый фолбэк-продукт (Дегустация) сохранён", "Дегустация" in names,
+          str(p3["products"]))
+    check("итого 2 продукта (не потеряли и не задвоили)", len(p3["products"]) == 2,
+          str(p3["products"]))
+
+    print("6. _get нормализует multichoice (список) в строку без python-repr:")
+    val = orch._get({"channels_used": ["Telegram", "VK"]}, "channels_used")
+    check("список → 'Telegram, VK' (не python-repr)", val == "Telegram, VK", repr(val))
+    val_section = orch._get({"section": {"channels_used": ["A", "B"]}}, "channels_used")
+    check("список из секции тоже нормализован", val_section == "A, B", repr(val_section))
+
     print()
     if FAILS:
         print("❌ ПРОВАЛЫ: " + ", ".join(FAILS))

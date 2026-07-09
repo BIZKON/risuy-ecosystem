@@ -111,8 +111,11 @@ async def main() -> None:
                 "select value from tenant_settings where tenant_id=$1 and key='company_name'", ta)
         check("тенант А не изменился после apply на Б", cn_a_after == "A-Компания", f"cn={cn_a_after}")
 
-        print("5. ошибка одной секции не рушит остальные (funnel_enabled=1 + невалидный ИНН):")
-        bad_proposal = {"settings": {"funnel": {"funnel_enabled": "1", "operator_inn": "не-инн"},
+        print("5. ошибка одной секции не рушит остальные (реальный путь: НЕТ funnel_enabled "
+              "в settings.funnel — так оркестратор никогда его не кладёт — + невалидный ИНН):")
+        bad_proposal = {"settings": {"funnel": {"operator_name": "ИП Тест",
+                                                "operator_inn": "не-инн",
+                                                "operator_email": "bad@example.com"},
                                      "persona": {}, "triggers": [], "channels": {}},
                         "products": [{"name": "Продукт-2", "price": 500, "currency": "RUB",
                                      "caption": "", "kind": "main",
@@ -122,12 +125,35 @@ async def main() -> None:
             ta, bad_proposal, ["funnel", "products"], actor="smoke", ip=None, user_agent=None)
         check("funnel вернул ошибку (невалидный ИНН)", any("funnel" in e for e in res3["errors"]),
               str(res3))
+        check("funnel НЕ применён (нет в sections)", "funnel" not in res3["sections"], str(res3))
         check("products применились несмотря на ошибку funnel", "products" in res3["sections"],
               str(res3))
         async with db.pool.acquire() as c:
             await c.execute("select set_config('app.tenant_id', $1, true)", str(ta))
             nprod2 = await c.fetchval("select count(*) from products where tenant_id=$1", ta)
+            cn_after_bad = await c.fetchval(
+                "select value from tenant_settings where tenant_id=$1 and key='operator_inn'", ta)
         check("второй продукт создан (products не зависит от funnel)", nprod2 == 2, f"n={nprod2}")
+        check("невалидный ИНН НЕ записан в tenant_settings",
+              cn_after_bad in (None, ""), f"operator_inn={cn_after_bad}")
+
+        print("5b. позитивный кейс: валидные реквизиты funnel (без funnel_enabled) применяются:")
+        good_funnel_proposal = {
+            "settings": {"funnel": {"operator_name": "ИП Валидный",
+                                    "operator_inn": "770000000002",
+                                    "operator_email": "valid@example.com"},
+                        "persona": {}, "triggers": [], "channels": {}},
+            "products": [], "recommendations": [], "gaps": []}
+        res3b = await brief_apply.apply_proposal(
+            ta, good_funnel_proposal, ["funnel"], actor="smoke", ip=None, user_agent=None)
+        check("funnel применён (валидные реквизиты)", "funnel" in res3b["sections"], str(res3b))
+        check("нет ошибок funnel", not res3b.get("errors"), str(res3b))
+        async with db.pool.acquire() as c:
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(ta))
+            inn_after_good = await c.fetchval(
+                "select value from tenant_settings where tenant_id=$1 and key='operator_inn'", ta)
+        check("валидный ИНН записан в tenant_settings", inn_after_good == "770000000002",
+              f"operator_inn={inn_after_good}")
 
         print("6. продукт без ссылки НЕ создаётся (инвариант «файл ИЛИ ссылка»), "
               "остальные продукты секции всё равно применяются:")

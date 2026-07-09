@@ -13,6 +13,8 @@ from decimal import Decimal, InvalidOperation
 
 import config
 import db
+import security
+from shared.leadmagnet import _is_email, _is_inn
 
 
 def _parse_price(raw) -> tuple[Decimal | None, bool]:
@@ -49,11 +51,28 @@ async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
     if "funnel" in sections:
         try:
             fields = {k: v for k, v in (settings.get("funnel") or {}).items() if v not in (None, "")}
-            errs = await db.set_funnel_config(tenant_id, fields, actor=actor, ip=ip, user_agent=user_agent)
-            if errs:
-                errors.append("funnel: " + "; ".join(errs))
+            # 152-ФЗ: settings.funnel НИКОГДА не содержит funnel_enabled (оркестратор его
+            # не кладёт) — валидатор set_funnel_config при выключенной воронке пропускает
+            # проверку реквизитов (ранний return []), и operator_inn/operator_email ушли бы
+            # в tenant_settings без проверки формата, а оттуда — в публичный /legal/{slug}.
+            # Точечно проверяем те же реквизиты, что и ручная форма, ДО записи.
+            requisite_errs: list[str] = []
+            inn_val = fields.get("operator_inn")
+            if inn_val and not _is_inn(str(inn_val)):
+                requisite_errs.append("ИНН оператора невалиден")
+            email_val = fields.get("operator_email")
+            if email_val and not _is_email(str(email_val)):
+                requisite_errs.append("email оператора невалиден")
+
+            if requisite_errs:
+                errors.append("funnel: " + "; ".join(requisite_errs))
             else:
-                done.append("funnel")
+                errs = await db.set_funnel_config(
+                    tenant_id, fields, actor=actor, ip=ip, user_agent=user_agent)
+                if errs:
+                    errors.append("funnel: " + "; ".join(errs))
+                else:
+                    done.append("funnel")
         except Exception as e:  # noqa: BLE001
             errors.append(f"funnel: {e}")
 
@@ -65,10 +84,14 @@ async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
                 # Инвариант «файл ИЛИ ссылка»: у brief-продуктов файла нет (file_meta=None),
                 # значит валиден только вариант с непустой link. Оркестратор ссылку не
                 # выдумывает — продукт без link помечается оператору для ручного добавления.
-                link_val = str(prod.get("link") or "").strip() or None
+                # Ссылка из LLM/оркестратора недоверенная — та же схема-валидация, что у
+                # ручной формы product_save (security.validate_target_url): отсекает
+                # не-http/https, javascript:/data:, protocol-relative //, control-символы, длину.
+                link_val = security.validate_target_url(
+                    str(prod.get("link") or "").strip() or None, schemes=config.LINK_URL_SCHEMES)
                 if not link_val:
                     errors.append(
-                        f"products: продукт «{name_val}» — нужна ссылка, добавьте вручную в каталоге")
+                        f"products: продукт «{name_val}» — нужна корректная ссылка, добавьте вручную в каталоге")
                     continue
 
                 price_val, price_ok = _parse_price(prod.get("price"))
