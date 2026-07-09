@@ -123,6 +123,7 @@
       {{ nav_item('account',      '/account',     'Профиль',    active) }}
       {%- if session and session.is_platform %}{{ nav_item('team', '/team', 'Команда', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}
+      {%- if session and session.is_platform %}{{ nav_item('brief', '/brief-center', 'Бриф-центр', active) }}{% endif %}
     </nav>
 
     {% if csrf_token %}

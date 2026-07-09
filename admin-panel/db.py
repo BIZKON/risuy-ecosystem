@@ -5166,3 +5166,21 @@ async def submit_brief(token: str, answers: dict) -> str:
                 "submitted_at = now() where id = $1",
                 row["id"], json.dumps(answers, ensure_ascii=False))
     return "ok"
+
+
+async def list_tenants_min() -> list[dict]:
+    """Минимальный список тенантов (id, name, slug) для выбора в формах (напр. Бриф-центр)."""
+    async with pool.acquire() as c:
+        rows = await c.fetch("select id, name, slug from tenants order by name")
+    return [dict(r) for r in rows]
+
+
+async def get_bot_public_base_url() -> str:
+    """Публичный base URL бота (для ссылки /brief/{token}) — ТЕ ЖЕ данные, что и
+    get_tenant_legal_urls: бот публикует его в app_settings при старте (RUNTIME_PUBLIC_BASE_KEY),
+    у панели и бота разное окружение → это единственный честный канал. Пусто, если бот ещё
+    не публиковал (панель тогда не покажет ссылку)."""
+    async with pool.acquire() as c:
+        base = await c.fetchval(
+            "select value from app_settings where key = $1", config.RUNTIME_PUBLIC_BASE_KEY)
+    return (base or "").rstrip("/")

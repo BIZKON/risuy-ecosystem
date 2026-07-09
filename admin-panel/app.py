@@ -40,6 +40,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import StreamingResponse
 
 import auth
+import brief_apply
 import club_match
 import config
 import dadata
@@ -52,8 +53,9 @@ import onboarding
 import security
 import timeweb_ai
 import yookassa
+from brief_orchestrator import analyze as _brief_analyze
 
-from shared import anon, club_analytics, leadmagnet, money, nurture, vault
+from shared import anon, brief_schema, club_analytics, leadmagnet, money, nurture, vault
 
 
 # --------------------------------------------------------------------------- #
@@ -6347,6 +6349,82 @@ async def tenants_create(
         name, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     await db.set_session_tenant(session.sid, tid)  # авто-переключение в созданный кабинет
     return RedirectResponse(url="/tenants?created=1", status_code=303)
+
+
+# --------------------------------------------------------------------------- #
+# Бриф-центр (Task 5): платформенный раздел бриф-онбординга тенанта — создать
+# ссылку, посмотреть ответы, запустить оркестратор, посекционно применить
+# черновик теми же db-сеттерами, что и ручные формы (HumanGate).
+# --------------------------------------------------------------------------- #
+
+@app.get("/brief-center", response_class=HTMLResponse)
+async def brief_center(request: Request, session: auth.Session = Depends(require_session),
+                       saved: str | None = None, err: str | None = None):
+    _require_admin(session)
+    briefs = await db.list_tenant_briefs()
+    tenants = await db.list_tenants_min()
+    base = await db.get_bot_public_base_url()
+    return templates.TemplateResponse(request, "brief_center.html", {
+        "briefs": briefs, "tenants": tenants, "base_url": base, "saved": saved, "err": err,
+        "csrf_token": session.csrf_token, "session": session, "active": "brief"})
+
+
+@app.post("/brief-center/create")
+async def brief_center_create(request: Request, session: auth.Session = Depends(require_session),
+                              tenant_id: str = Form(""), csrf_token: str = Form("")):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    if not tenant_id:
+        return RedirectResponse(url="/brief-center?err=no_tenant", status_code=303)
+    _id, _token = await db.create_tenant_brief(tenant_id, actor=session.actor,
+                                               ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url=f"/brief-center/{_id}?saved=created", status_code=303)
+
+
+@app.get("/brief-center/{brief_id}", response_class=HTMLResponse)
+async def brief_detail(request: Request, brief_id: str,
+                       session: auth.Session = Depends(require_session),
+                       saved: str | None = None, err: str | None = None):
+    _require_admin(session)
+    brief = await db.get_tenant_brief(brief_id)
+    if not brief:
+        raise StarletteHTTPException(status_code=404)
+    base = await db.get_bot_public_base_url()
+    return templates.TemplateResponse(request, "brief_detail.html", {
+        "brief": brief, "link": f"{base}/brief/{brief.get('token', '')}" if base else "",
+        "sections": brief_schema.SECTIONS, "saved": saved, "err": err,
+        "csrf_token": session.csrf_token, "session": session, "active": "brief"})
+
+
+@app.post("/brief-center/{brief_id}/orchestrate")
+async def brief_orchestrate(request: Request, brief_id: str,
+                            session: auth.Session = Depends(require_session),
+                            csrf_token: str = Form("")):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    brief = await db.get_tenant_brief(brief_id)
+    if not brief or not brief.get("answers"):
+        return RedirectResponse(url=f"/brief-center/{brief_id}?err=no_answers", status_code=303)
+    proposal = await _brief_analyze(brief["answers"])
+    await db.set_brief_proposal(brief_id, proposal)
+    return RedirectResponse(url=f"/brief-center/{brief_id}?saved=proposed", status_code=303)
+
+
+@app.post("/brief-center/{brief_id}/apply")
+async def brief_apply_route(request: Request, brief_id: str,
+                            session: auth.Session = Depends(require_session),
+                            csrf_token: str = Form(""), sections: list[str] = Form(default=[])):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    brief = await db.get_tenant_brief(brief_id)
+    if not brief or not brief.get("proposal"):
+        return RedirectResponse(url=f"/brief-center/{brief_id}?err=no_proposal", status_code=303)
+    res = await brief_apply.apply_proposal(brief["tenant_id"], brief["proposal"], sections,
+                                           actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    await db.mark_brief_applied(brief_id, {"sections": res["sections"], "errors": res["errors"]},
+                                actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    flag = "applied" if not res["errors"] else "applied_partial"
+    return RedirectResponse(url=f"/brief-center/{brief_id}?saved={flag}", status_code=303)
 
 
 # ---- /usage — «Расход»: лента списаний ИИ из кошелька (Wave 3, ТЗ §6) ------- #

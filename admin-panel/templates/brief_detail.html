@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Бриф — {{ brief.tenant_name }}{% endblock %}
+{% block body_class %}page-brief-detail{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Бриф: {{ brief.tenant_name|e }}</h1>
+  <p class="page-head__hint mono muted">{{ brief.tenant_slug|e }}</p>
+</div>
+
+{% if saved == 'created' %}{{ flash('Ссылка создана.', 'ok') }}{% endif %}
+{% if saved == 'proposed' %}{{ flash('Черновик собран оркестратором — проверьте перед применением.', 'ok') }}{% endif %}
+{% if saved == 'applied' %}{{ flash('Черновик применён без ошибок.', 'ok') }}{% endif %}
+{% if saved == 'applied_partial' %}{{ flash('Черновик применён частично — см. ошибки ниже.', 'error') }}{% endif %}
+{% if err == 'no_answers' %}{{ flash('У брифа ещё нет ответов клиента — оркестратор запускать рано.', 'error') }}{% endif %}
+{% if err == 'no_proposal' %}{{ flash('Сначала соберите черновик («Собрать черновик»).', 'error') }}{% endif %}
+
+<section class="section" aria-label="Ссылка на бриф">
+  <h2 class="section__title section__title--lg">Персональная ссылка</h2>
+  {% if link %}
+  <p class="hint hint--block">Отправьте клиенту эту ссылку — по ней он откроет бриф-лендинг в боте и ответит на вопросы.</p>
+  <p class="mono" style="word-break:break-all">{{ link }}</p>
+  {% else %}
+  <p class="hint hint--block muted">Публичный адрес бота ещё не опубликован — ссылка появится, как только бот запустится.</p>
+  {% endif %}
+  <p>
+    Статус:
+    {% if brief.status == 'pending' %}<span class="badge">ожидает ответов</span>
+    {% elif brief.status == 'submitted' %}<span class="badge badge--auto">ответы получены</span>
+    {% elif brief.status == 'proposed' %}<span class="badge">черновик готов</span>
+    {% elif brief.status == 'applied' %}<span class="badge badge--auto">применён</span>
+    {% else %}<span class="muted">{{ brief.status|e }}</span>{% endif %}
+  </p>
+</section>
+
+<section class="section" aria-label="Ответы клиента">
+  <h2 class="section__title section__title--lg">Ответы клиента</h2>
+  {% if brief.answers %}
+    {% for sec in sections %}
+      {% set has_any = sec.questions | selectattr('key', 'in', brief.answers.keys()) | list %}
+      {% if has_any %}
+      <h3 class="section__title">{{ sec.title|e }}</h3>
+      <ul class="kv-list">
+        {% for q in sec.questions %}
+          {% if brief.answers.get(q.key) %}
+          {% set v = brief.answers.get(q.key) %}
+          <li>{{ q.label|e }}:
+            <b>{% if v is iterable and v is not string %}{{ v|join(', ')|e }}{% else %}{{ v|e }}{% endif %}</b>
+          </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+      {% endif %}
+    {% endfor %}
+  {% else %}
+  <div class="empty">
+    <p class="empty__title">Ответов пока нет</p>
+    <p class="empty__text">Клиент ещё не прошёл бриф по ссылке выше.</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if brief.answers %}
+<section class="section" aria-label="Оркестратор">
+  <h2 class="section__title section__title--lg">Черновик настройки</h2>
+  <form method="post" action="/brief-center/{{ brief.id }}/orchestrate">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn btn--dark" type="submit">{% if brief.proposal %}Пересобрать черновик{% else %}Собрать черновик{% endif %}</button>
+  </form>
+</section>
+{% endif %}
+
+{% if brief.proposal %}
+<section class="section" aria-label="Диф-предпросмотр">
+  <h2 class="section__title section__title--lg">Диф-предпросмотр</h2>
+
+  {% set funnel = brief.proposal.settings.funnel if brief.proposal.settings else {} %}
+  {% if funnel %}
+  <h3 class="section__title">Воронка/оператор</h3>
+  <ul class="kv-list">
+    {% for k, v in funnel.items() %}
+    {% if v %}<li>{{ k|e }}: <b>{{ v|e }}</b></li>{% endif %}
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if brief.proposal.products %}
+  <h3 class="section__title">Продукты ({{ brief.proposal.products|length }})</h3>
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead><tr><th>Название</th><th>Цена</th><th>Описание</th></tr></thead>
+      <tbody>
+        {% for p in brief.proposal.products %}
+        <tr>
+          <td>{{ p.name|e }}</td>
+          <td>{% if p.price %}{{ p.price }} {{ p.currency|e }}{% else %}<span class="muted">не указана</span>{% endif %}</td>
+          <td>{{ p.caption|e }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% set triggers = brief.proposal.settings.triggers if brief.proposal.settings else [] %}
+  {% if triggers %}
+  <h3 class="section__title">Триггеры/анонсы</h3>
+  <ul>
+    {% for tr in triggers %}<li>{{ tr.kind|e }}: {{ tr.value|e }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% set channels = brief.proposal.settings.channels if brief.proposal.settings else {} %}
+  {% if channels %}
+  <h3 class="section__title">Каналы</h3>
+  <ul class="kv-list">
+    {% for source, slug in channels.items() %}<li>{{ source|e }}: <b>{{ slug|e }}</b></li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% set persona = brief.proposal.settings.persona if brief.proposal.settings else {} %}
+  {% if persona %}
+  <h3 class="section__title">Персона (рекомендация — донастройте вручную в «ИИ-агенты»)</h3>
+  <ul class="kv-list">
+    {% for k, v in persona.items() %}{% if v %}<li>{{ k|e }}: <b>{{ v|e }}</b></li>{% endif %}{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if brief.proposal.recommendations %}
+  <h3 class="section__title">Рекомендации</h3>
+  <ul>
+    {% for r in brief.proposal.recommendations %}
+    <li><b>{{ r.title|e }}</b> — {{ r.why|e }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if brief.proposal.gaps %}
+  <h3 class="section__title">Пробелы (не хватает данных)</h3>
+  <ul>
+    {% for g in brief.proposal.gaps %}<li>{{ g.question|e }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if brief.applied %}
+  <h3 class="section__title">Последнее применение</h3>
+  <p>Секции: {{ brief.applied.sections|join(', ')|e if brief.applied.sections else '—' }}</p>
+  {% if brief.applied.errors %}
+  <p class="muted">Ошибки: {{ brief.applied.errors|join('; ')|e }}</p>
+  {% endif %}
+  {% endif %}
+
+  <h3 class="section__title">Применить</h3>
+  <p class="hint hint--block">Применение зовёт те же сеттеры, что и ручные формы — можно потом донастроить в соответствующем разделе панели. Персона НЕ применяется автоматически (см. выше) — донастройте её вручную.</p>
+  <form method="post" action="/brief-center/{{ brief.id }}/apply">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><input type="checkbox" name="sections" value="funnel" checked> Воронка/оператор</label>
+    <label><input type="checkbox" name="sections" value="products" checked> Продукты</label>
+    <label><input type="checkbox" name="sections" value="triggers"> Триггеры/анонсы</label>
+    <label><input type="checkbox" name="sections" value="channels"> Каналы</label>
+    <div>
+      <button class="btn btn--primary" type="submit">Применить выбранное</button>
+    </div>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

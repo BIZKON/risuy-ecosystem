@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Бриф-центр{% endblock %}
+{% block body_class %}page-brief-center{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Бриф-центр</h1>
+  <p class="page-head__hint">Создайте персональную ссылку на онбординг-бриф для клиента, дождитесь ответов, соберите черновик настройки ИИ-сотрудника и примените его посекционно после проверки.</p>
+</div>
+
+{% if saved == 'created' %}{{ flash('Ссылка на бриф создана.', 'ok') }}{% endif %}
+{% if err == 'no_tenant' %}{{ flash('Выберите клиента для создания ссылки.', 'error') }}{% endif %}
+
+{% if briefs %}
+<div class="table-wrap">
+  <table class="table table--zebra">
+    <thead>
+      <tr><th>Клиент</th><th>Статус</th><th>Создан</th><th>Ответы получены</th><th>Применён</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for b in briefs %}
+      <tr>
+        <td>{{ b.tenant_name|e }} <span class="mono muted">{{ b.tenant_slug|e }}</span></td>
+        <td>
+          {% if b.status == 'pending' %}<span class="badge">ожидает ответов</span>
+          {% elif b.status == 'submitted' %}<span class="badge badge--auto">ответы получены</span>
+          {% elif b.status == 'proposed' %}<span class="badge">черновик готов</span>
+          {% elif b.status == 'applied' %}<span class="badge badge--auto">применён</span>
+          {% else %}<span class="muted">{{ b.status|e }}</span>{% endif %}
+        </td>
+        <td>{{ b.created_at.strftime('%d.%m.%Y %H:%M') if b.created_at else '—' }}</td>
+        <td>{{ b.submitted_at.strftime('%d.%m.%Y %H:%M') if b.submitted_at else '—' }}</td>
+        <td>{{ b.applied_at.strftime('%d.%m.%Y %H:%M') if b.applied_at else '—' }}</td>
+        <td><a class="btn btn--soft" href="/brief-center/{{ b.id }}">Открыть</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <p class="empty__title">Брифов пока нет</p>
+  <p class="empty__text">Создайте первую ссылку формой ниже.</p>
+</div>
+{% endif %}
+
+<section class="section" aria-label="Создать ссылку на бриф">
+  <h2 class="section__title section__title--lg">Создать ссылку на бриф</h2>
+  <p class="hint hint--block">Выберите клиента — для него сгенерируется персональная ссылка на бриф-лендинг в боте. Ссылку отправьте клиенту любым удобным каналом.</p>
+  <form method="post" action="/brief-center/create" class="inline-form" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Клиент</span>
+      <select class="field__input" name="tenant_id" required>
+        <option value="">— выберите клиента —</option>
+        {% for t in tenants %}
+        <option value="{{ t.id }}">{{ t.name|e }} ({{ t.slug|e }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn btn--dark" type="submit">Создать ссылку</button>
+  </form>
+  {% if not base_url %}
+  <p class="hint hint--block muted">Публичный адрес бота ещё не опубликован — ссылка появится на странице брифа, как только бот запустится.</p>
+  {% endif %}
+</section>
+{% endblock %}
