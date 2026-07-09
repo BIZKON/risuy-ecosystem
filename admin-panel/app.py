@@ -27,7 +27,7 @@ import uuid
 import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from math import ceil
 from urllib.parse import urlencode
 
