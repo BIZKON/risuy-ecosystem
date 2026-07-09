@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "admin-panel"))
 os.environ.setdefault("DATABASE_URL", "postgresql://x/y")
-os.environ.setdefault("SESSION_SECRET", "smoke-secret")
+os.environ.setdefault("SESSION_SECRET", "smoke-secret-padding-0123456789abcdef")
 os.environ.setdefault("ADMIN_USERNAME", "smoke")
 os.environ.setdefault("ADMIN_PASSWORD_HASH", "$argon2id$v=19$m=65536,t=3,p=4$c21va2U$c21va2U")
 

@@ -3,9 +3,12 @@
 Вызывает ТЕ ЖЕ db-сеттеры, что и ручные формы (единая валидация). Каждая секция —
 независимо; ошибка секции не рушит остальные. Перед вызовами — set_active_tenant(tid).
 
-Персона в v1 НЕ авто-применяется (нет однозначного сеттера «сделать активной» без риска
-выдумки) — proposal.settings.persona показывается в дифе как рекомендация, донастройка
-руками в разделе «ИИ-агенты».
+Персона и триггеры/анонсы в v1 НЕ авто-применяются — показываются в дифе как рекомендация:
+- персона: нет однозначного сеттера «сделать активной» без риска выдумки → донастройка
+  руками в разделе «ИИ-агенты»;
+- триггеры: brief-«анонсы» проактивны, а tenant_triggers моделирует реактивные
+  стоп-слова/интенты с ОБЯЗАТЕЛЬНЫМ чатом уведомлений (в брифе его нет) → настройка
+  руками в разделе «Триггеры».
 """
 from __future__ import annotations
 
@@ -113,22 +116,9 @@ async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,
         if n:
             done.append("products")
 
-    if "triggers" in sections:
-        try:
-            n = 0
-            for tr in settings.get("triggers") or []:
-                kind = str(tr.get("kind") or "")
-                val = str(tr.get("value") or "")
-                if kind == "stopword" and val:
-                    await db.create_tenant_trigger(
-                        tenant_id, type_="stopword", action="notify", stopwords=[val],
-                        intent_desc="", msg_count=None, notify_chat_id="", notify_topic_id=None,
-                        reply_text="", actor=actor, ip=ip, user_agent=user_agent)
-                    n += 1
-            if n:
-                done.append("triggers")
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"triggers: {e}")
+    # Триггеры/анонсы НЕ авто-применяются (см. докстринг модуля): brief-«анонсы»
+    # проактивны, а tenant_triggers требует реактивный тип + чат уведомлений, которого
+    # в брифе нет. Показываются в дифе (brief_detail.html) как рекомендация.
 
     if "channels" in sections:
         try:

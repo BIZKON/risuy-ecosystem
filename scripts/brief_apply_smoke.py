@@ -14,9 +14,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "admin-panel"))
 os.environ.setdefault("DATABASE_URL", "postgresql://x/y")
-os.environ.setdefault("SESSION_SECRET", "smoke-secret")
+os.environ.setdefault("SESSION_SECRET", "smoke-secret-padding-0123456789abcdef")
 os.environ.setdefault("ADMIN_USERNAME", "smoke")
 os.environ.setdefault("ADMIN_PASSWORD_HASH", "$argon2id$v=19$m=65536,t=3,p=4$c21va2U$c21va2U")
+
+# .venv-smoke без starlette; brief_apply → security импортируется на уровне модуля.
+# Стабим минимально (реальный security.validate_target_url — чистая функция — работает).
+import types as _types  # noqa: E402
+
+for _name in ("starlette", "starlette.middleware", "starlette.middleware.base",
+              "starlette.requests", "starlette.responses"):
+    sys.modules.setdefault(_name, _types.ModuleType(_name))
+sys.modules["starlette.middleware.base"].BaseHTTPMiddleware = type("BaseHTTPMiddleware", (), {})
+sys.modules["starlette.requests"].Request = type("Request", (), {})
+sys.modules["starlette.responses"].JSONResponse = type("JSONResponse", (), {})
+sys.modules["starlette.responses"].Response = type("Response", (), {})
 
 import asyncpg  # noqa: E402
 import db  # noqa: E402  (admin-panel/db.py)
@@ -68,15 +80,16 @@ async def main() -> None:
             "recommendations": [{"title": "Проверьте черновик", "why": "собрано автоматически"}],
             "gaps": []}
 
-        print("1. apply секций funnel+products+triggers+channels:")
+        print("1. apply funnel+products+channels (triggers запрошен, но НЕ авто-применяется):")
         res = await brief_apply.apply_proposal(
             ta, proposal, ["funnel", "products", "triggers", "channels"],
             actor="smoke", ip=None, user_agent=None)
         check("нет ошибок применения", not res.get("errors"), str(res.get("errors")))
-        check("секции отмечены", set(res["sections"]) >= {"funnel", "products", "triggers", "channels"},
+        check("применены funnel+products+channels", set(res["sections"]) == {"funnel", "products", "channels"},
               str(res.get("sections")))
+        check("triggers НЕ в применённых секциях", "triggers" not in res["sections"], str(res.get("sections")))
 
-        print("2. funnel/products/triggers/channels записаны в тенанта А:")
+        print("2. funnel/products/channels записаны в тенанта А; triggers НЕ создан:")
         db.set_active_tenant(ta)
         async with db.pool.acquire() as c:
             await c.execute("select set_config('app.tenant_id', $1, true)", str(ta))
@@ -88,7 +101,7 @@ async def main() -> None:
                 "select value from tenant_settings where tenant_id=$1 and key='agent_for_channel__telegram'", ta)
         check("company_name сохранён", cn == "A-Компания", f"cn={cn}")
         check("продукт создан", nprod == 1, f"n={nprod}")
-        check("триггер создан", ntrig == 1, f"n={ntrig}")
+        check("триггер НЕ авто-создан (0)", ntrig == 0, f"n={ntrig}")
         check("канал привязан", chan == "a-agent", f"chan={chan}")
 
         print("3. персона НЕ применяется автоматически (нет секции в apply):")
@@ -134,8 +147,8 @@ async def main() -> None:
             cn_after_bad = await c.fetchval(
                 "select value from tenant_settings where tenant_id=$1 and key='operator_inn'", ta)
         check("второй продукт создан (products не зависит от funnel)", nprod2 == 2, f"n={nprod2}")
-        check("невалидный ИНН НЕ записан в tenant_settings",
-              cn_after_bad in (None, ""), f"operator_inn={cn_after_bad}")
+        check("невалидный ИНН НЕ записан (остался прежний валидный от #1)",
+              cn_after_bad == "770000000000", f"operator_inn={cn_after_bad}")
 
         print("5b. позитивный кейс: валидные реквизиты funnel (без funnel_enabled) применяются:")
         good_funnel_proposal = {
