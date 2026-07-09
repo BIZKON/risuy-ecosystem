@@ -12,35 +12,11 @@
 """
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
-
 import config
 import db
 import security
 from shared.leadmagnet import _is_email, _is_inn
-
-
-def _parse_price(raw) -> tuple[Decimal | None, bool]:
-    """Зеркало admin-panel/app.py:_parse_price — та же валидация цены, что у ручной формы
-    product_save. raw может быть числом/строкой из JSON черновика. Пусто/None → (None, True)
-    — цена опциональна (бесплатный продукт). Отрицательную, слишком большую (numeric(12,2):
-    целая часть ≤ 10 цифр) и непарсящуюся строку отвергаем (ok=False)."""
-    if raw is None:
-        return None, True
-    s = str(raw).strip()
-    if not s:
-        return None, True
-    s = s.replace(" ", "").replace(" ", "").replace(",", ".")
-    try:
-        val = Decimal(s)
-    except (InvalidOperation, ValueError):
-        return None, False
-    if val < 0:
-        return None, False
-    val = val.quantize(Decimal("0.01"))
-    if val >= Decimal("10000000000"):
-        return None, False
-    return val, True
+from shared.money import parse_price as _parse_price
 
 
 async def apply_proposal(tenant_id, proposal: dict, sections: list[str], *,

@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 
 MICRO = 1_000_000
 
@@ -33,3 +33,25 @@ def ceil_mul(cost_micro: int, multiplier) -> int:
     """charged = ceil(cost × multiplier) в µRUB. Округление ВСЕГДА вверх."""
     return int((Decimal(cost_micro) * Decimal(str(multiplier)))
                .to_integral_value(rounding=ROUND_CEILING))
+
+
+def parse_price(raw) -> tuple[Decimal | None, bool]:
+    """Цена (строка формы / число из JSON) → (Decimal | None, ok). None/пусто → (None, True)
+    — цена опциональна. Запятая = десятичный разделитель, пробелы-разделители тысяч убираются.
+    Отрицательную/нечисловую → (None, False). numeric(12,2): целая часть ≤ 10 цифр."""
+    if raw is None:
+        return None, True
+    s = str(raw).strip()
+    if not s:
+        return None, True
+    s = s.replace(" ", "").replace(" ", "").replace(",", ".")
+    try:
+        val = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None, False
+    if val < 0:
+        return None, False
+    val = val.quantize(Decimal("0.01"))
+    if val >= Decimal("10000000000"):
+        return None, False
+    return val, True

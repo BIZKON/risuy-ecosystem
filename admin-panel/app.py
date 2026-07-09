@@ -56,6 +56,7 @@ import yookassa
 from brief_orchestrator import analyze as _brief_analyze
 
 from shared import anon, brief_schema, club_analytics, leadmagnet, money, nurture, vault
+from shared.money import parse_price as _parse_price
 
 
 # --------------------------------------------------------------------------- #
@@ -2203,29 +2204,6 @@ def _fmt_price(price, currency: str) -> str:
     int_str = f"{whole:,}".replace(",", " ")  # узкий неразрывный пробел между разрядами
     body = int_str if cents == 0 else f"{int_str},{cents:02d}"
     return f"{body} {sign}"
-
-
-def _parse_price(raw: str) -> tuple[Decimal | None, bool]:
-    """Строка цены из формы → (Decimal | None, ok). Пусто → (None, True) — цена опц.
-
-    Принимаем запятую как десятичный разделитель и пробелы-разделители тысяч. Отрицательную
-    и нечисловую отвергаем (ok=False). numeric(12,2): до 10 цифр до точки, 2 после.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return None, True
-    s = s.replace(" ", "").replace(" ", "").replace(",", ".")
-    try:
-        val = Decimal(s)
-    except (InvalidOperation, ValueError):
-        return None, False
-    if val < 0:
-        return None, False
-    val = val.quantize(Decimal("0.01"))
-    # numeric(12,2): целая часть ≤ 10 цифр (12 - 2). Иначе БД бы отвергла — режем заранее.
-    if val >= Decimal("10000000000"):
-        return None, False
-    return val, True
 
 
 async def _read_product_file(request: Request, upload) -> tuple[dict | None, str | None]:
