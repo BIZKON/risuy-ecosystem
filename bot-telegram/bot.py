@@ -10,7 +10,10 @@ Timeweb App Platform (проксирует 80/443 на порт контейне
   • retention.run  — обезличивание ПДн по отзыву согласия + TTL переписки (152-ФЗ).
 """
 import asyncio
+import html as _html
+import json as _json
 import logging
+import os
 import re
 import time
 from urllib.parse import urlparse
@@ -377,6 +380,120 @@ def _club_landing_html(operator_name: str, deeplink: str, policy_url: str) -> st
     )
 
 
+# ── Бриф-лендинг тенанта: GET/POST /brief/{token} ────────────────────────────
+# Публичный, без авторизации: ссылку тенант получает лично (в ЛС от менеджера/бота).
+# Схема вопросов — shared/brief_schema.py (ЕДИНЫЙ источник истины, читает и панель).
+_BRIEF_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+_BRIEF_NOTICE = (
+    "Вы передаёте бизнес-данные оператору сервиса «ИИ-Агент Про». "
+    "Пожалуйста, НЕ вставляйте персональные данные ваших клиентов (ФИО, телефоны, "
+    "списки контактов) — опишите портрет аудитории, а не конкретных людей."
+)
+
+
+def _brief_schema_payload() -> dict:
+    """Схема в форме, удобной для JS фронта: секции как есть + плоский список вопросов
+    (для ветвления show_if, которое ходит по вопросам вне секций)."""
+    from shared import brief_schema
+    questions = []
+    for sec in brief_schema.SECTIONS:
+        for q in sec["questions"]:
+            questions.append(q)
+    return {"sections": brief_schema.SECTIONS, "questions": questions}
+
+
+def _brief_html(*, title: str, company: str, action: str) -> str:
+    """Рендер самодостаточной страницы брифа из шаблона + инъекция схемы."""
+    tmpl_path = os.path.join(os.path.dirname(__file__), "templates", "brief.html")
+    with open(tmpl_path, encoding="utf-8") as f:
+        tmpl = f.read()
+    schema_json = _json.dumps(_brief_schema_payload(), ensure_ascii=False)
+    return (tmpl
+            .replace("{{TITLE}}", _html.escape(title))
+            .replace("{{COMPANY}}", _html.escape(company))
+            .replace("{{ACTION}}", _html.escape(action))
+            .replace("{{NOTICE}}", _html.escape(_BRIEF_NOTICE))
+            .replace("{{SCHEMA_JSON}}", schema_json)
+            .replace("{{ANSWERS_JSON}}", "{}"))
+
+
+def _brief_parse(pairs) -> dict:
+    """Из пар (name, value) формы → {question_key: value|list}. name = q_<key>.
+    multichoice копится в список (несколько чекбоксов с одинаковым name)."""
+    from shared import brief_schema
+    idx = brief_schema.question_index()
+    out: dict = {}
+    for name, value in pairs:
+        if not name.startswith("q_"):
+            continue
+        key = name[2:]
+        q = idx.get(key)
+        if not q:
+            continue
+        if q["type"] == "multichoice":
+            out.setdefault(key, []).append(value)
+        else:
+            out[key] = value
+    return out
+
+
+async def _brief_landing(request: web.Request) -> web.StreamResponse:
+    """Публичная страница брифа: GET /brief/{token}, без авторизации.
+    404 — токен неизвестен/истёк; «уже отправлен» — бриф уже в статусе submitted."""
+    token = request.match_info.get("token", "")
+    if not _BRIEF_TOKEN_RE.match(token):
+        return web.Response(status=404, text="Ссылка недействительна")
+    try:
+        data = await db.get_brief_by_token(token)
+    except Exception:  # noqa: BLE001
+        logger.warning("brief landing: ошибка чтения токена %s…", token[:6], exc_info=True)
+        data = None
+    if data is None or data.get("expired"):
+        return web.Response(status=404, text="Ссылка недействительна или истекла")
+    if data["status"] != "pending":
+        return web.Response(text="Бриф уже получен. Спасибо!", content_type="text/html", charset="utf-8")
+    html = _brief_html(title="Бриф — ИИ-Агент Про",
+                        company=data.get("tenant_name") or "вашей компании",
+                        action=f"/brief/{token}")
+    resp = web.Response(text=html, content_type="text/html", charset="utf-8")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
+async def _brief_submit(request: web.Request) -> web.StreamResponse:
+    """Приём ответов: POST /brief/{token}. Валидация схемой + per-IP rate-limit (флуд/боты)."""
+    from shared import brief_schema
+    token = request.match_info.get("token", "")
+    if not _BRIEF_TOKEN_RE.match(token):
+        return web.Response(status=404, text="Ссылка недействительна")
+    ip = _client_ip(request)
+    if not _rl_allow_chat(ip):
+        return web.Response(status=429, text="Слишком много попыток, попробуйте позже")
+    post = await request.post()
+    answers = _brief_parse(list(post.items()))
+    errs = brief_schema.validate_answers(answers)
+    if errs:
+        # Простая страница с ошибками + возврат назад (правки — заново открыть ссылку).
+        return web.Response(
+            text="<p>Проверьте обязательные поля:</p><ul>"
+                 + "".join(f"<li>{_html.escape(e)}</li>" for e in errs)
+                 + '</ul><a href="javascript:history.back()">Назад</a>',
+            content_type="text/html", charset="utf-8", status=400)
+    answers["version"] = brief_schema.BRIEF_VERSION
+    try:
+        res = await db.submit_brief(token, answers)
+    except Exception:  # noqa: BLE001
+        logger.warning("brief submit: ошибка записи токена %s…", token[:6], exc_info=True)
+        return web.Response(status=500, text="Ошибка сохранения, попробуйте ещё раз")
+    if res == "ok":
+        return web.Response(text="<h1>Спасибо!</h1><p>Бриф получен. Мы настроим вашего "
+                                  "ИИ-сотрудника и свяжемся с вами.</p>",
+                             content_type="text/html", charset="utf-8")
+    return web.Response(text="Бриф уже был отправлен ранее.", content_type="text/html", charset="utf-8")
+
+
 async def _legal_page(request: web.Request) -> web.StreamResponse:
     """Публичная юр-страница тенанта: GET /legal/{slug}/{doc_type} (privacy|consent), без авторизации.
     Генерит документ из реквизитов оператора (tenant_settings по слагу) — единый источник
@@ -445,6 +562,8 @@ async def _start_health() -> web.AppRunner:
     app.router.add_get("/r/{token}", _redirect)  # публичный трекинг-редирект (§6.2)
     app.router.add_get("/legal/{slug}/{doc_type}", _legal_page)  # публичные юр-страницы тенанта (152-ФЗ)
     app.router.add_get("/club/{slug}", _club_landing)  # публичный лендинг-приглашение в клуб тенанта
+    app.router.add_get("/brief/{token}", _brief_landing)   # публичный бриф-лендинг тенанта
+    app.router.add_post("/brief/{token}", _brief_submit)   # приём ответов брифа
     app.router.add_post("/api/demo-chat", _demo_chat)     # веб-чат демо-Лии для сайта
     app.router.add_options("/api/demo-chat", _demo_chat)  # CORS preflight
     runner = web.AppRunner(app)

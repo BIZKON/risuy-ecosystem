@@ -1,0 +1,55 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root{--accent:#E63946}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;
+       background:#faf8f5;color:#1f2937;line-height:1.5}
+  .wrap{max-width:640px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:22px} .sec{background:#fff;border:1px solid #e5e2da;border-radius:14px;
+       padding:16px;margin:16px 0} .sec h2{font-size:16px;margin:0 0 12px}
+  label{display:block;margin:12px 0} label>span{display:block;font-weight:600;margin-bottom:6px}
+  input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cfcabc;
+       border-radius:10px;font:inherit} textarea{min-height:80px}
+  .notice{font-size:13px;color:#6b7280;background:#fff;border:1px dashed #cfcabc;
+       border-radius:12px;padding:12px;margin:16px 0}
+  .btn{display:block;width:100%;padding:14px;background:var(--accent);color:#fff;border:0;
+       border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;margin-top:16px}
+  .req{color:var(--accent)}
+</style></head><body><div class="wrap">
+  <h1>{{TITLE}}</h1>
+  <p>Бриф для <b>{{COMPANY}}</b> — чтобы настроить вашего ИИ-сотрудника точно под ваш бизнес.</p>
+  <div class="notice">{{NOTICE}}</div>
+  <form method="post" action="{{ACTION}}" id="brief-form"><div id="sections"></div>
+    <button class="btn" type="submit">Отправить бриф</button></form>
+  <script id="brief-schema" type="application/json">{{SCHEMA_JSON}}</script>
+  <script>
+    const schema = JSON.parse(document.getElementById('brief-schema').textContent);
+    const root = document.getElementById('sections');
+    function field(q){
+      const wrap=document.createElement('label'); wrap.dataset.key=q.key;
+      const lab=document.createElement('span');
+      lab.innerHTML = q.label + (q.required?' <span class="req">*</span>':'');
+      wrap.appendChild(lab); let el;
+      if(q.type==='textarea'){el=document.createElement('textarea');}
+      else if(q.type==='choice'){el=document.createElement('select');
+        const empty=document.createElement('option');empty.value='';empty.textContent='— выберите —';el.appendChild(empty);
+        (q.options||[]).forEach(o=>{const op=document.createElement('option');op.value=o;op.textContent=o;el.appendChild(op);});}
+      else if(q.type==='multichoice'){el=document.createElement('div');
+        (q.options||[]).forEach(o=>{const l=document.createElement('label');l.style.fontWeight='400';
+          l.innerHTML='<input type="checkbox" name="q_'+q.key+'" value="'+o+'" style="width:auto"> '+o;el.appendChild(l);});
+        wrap.appendChild(el); return wrap;}
+      else {el=document.createElement('input');el.type='text';}
+      el.name='q_'+q.key; if(q.max)el.maxLength=q.max; wrap.appendChild(el); return wrap;
+    }
+    schema.sections.forEach(sec=>{const box=document.createElement('div');box.className='sec';
+      const h=document.createElement('h2');h.textContent=sec.title;box.appendChild(h);
+      sec.questions.forEach(q=>box.appendChild(field(q)));root.appendChild(box);});
+    // ветвление show_if
+    function applyBranch(){schema.questions.forEach(q=>{if(!q.show_if)return;
+      const src=document.querySelector('[name="q_'+q.show_if.q+'"]');
+      const cur=src?src.value:''; const box=document.querySelector('label[data-key="'+q.key+'"]');
+      if(box)box.style.display = q.show_if.in.includes(cur)?'':'none';});}
+    document.getElementById('brief-form').addEventListener('input',applyBranch); applyBranch();
+  </script>
+</div></body></html>
