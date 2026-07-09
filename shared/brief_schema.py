@@ -131,7 +131,7 @@ def visible_questions(answers: dict) -> list[dict]:
 def validate_answers(answers: dict) -> list[str]:
     """Проверка ответов по схеме. Возвращает список ошибок (пусто = валидно).
 
-    Ловит: пропущенные required (видимые), неизвестные варианты choice,
+    Ловит: пропущенные required (видимые), неизвестные варианты choice/multichoice,
     превышение max по длине текста.
     """
     errs: list[str] = []
@@ -139,11 +139,38 @@ def validate_answers(answers: dict) -> list[str]:
     for key, q in idx.items():
         visible = _is_visible(q, answers)
         raw = answers.get(key)
-        val = "" if raw is None else str(raw).strip()
-        if q.get("required") and visible and not val:
-            errs.append(f"{key}: обязательный вопрос не заполнен")
-        if val and q["type"] == "choice" and q.get("options") and val not in q["options"]:
-            errs.append(f"{key}: недопустимый вариант «{val}»")
-        if val and q.get("max") and len(val) > int(q["max"]):
-            errs.append(f"{key}: превышена длина ({len(val)} > {q['max']})")
+
+        # Обработка multichoice: нормализовать в список
+        if q["type"] == "multichoice":
+            if raw is None:
+                choices = []
+            elif isinstance(raw, list):
+                choices = raw
+            else:
+                # Если передан одиночный элемент, обернуть в список
+                choices = [raw] if raw else []
+
+            # Проверка: required и видимый → список не должен быть пустым
+            if q.get("required") and visible and not choices:
+                errs.append(f"{key}: обязательный вопрос не заполнен")
+
+            # Проверка: каждый выбранный элемент должен быть в options
+            if choices and q.get("options"):
+                for choice in choices:
+                    choice_str = str(choice).strip() if choice is not None else ""
+                    if choice_str and choice_str not in q["options"]:
+                        errs.append(f"{key}: недопустимый вариант «{choice_str}»")
+        else:
+            # Для остальных типов: text, textarea, choice
+            val = "" if raw is None else str(raw).strip()
+
+            if q.get("required") and visible and not val:
+                errs.append(f"{key}: обязательный вопрос не заполнен")
+
+            if val and q["type"] == "choice" and q.get("options") and val not in q["options"]:
+                errs.append(f"{key}: недопустимый вариант «{val}»")
+
+            if val and q.get("max") and len(val) > int(q["max"]):
+                errs.append(f"{key}: превышена длина ({len(val)} > {q['max']})")
+
     return errs
