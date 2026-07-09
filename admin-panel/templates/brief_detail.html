@@ -16,6 +16,7 @@
 {% if saved == 'applied_partial' %}{{ flash('Черновик применён частично — см. ошибки ниже.', 'error') }}{% endif %}
 {% if err == 'no_answers' %}{{ flash('У брифа ещё нет ответов клиента — оркестратор запускать рано.', 'error') }}{% endif %}
 {% if err == 'no_proposal' %}{{ flash('Сначала соберите черновик («Собрать черновик»).', 'error') }}{% endif %}
+{% if err == 'already_applied' %}{{ flash('Черновик уже применён. Чтобы применить снова — соберите черновик заново («Собрать черновик»).', 'error') }}{% endif %}
 
 <section class="section" aria-label="Ссылка на бриф">
   <h2 class="section__title section__title--lg">Персональная ссылка</h2>

@@ -6419,6 +6419,10 @@ async def brief_apply_route(request: Request, brief_id: str,
     brief = await db.get_tenant_brief(brief_id)
     if not brief or not brief.get("proposal"):
         return RedirectResponse(url=f"/brief-center/{brief_id}?err=no_proposal", status_code=303)
+    if brief.get("status") == "applied":
+        # Идемпотентность: не применять повторно уже применённый бриф (двойной клик →
+        # дубли продуктов). Чтобы применить снова — «Собрать черновик» (status → proposed).
+        return RedirectResponse(url=f"/brief-center/{brief_id}?err=already_applied", status_code=303)
     res = await brief_apply.apply_proposal(brief["tenant_id"], brief["proposal"], sections,
                                            actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     await db.mark_brief_applied(brief_id, {"sections": res["sections"], "errors": res["errors"]},
