@@ -487,11 +487,25 @@ async def _brief_submit(request: web.Request) -> web.StreamResponse:
     except Exception:  # noqa: BLE001
         logger.warning("brief submit: ошибка записи токена %s…", token[:6], exc_info=True)
         return web.Response(status=500, text="Ошибка сохранения, попробуйте ещё раз")
+
     if res == "ok":
         return web.Response(text="<h1>Спасибо!</h1><p>Бриф получен. Мы настроим вашего "
                                   "ИИ-сотрудника и свяжемся с вами.</p>",
                              content_type="text/html", charset="utf-8")
-    return web.Response(text="Бриф уже был отправлен ранее.", content_type="text/html", charset="utf-8")
+    elif res == "already":
+        return web.Response(text="Бриф уже был отправлен ранее.",
+                             content_type="text/html", charset="utf-8")
+    elif res == "expired":
+        return web.Response(status=410,
+                             text="Ссылка истекла. Запросите новую у команды.",
+                             content_type="text/html", charset="utf-8")
+    elif res == "unknown":
+        return web.Response(status=404,
+                             text="Ссылка недействительна.",
+                             content_type="text/html", charset="utf-8")
+    return web.Response(status=400,
+                         text="Ошибка обработки брифа, попробуйте ещё раз.",
+                         content_type="text/html", charset="utf-8")
 
 
 async def _legal_page(request: web.Request) -> web.StreamResponse:
