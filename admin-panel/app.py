@@ -4794,7 +4794,7 @@ def _integrations_err_text(err: str | None) -> str | None:
 async def integrations_page(
     request: Request,
     session: auth.Session = Depends(require_session),
-    saved: int = 0,
+    saved: str = "",
     err: str | None = None,
 ):
     _require_admin(session)  # интеграции Школы (глобальный app_settings: гайд/оплата/токены) — только платформе
@@ -4821,10 +4821,12 @@ async def integrations_page(
             "pay_enabled": await db.get_online_payments_enabled(),
             "pay_panel_keys": config.SHOP_PAYMENTS_CONFIGURED,
             "pay_bot_keys": runtime.get("shop_yookassa_set", False),
+            "owner_chat_id": await db.get_owner_chat_id(),
             "csrf_token": session.csrf_token,
             "session": session,
             "active": "integrations",
-            "saved": bool(saved),
+            "saved": saved == "1",
+            "saved_owner_chat": saved == "owner_chat",
             "err": _integrations_err_text(err),
         },
     )
@@ -4847,6 +4849,24 @@ async def integrations_set_guide_url(
     if result == "bad_url":
         return RedirectResponse(url="/integrations?err=bad_url", status_code=303)
     return RedirectResponse(url="/integrations?saved=1", status_code=303)
+
+
+@app.post("/integrations/owner-chat-id")
+async def integrations_set_owner_chat_id(
+    request: Request,
+    session: auth.Session = Depends(require_session),
+    owner_chat_id: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Chat ID владельца для уведомлений платформы (новые клиенты, прохождение брифов).
+    Владелец узнаёт свой chat_id, написав боту-уведомителю /start в личку (эхо в handlers)."""
+    _require_admin(session)  # глобальный app_settings['owner_chat_id'] — только платформе
+    await _enforce_csrf(request, session, csrf_token)
+    val = owner_chat_id.strip() or None
+    await db.set_owner_chat_id_with_audit(
+        val, actor=session.actor, ip=_ip(request), user_agent=_ua(request),
+    )
+    return RedirectResponse(url="/integrations?saved=owner_chat", status_code=303)
 
 
 @app.post("/integrations/payments")

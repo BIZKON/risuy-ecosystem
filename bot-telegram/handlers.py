@@ -332,6 +332,22 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     )
 
 
+@router.message(Command("whoami", ignore_case=True))
+async def cmd_whoami(message: Message):
+    """Отдаёт пользователю его chat_id (Task 3): владелец/партнёр пишет боту /whoami,
+    копирует id и вставляет в панель («Интеграции» → «Уведомления владельца»), чтобы
+    получать platform_notify. Отдельная команда, а НЕ ветка /start — обычный /start без
+    аргумента остаётся входом воронки холодных лидов (source='other'), его не трогаем.
+    Без логики паузы/воронки: просто ответ.
+    """
+    await messaging.reply_text(
+        message,
+        f"Ваш chat_id: {message.from_user.id}\n"
+        "Вставьте его в панели (Интеграции → Уведомления владельца), чтобы получать уведомления.",
+        source="system",
+    )
+
+
 @router.message(Command("stop", ignore_case=True))
 async def cmd_stop(message: Message):
     """Отписка от рассылок и авто-касаний (152-ФЗ). Команда — обязательный fallback к

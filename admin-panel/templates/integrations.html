@@ -11,6 +11,7 @@
 </div>
 
 {% if saved %}{{ flash('Ссылка-гайд сохранена. Бот выдаст её со следующей воронки.', 'ok') }}{% endif %}
+{% if saved_owner_chat %}{{ flash('Chat ID сохранён.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 {% if not runtime.published %}{{ flash('Бот ещё не публиковал статус. После ближайшего деплоя/перезапуска здесь появятся актуальные данные (имя бота, каналы, ключи), а в «Каналах» — рабочие deep-link\'и. Статус заполнится автоматически.', 'info') }}{% endif %}
 
@@ -94,6 +95,26 @@
              placeholder="https://schoolinmotion.getcourse.ru/pl/...">
     </label>
     <p class="hint hint--block">Должна начинаться с <code class="mono">http://</code> или <code class="mono">https://</code> (до {{ guide_url_max }} символов). Пусто — снять переопределение{% if runtime.guide_url_env %} (бот вернётся к ссылке из окружения: <code class="mono">{{ runtime.guide_url_env|e }}</code>){% else %} (бот вернётся к ссылке из своего окружения){% endif %}.</p>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Сохранить</button>
+    </div>
+  </form>
+</section>
+
+{# ── Уведомления владельца в Telegram (chat_id для platform_notify) ── #}
+<section class="card" aria-label="Уведомления владельца">
+  <h2 class="card__title">Уведомления владельца в Telegram</h2>
+  <p class="card__note">Куда бот шлёт уведомления о новых клиентах и прохождении брифов. Напишите боту-уведомителю <code class="mono">/start</code> в личку — он пришлёт ваш chat_id в ответ.</p>
+
+  <form method="post" action="/integrations/owner-chat-id" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Chat ID владельца</span>
+      <input class="field__input mono" type="text" name="owner_chat_id"
+             value="{{ owner_chat_id|e if owner_chat_id else '' }}"
+             placeholder="напр. 123456789">
+    </label>
+    <p class="hint hint--block">Пусто — уведомления отключены.</p>
     <div class="form-actions">
       <button class="btn btn--dark" type="submit">Сохранить</button>
     </div>
