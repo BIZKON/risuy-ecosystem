@@ -1797,12 +1797,18 @@ async def get_brief_by_token(token: str) -> dict | None:
 
 
 async def submit_brief(token: str, answers: dict) -> str:
-    """Пишет ответы по токену. Возвращает ok|already|expired|unknown."""
+    """Пишет ответы по токену. Возвращает ok|already|expired|unknown.
+
+    Событие 2 (после успешного сабмита): ставит в очередь platform_notify уведомление
+    владельцу «{tenant_name} прошёл бриф» — best-effort, сбой не должен рушить submit.
+    """
     from datetime import datetime, timezone
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
-                "select id, status, expires_at from tenant_brief where token = $1 for update",
+                "select b.id, b.status, b.expires_at, t.name as tenant_name "
+                "from tenant_brief b join tenants t on t.id = b.tenant_id "
+                "where b.token = $1 for update",
                 token)
             if not row:
                 return "unknown"
@@ -1814,6 +1820,17 @@ async def submit_brief(token: str, answers: dict) -> str:
                 "update tenant_brief set answers = $2::jsonb, status = 'submitted', "
                 "submitted_at = now() where id = $1",
                 row["id"], json.dumps(answers, ensure_ascii=False))
+            try:
+                chat = await c.fetchval("select value from app_settings where key='owner_chat_id'")
+                if chat and chat.strip():
+                    link = (f"{config.PANEL_BASE_URL}/brief-center/{row['id']}"
+                            if config.PANEL_BASE_URL else "")
+                    txt = f"✅ {row['tenant_name']} прошёл бриф — пора собирать черновик. {link}".strip()
+                    await c.execute(
+                        "insert into platform_notify (chat_id, text) values ($1, $2)",
+                        int(chat), txt)
+            except Exception:  # noqa: BLE001 — уведомление не должно рушить submit
+                logging.getLogger(__name__).warning("brief submit notify failed", exc_info=True)
     return "ok"
 
 

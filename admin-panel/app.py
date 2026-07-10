@@ -613,6 +613,18 @@ async def _issue_session(actor: str, role: str, *, ip, ua, action: str) -> Redir
     return resp
 
 
+async def notify_owner_new_tenant(name: str) -> None:
+    """Событие 1 (новый тенант): поставить в очередь platform_notify уведомление владельцу.
+    Никогда не бросает — сбой уведомления не должен рушить создание тенанта."""
+    try:
+        chat = await db.get_owner_chat_id()
+        if chat and chat.strip():
+            await db.enqueue_platform_notify(int(chat), f"🆕 Новый клиент: {name}")
+    except Exception:  # noqa: BLE001 — уведомление не критично для потока создания
+        import logging
+        logging.getLogger("admin-panel").warning("notify_owner_new_tenant failed", exc_info=True)
+
+
 # ---- /signup/register POST (email + пароль) ------------------------------- #
 @app.post("/signup/register")
 async def signup_register(
@@ -654,6 +666,8 @@ async def signup_register(
     except asyncpg.UniqueViolationError:
         # Гонка двойного сабмита (find_identity прошёл у обоих) → не плодим, ведём на вход.
         return _signup_redirect("exists")
+    # Self-signup: имя тенанта ещё не задано владельцем — используем email.
+    await notify_owner_new_tenant(email)
     # Авто-логин в provisioning-кабинет (role='operator' своего тенанта).
     return await _issue_session(username, "operator", ip=ip, ua=ua, action="signup_login")
 
@@ -6346,6 +6360,7 @@ async def tenants_create(
     _slug, tid = await db.create_tenant_admin(
         name, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     await db.set_session_tenant(session.sid, tid)  # авто-переключение в созданный кабинет
+    await notify_owner_new_tenant(name)
     return RedirectResponse(url="/tenants?created=1", status_code=303)
 
 
@@ -6392,6 +6407,7 @@ async def brief_center_create_new(request: Request,
         company, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
     brief_id, _token = await db.create_tenant_brief(
         tid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    await notify_owner_new_tenant(company)
     return RedirectResponse(url=f"/brief-center/{brief_id}?saved=created", status_code=303)
 
 

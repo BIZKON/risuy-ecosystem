@@ -58,6 +58,7 @@ async def run(bot: Bot, interval: int | None = None) -> None:
             await _reclaim()
             await _drain_outbox_uploads(bot)  # байты вложения ответа → file_id (ДО отправки)
             await _drain_outbox(bot)
+            await _drain_platform_notify(bot)  # уведомления владельцу/партнёрам (тенант/бриф)
             await _drain_outbox_channels()    # C3: ответы оператора в VK/MAX (живой канальный бот)
             await _drain_product_uploads(bot)
             await _run_broadcasts(bot)
@@ -179,6 +180,20 @@ async def _drain_outbox(bot: Bot) -> None:
             await db.release_outbox(
                 item_id, str(e), config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS
             )
+
+
+# ── Дренаж очереди уведомлений владельцу/партнёрам (platform_notify) ───────────
+async def _drain_platform_notify(bot: Bot) -> None:
+    """Дренаж platform_notify. ⚠️ ПРИНЦИПИАЛЬНО через РАЗГОВОРНЫЙ бот (bot), НЕ через
+    notifier.get_notifier_bot(): Telegram шлёт личку только тем, кто сам НАЧАЛ диалог с ботом,
+    а владелец/партнёр стартуют именно разговорный бот через /whoami — не notifier-бот."""
+    items = await db.claim_platform_notify(config.OUTBOX_BATCH)
+    for it in items:
+        try:
+            await messaging.raw_send_text(bot, it["chat_id"], it["text"])
+            await db.mark_platform_notify_sent(it["id"])
+        except Exception as e:  # noqa: BLE001 — одно уведомление не валит остальные/воркер
+            await db.mark_platform_notify_failed(it["id"], str(e))
 
 
 # ── OUTBOX каналов VK/MAX (C3): ответ оператора через живой канальный бот ──────
