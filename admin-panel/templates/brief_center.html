@@ -13,6 +13,7 @@
 {% if saved == 'created' %}{{ flash('Ссылка на бриф создана.', 'ok') }}{% endif %}
 {% if err == 'no_tenant' %}{{ flash('Выберите клиента для создания ссылки.', 'error') }}{% endif %}
 {% if err == 'no_name' %}{{ flash('Введите название компании.', 'error') }}{% endif %}
+{% if err == 'brief_failed' %}{{ flash('Клиент создан, но бриф-ссылку создать не удалось — повторите создание брифа для него, выбрав в списке «Существующий клиент».', 'error') }}{% endif %}
 
 {% if briefs %}
 <div class="table-wrap">

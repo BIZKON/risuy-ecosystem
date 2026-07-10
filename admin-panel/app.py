@@ -6405,8 +6405,14 @@ async def brief_center_create_new(request: Request,
         return RedirectResponse(url="/brief-center?err=no_name", status_code=303)
     _slug, tid = await db.create_tenant_admin(
         company, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
-    brief_id, _token = await db.create_tenant_brief(
-        tid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    try:
+        brief_id, _token = await db.create_tenant_brief(
+            tid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    except Exception:  # noqa: BLE001 — тенант уже создан (валиден, в списке); бриф добить отдельно
+        import logging
+        logging.getLogger("admin-panel").warning(
+            "create_tenant_brief failed after tenant create", exc_info=True)
+        return RedirectResponse(url="/brief-center?err=brief_failed", status_code=303)
     await notify_owner_new_tenant(company)
     return RedirectResponse(url=f"/brief-center/{brief_id}?saved=created", status_code=303)
 

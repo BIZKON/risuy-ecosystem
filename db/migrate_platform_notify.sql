@@ -9,9 +9,12 @@ create table if not exists platform_notify (
     attempts   int    not null default 0,
     last_error text,
     created_at timestamptz not null default now(),
+    claimed_at timestamptz,                         -- когда воркер взял в 'sending' (для reclaim застрявших)
     sent_at    timestamptz,
     constraint platform_notify_status_chk check (status in ('queued','sending','sent','failed'))
 );
+-- Для уже созданной таблицы (risuy_dev) — добить колонку идемпотентно.
+alter table platform_notify add column if not exists claimed_at timestamptz;
 create index if not exists platform_notify_queued_idx on platform_notify (created_at) where status='queued';
 
 do $$ begin

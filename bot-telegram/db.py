@@ -693,7 +693,7 @@ async def enqueue_platform_notify(chat_id: int, text: str) -> int:
 async def claim_platform_notify(limit: int) -> list[dict]:
     async with pool.acquire() as c:
         rows = await c.fetch(
-            "update platform_notify set status='sending', attempts=attempts+1 "
+            "update platform_notify set status='sending', attempts=attempts+1, claimed_at=now() "
             "where id in (select id from platform_notify where status='queued' "
             "order by id limit $1 for update skip locked) "
             "returning id, chat_id, text, attempts",
@@ -707,9 +707,42 @@ async def mark_platform_notify_sent(id: int) -> None:
 
 
 async def mark_platform_notify_failed(id: int, err: str) -> None:
+    """Перманентный сбой (бот заблокирован / неверный chat_id) → терминальный 'failed', без ретрая."""
     async with pool.acquire() as c:
         await c.execute("update platform_notify set status='failed', last_error=$2 where id=$1",
                         id, (err or "")[:500])
+
+
+async def release_platform_notify(item_id: int, error: str, max_attempts: int,
+                                  max_age_hours: int) -> None:
+    """Транзиентный сбой отправки: вернуть в 'queued' для ретрая, НО с потолком (иначе вечный
+    pending) — по attempts ИЛИ по возрасту created_at → 'failed'. Зеркалит release_outbox."""
+    async with pool.acquire() as c:
+        await c.execute(
+            """
+            update platform_notify set
+                status = case
+                    when attempts >= $2 or created_at < now() - make_interval(hours => $3)
+                    then 'failed' else 'queued' end,
+                last_error = $4
+            where id = $1
+            """,
+            item_id, max_attempts, max_age_hours, (error or "")[:500],
+        )
+
+
+async def reclaim_stuck_platform_notify(after_seconds: int) -> int:
+    """Возврат застрявших 'sending' (краш/редеплой воркера между claim и mark) в 'queued'.
+    Зеркалит reclaim_stuck_outbox. Возвращает число возвращённых строк."""
+    async with pool.acquire() as c:
+        res = await c.execute(
+            """
+            update platform_notify set status = 'queued'
+            where status = 'sending' and claimed_at < now() - make_interval(secs => $1)
+            """,
+            float(after_seconds),
+        )
+    return _affected(res)
 
 
 async def release_outbox(item_id: int, error: str, max_attempts: int, max_age_hours: int) -> None:
@@ -1803,6 +1836,7 @@ async def submit_brief(token: str, answers: dict) -> str:
     владельцу «{tenant_name} прошёл бриф» — best-effort, сбой не должен рушить submit.
     """
     from datetime import datetime, timezone
+    submitted: tuple[str, str] | None = None  # (brief_id, tenant_name) для Событие 2 после коммита
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
@@ -1820,17 +1854,20 @@ async def submit_brief(token: str, answers: dict) -> str:
                 "update tenant_brief set answers = $2::jsonb, status = 'submitted', "
                 "submitted_at = now() where id = $1",
                 row["id"], json.dumps(answers, ensure_ascii=False))
-            try:
-                chat = await c.fetchval("select value from app_settings where key='owner_chat_id'")
-                if chat and chat.strip():
-                    link = (f"{config.PANEL_BASE_URL}/brief-center/{row['id']}"
-                            if config.PANEL_BASE_URL else "")
-                    txt = f"✅ {row['tenant_name']} прошёл бриф — пора собирать черновик. {link}".strip()
-                    await c.execute(
-                        "insert into platform_notify (chat_id, text) values ($1, $2)",
-                        int(chat), txt)
-            except Exception:  # noqa: BLE001 — уведомление не должно рушить submit
-                logging.getLogger(__name__).warning("brief submit notify failed", exc_info=True)
+            submitted = (str(row["id"]), row["tenant_name"])
+    # Событие 2 — ПОСЛЕ коммита сабмита и ВНЕ его транзакции (жёсткий инвариант: сбой уведомления
+    # не должен откатывать submit). Отдельное соединение через enqueue_platform_notify + try/except.
+    # Инлайн-INSERT в ту же транзакцию аборти́л бы её (aborted→COMMIT=ROLLBACK), молча теряя сабмит.
+    if submitted is not None:
+        try:
+            chat = await get_owner_chat_id()
+            if chat and chat.strip():
+                link = (f"{config.PANEL_BASE_URL}/brief-center/{submitted[0]}"
+                        if config.PANEL_BASE_URL else "")
+                txt = f"✅ {submitted[1]} прошёл бриф — пора собирать черновик. {link}".strip()
+                await enqueue_platform_notify(int(chat), txt)
+        except Exception:  # noqa: BLE001 — уведомление не должно рушить submit
+            logging.getLogger(__name__).warning("brief submit notify failed", exc_info=True)
     return "ok"
 
 

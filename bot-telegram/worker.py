@@ -71,8 +71,10 @@ async def run(bot: Bot, interval: int | None = None) -> None:
 async def _reclaim() -> None:
     n1 = await db.reclaim_stuck_outbox(config.RECLAIM_AFTER_SECONDS)
     n2 = await db.reclaim_stuck_recipients(config.RECLAIM_AFTER_SECONDS)
-    if n1 or n2:
-        logger.info("Reclaim: вернул в очередь outbox=%s recipients=%s", n1, n2)
+    n3 = await db.reclaim_stuck_platform_notify(config.RECLAIM_AFTER_SECONDS)
+    if n1 or n2 or n3:
+        logger.info("Reclaim: вернул в очередь outbox=%s recipients=%s platform_notify=%s",
+                    n1, n2, n3)
 
 
 # ── OUTBOX: однократная заливка ВЛОЖЕНИЯ операторского ответа в служебный чат ──
@@ -192,8 +194,15 @@ async def _drain_platform_notify(bot: Bot) -> None:
         try:
             await messaging.raw_send_text(bot, it["chat_id"], it["text"])
             await db.mark_platform_notify_sent(it["id"])
-        except Exception as e:  # noqa: BLE001 — одно уведомление не валит остальные/воркер
-            await db.mark_platform_notify_failed(it["id"], str(e))
+        except _PERMANENT as e:  # неверный chat_id / бот заблокирован владельцем → терминально
+            logger.info("platform_notify %s: перманентная ошибка (%s) → failed",
+                        it["id"], type(e).__name__)
+            await db.mark_platform_notify_failed(it["id"], f"{type(e).__name__}")
+        except Exception as e:  # noqa: BLE001 — транзиентная (сеть/таймаут): возврат в очередь с потолком
+            logger.warning("platform_notify %s: транзиентная ошибка %s → возврат в очередь",
+                           it["id"], e)
+            await db.release_platform_notify(
+                it["id"], str(e), config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS)
 
 
 # ── OUTBOX каналов VK/MAX (C3): ответ оператора через живой канальный бот ──────
