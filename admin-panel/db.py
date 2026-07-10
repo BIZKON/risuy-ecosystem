@@ -5184,3 +5184,29 @@ async def get_bot_public_base_url() -> str:
         base = await c.fetchval(
             "select value from app_settings where key = $1", config.RUNTIME_PUBLIC_BASE_KEY)
     return (base or "").rstrip("/")
+
+
+# ── Уведомления платформы (owner_chat_id + очередь platform_notify) ────────────
+async def get_owner_chat_id() -> str | None:
+    async with pool.acquire() as c:
+        return await c.fetchval("select value from app_settings where key=$1",
+                                config.OWNER_CHAT_ID_SETTING_KEY)
+
+
+async def set_owner_chat_id_with_audit(chat_id: str | None, *, actor: str,
+                                       ip: str | None, user_agent: str | None) -> None:
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "insert into app_settings (key, value) values ($1, $2) "
+                "on conflict (key) do update set value = excluded.value",
+                config.OWNER_CHAT_ID_SETTING_KEY, chat_id or "")
+            await _insert_audit(c, actor=actor, action="owner_chat_id_set", ip=ip,
+                                user_agent=user_agent, detail={"set": bool(chat_id)})
+
+
+async def enqueue_platform_notify(chat_id: int, text: str) -> int:
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "insert into platform_notify (chat_id, text) values ($1, $2) returning id",
+            int(chat_id), text)

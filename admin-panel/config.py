@@ -707,6 +707,10 @@ GUIDE_URL_SETTING_KEY = "guide_url"
 GUIDE_URL_MAX = 500
 LINK_HINT_SCHEMES = ("http://", "https://")   # допустимые схемы ссылки-гайда
 
+# Chat_id владельца платформы (получатель platform_notify) — тоже через app_settings,
+# по тому же паттерну, что и guide_url (панель пишет, бот читает при дренаже очереди).
+OWNER_CHAT_ID_SETTING_KEY = "owner_chat_id"
+
 # Снимок конфигурации БОТА в app_settings (бот ПИШЕТ owner-ролью на старте, панель ЧИТАЕТ).
 # У панели и бота РАЗНОЕ окружение → единственный честный канал статуса. Ключи ДОЛЖНЫ
 # совпадать с bot-telegram/db.py::_RUNTIME_STATUS_KEYS. Секретов тут нет: токен/прокси —

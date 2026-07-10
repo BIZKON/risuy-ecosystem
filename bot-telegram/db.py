@@ -677,6 +677,41 @@ async def mark_outbox_failed(item_id: int, error: str) -> None:
         )
 
 
+# ── Уведомления платформы (owner_chat_id + очередь platform_notify) ────────────
+async def get_owner_chat_id() -> str | None:
+    async with pool.acquire() as c:
+        return await c.fetchval("select value from app_settings where key=$1", "owner_chat_id")
+
+
+async def enqueue_platform_notify(chat_id: int, text: str) -> int:
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "insert into platform_notify (chat_id, text) values ($1, $2) returning id",
+            int(chat_id), text)
+
+
+async def claim_platform_notify(limit: int) -> list[dict]:
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "update platform_notify set status='sending', attempts=attempts+1 "
+            "where id in (select id from platform_notify where status='queued' "
+            "order by id limit $1 for update skip locked) "
+            "returning id, chat_id, text, attempts",
+            limit)
+    return [dict(r) for r in rows]
+
+
+async def mark_platform_notify_sent(id: int) -> None:
+    async with pool.acquire() as c:
+        await c.execute("update platform_notify set status='sent', sent_at=now() where id=$1", id)
+
+
+async def mark_platform_notify_failed(id: int, err: str) -> None:
+    async with pool.acquire() as c:
+        await c.execute("update platform_notify set status='failed', last_error=$2 where id=$1",
+                        id, (err or "")[:500])
+
+
 async def release_outbox(item_id: int, error: str, max_attempts: int, max_age_hours: int) -> None:
     """Транзиентная ошибка: вернуть в queued, НО с потолком — иначе вечный pending (§5.10).
 
