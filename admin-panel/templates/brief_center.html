@@ -12,6 +12,7 @@
 
 {% if saved == 'created' %}{{ flash('Ссылка на бриф создана.', 'ok') }}{% endif %}
 {% if err == 'no_tenant' %}{{ flash('Выберите клиента для создания ссылки.', 'error') }}{% endif %}
+{% if err == 'no_name' %}{{ flash('Введите название компании.', 'error') }}{% endif %}
 
 {% if briefs %}
 <div class="table-wrap">
@@ -65,5 +66,18 @@
   {% if not base_url %}
   <p class="hint hint--block muted">Публичный адрес бота ещё не опубликован — ссылка появится на странице брифа, как только бот запустится.</p>
   {% endif %}
+</section>
+
+<section class="section" aria-label="Новая компания">
+  <h2 class="section__title section__title--lg">Новая компания</h2>
+  <p class="hint hint--block">Клиента ещё нет в списке? Введите название компании — создадим тенанта и бриф-ссылку одним действием.</p>
+  <form method="post" action="/brief-center/create-new" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Название компании</span>
+      <input type="text" name="name" required class="field__input" placeholder="ООО «Ромашка»">
+    </label>
+    <button class="btn btn--dark" type="submit">Создать тенанта и бриф-ссылку</button>
+  </form>
 </section>
 {% endblock %}

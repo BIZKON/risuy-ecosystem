@@ -6359,6 +6359,22 @@ async def brief_center_create(request: Request, session: auth.Session = Depends(
     return RedirectResponse(url=f"/brief-center/{_id}?saved=created", status_code=303)
 
 
+@app.post("/brief-center/create-new")
+async def brief_center_create_new(request: Request,
+                                  session: auth.Session = Depends(require_session),
+                                  name: str = Form(""), csrf_token: str = Form("")):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    company = name.strip()
+    if not company:
+        return RedirectResponse(url="/brief-center?err=no_name", status_code=303)
+    _slug, tid = await db.create_tenant_admin(
+        company, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    brief_id, _token = await db.create_tenant_brief(
+        tid, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url=f"/brief-center/{brief_id}?saved=created", status_code=303)
+
+
 @app.get("/brief-center/{brief_id}", response_class=HTMLResponse)
 async def brief_detail(request: Request, brief_id: str,
                        session: auth.Session = Depends(require_session),
