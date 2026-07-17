@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Партнёры{% endblock %}
+{% block body_class %}page-partners{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Партнёры</h1>
+  <p class="page-head__hint">Заведите партнёра — получите готовую реф-ссылку. Клиент по ней в боте называет компанию, бот создаёт бриф и атрибутирует тенанта партнёру.</p>
+</div>
+
+{% if saved == 'created' %}{{ flash('Партнёр создан. Скопируйте реф-ссылку из списка.', 'ok') }}{% endif %}
+{% if saved == 'status' %}{{ flash('Статус партнёра обновлён.', 'ok') }}{% endif %}
+{% if saved == 'chat' %}{{ flash('Chat ID партнёра сохранён.', 'ok') }}{% endif %}
+{% if err == 'no_name' %}{{ flash('Введите имя партнёра.', 'error') }}{% endif %}
+
+{# ── Завести партнёра ── #}
+<section class="card" aria-label="Новый партнёр">
+  <h2 class="card__title">Добавить партнёра</h2>
+  <p class="card__note">Реф-код сгенерируется автоматически. Chat ID можно добавить сразу или позже — он нужен только для уведомлений партнёру.</p>
+  <form method="post" action="/partners/create" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-row">
+      <label class="field">
+        <span class="field__label">Имя партнёра</span>
+        <input class="field__input" type="text" name="name" maxlength="120" required placeholder="например, Иванов Иван">
+      </label>
+      <label class="field">
+        <span class="field__label">Chat ID для уведомлений <span class="field__hint">опционально</span></span>
+        <input class="field__input mono" type="text" name="tg_chat_id" placeholder="123456789">
+      </label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Создать партнёра</button>
+    </div>
+  </form>
+</section>
+
+{# ── Список партнёров ── #}
+<section class="section" aria-label="Партнёры">
+  <h2 class="section__title section__title--lg">Партнёры</h2>
+  {% if not base_url %}
+  <p class="hint hint--block muted">Публичный адрес бота ещё не опубликован — реф-ссылки появятся в списке, как только бот запустится.</p>
+  {% endif %}
+
+  {% if partners %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Партнёр</th>
+          <th scope="col">Реф-ссылка</th>
+          <th scope="col">Тенантов</th>
+          <th scope="col">Прошли бриф</th>
+          <th scope="col">Chat ID</th>
+          <th scope="col">Статус</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in partners %}
+        <tr{% if p.status != 'active' %} class="row--muted"{% endif %}>
+          <td><a href="/partners/{{ p.id }}">{{ p.name|e }}</a></td>
+          <td>
+            {% if base_url %}<code class="mono mono--break">{{ base_url }}/p/{{ p.ref_code }}</code>
+            {% else %}<span class="muted">бот не публиковал base</span>{% endif %}
+          </td>
+          <td class="num">{{ p.tenant_count }}</td>
+          <td class="num">{{ p.brief_done }}</td>
+          <td>
+            <form class="inline-form" method="post" action="/partners/{{ p.id }}/chat-id" autocomplete="off">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input class="field__input mono" type="text" name="tg_chat_id" size="14"
+                     value="{{ p.tg_chat_id|e if p.tg_chat_id else '' }}" placeholder="chat id">
+              <button class="btn btn--secondary btn--sm" type="submit">Сохранить</button>
+            </form>
+          </td>
+          <td>
+            {% if p.status == 'active' %}<span class="pill pill--ok">Активен</span>{% else %}<span class="pill pill--bad">Отключён</span>{% endif %}
+            <form class="inline-form" method="post" action="/partners/{{ p.id }}/status">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="status" value="{{ 'disabled' if p.status == 'active' else 'active' }}">
+              <button class="btn {% if p.status == 'active' %}btn--danger-ghost{% else %}btn--secondary{% endif %} btn--sm" type="submit">
+                {{ 'Отключить' if p.status == 'active' else 'Включить' }}
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Партнёров пока нет</p>
+    <p class="empty__text">Добавьте первого через форму выше.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

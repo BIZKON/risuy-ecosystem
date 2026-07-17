@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Партнёр — {{ partner.name }}{% endblock %}
+{% block body_class %}page-partner-detail{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Хлебные крошки">
+  <a href="/partners">← Все партнёры</a>
+</nav>
+
+<div class="page-head">
+  <h1 class="page-head__title">{{ partner.name|e }}</h1>
+  <p class="page-head__hint">
+    Реф-код <code class="mono">{{ partner.ref_code }}</code> ·
+    {% if partner.status == 'active' %}<span class="pill pill--ok">Активен</span>{% else %}<span class="pill pill--bad">Отключён</span>{% endif %}
+    {% if partner.tg_chat_id %} · chat id <code class="mono">{{ partner.tg_chat_id|e }}</code>{% endif %}
+  </p>
+</div>
+
+<section class="section" aria-label="Тенанты партнёра">
+  <h2 class="section__title section__title--lg">Тенанты по этой реф-ссылке</h2>
+
+  {% if tenants %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Компания</th>
+          <th scope="col">Создан</th>
+          <th scope="col">Статус брифа</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in tenants %}
+        <tr>
+          <td>{{ t.name|e }} <span class="mono muted">{{ t.slug|e }}</span></td>
+          <td class="nowrap muted">{{ t.created_at.strftime('%d.%m.%Y') if t.created_at else '—' }}</td>
+          <td>
+            {% if t.brief_status == 'pending' %}<span class="badge">ожидает ответов</span>
+            {% elif t.brief_status == 'submitted' %}<span class="badge badge--auto">ответы получены</span>
+            {% elif t.brief_status == 'proposed' %}<span class="badge">черновик готов</span>
+            {% elif t.brief_status == 'applied' %}<span class="badge badge--auto">применён</span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>{% if t.brief_id %}<a class="btn btn--soft btn--sm" href="/brief-center/{{ t.brief_id }}">Бриф</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">От этого партнёра пока нет тенантов</p>
+    <p class="empty__text">Как только клиент придёт по реф-ссылке и пройдёт бриф, он появится здесь.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

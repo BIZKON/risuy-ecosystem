@@ -6467,6 +6467,69 @@ async def brief_apply_route(request: Request, brief_id: str,
     return RedirectResponse(url=f"/brief-center/{brief_id}?saved={flag}", status_code=303)
 
 
+# --------------------------------------------------------------------------- #
+# Партнёры (Кусок C, Task 2): реестр партнёров реферальной программы — завести
+# партнёра (авто ref_code), увидеть реф-ссылку и счётчики тенантов/брифов,
+# включить/отключить, поправить chat_id для уведомлений. ТОЛЬКО платформа.
+# --------------------------------------------------------------------------- #
+
+@app.get("/partners", response_class=HTMLResponse)
+async def partners_page(request: Request, session: auth.Session = Depends(require_session),
+                        saved: str | None = None, err: str | None = None):
+    _require_admin(session)
+    partners = await db.list_partners()
+    base = await db.get_bot_public_base_url()
+    return templates.TemplateResponse(request, "partners.html", {
+        "partners": partners, "base_url": base, "saved": saved, "err": err,
+        "csrf_token": session.csrf_token, "session": session, "active": "partners"})
+
+
+@app.post("/partners/create")
+async def partners_create(request: Request, session: auth.Session = Depends(require_session),
+                          name: str = Form(""), tg_chat_id: str = Form(""), csrf_token: str = Form("")):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    if not name.strip():
+        return RedirectResponse(url="/partners?err=no_name", status_code=303)
+    await db.create_partner(name, tg_chat_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/partners?saved=created", status_code=303)
+
+
+@app.post("/partners/{partner_id}/status")
+async def partners_set_status(request: Request, partner_id: str,
+                              session: auth.Session = Depends(require_session),
+                              status: str = Form(""), csrf_token: str = Form("")):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_partner_status(partner_id, status.strip(), actor=session.actor,
+                                ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/partners?saved=status", status_code=303)
+
+
+@app.post("/partners/{partner_id}/chat-id")
+async def partners_set_chat_id(request: Request, partner_id: str,
+                               session: auth.Session = Depends(require_session),
+                               tg_chat_id: str = Form(""), csrf_token: str = Form("")):
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    await db.set_partner_chat_id(partner_id, tg_chat_id, actor=session.actor,
+                                 ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url="/partners?saved=chat", status_code=303)
+
+
+@app.get("/partners/{partner_id}", response_class=HTMLResponse)
+async def partner_detail(request: Request, partner_id: str,
+                         session: auth.Session = Depends(require_session)):
+    _require_admin(session)
+    partner = await db.get_partner(partner_id)
+    if not partner:
+        raise StarletteHTTPException(status_code=404, detail="Партнёр не найден")
+    tenants = await db.list_partner_tenants(partner_id)
+    return templates.TemplateResponse(request, "partner_detail.html", {
+        "partner": partner, "tenants": tenants,
+        "csrf_token": session.csrf_token, "session": session, "active": "partners"})
+
+
 # ---- /usage — «Расход»: лента списаний ИИ из кошелька (Wave 3, ТЗ §6) ------- #
 # Клиент видит ТОЛЬКО charged: себестоимость и множитель в контекст шаблона не
 # попадают вовсе (db.list_usage их не выбирает). Платформенная экономика — блок

@@ -48,6 +48,7 @@
 {%- elif name == 'data_protection' -%}<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
 {%- elif name == 'companies' -%}<path d="M3 21h18M6 21V7l6-4 6 4v14"/><path d="M9 9h.01M15 9h.01M9 13h.01M15 13h.01M9 17h.01M15 17h.01"/>
 {%- elif name == 'club' -%}<circle cx="9" cy="8" r="3"/><path d="M2 20a7 7 0 0 1 14 0"/><circle cx="18" cy="9" r="2.5"/><path d="M16.5 12.5a5 5 0 0 1 5.5 5"/>
+{%- elif name == 'partners' -%}<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 8 2 2 4-4"/>
 {%- elif name == 'logout' -%}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
 {%- endif -%}
 </svg>
@@ -77,7 +78,7 @@
   'keys': 'Ключи', 'tenants': 'Клиенты', 'account': 'Профиль',
   'my_agent': 'Мой ИИ-сотрудник', 'triggers': 'Триггеры', 'lead_magnet': 'Лид-магнит', 'nurture': 'Дожим',
   'data_protection': 'Защита данных', 'my_team': 'ИИ-команда', 'companies': 'Компании',
-  'club': 'Клуб',
+  'club': 'Клуб', 'partners': 'Партнёры',
 } %}
 
 <body class="app {% block body_class %}{% endblock %}">
@@ -124,6 +125,7 @@
       {%- if session and session.is_platform %}{{ nav_item('team', '/team', 'Команда', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('brief', '/brief-center', 'Бриф-центр', active) }}{% endif %}
+      {%- if session and session.is_platform %}{{ nav_item('partners', '/partners', 'Партнёры', active) }}{% endif %}
     </nav>
 
     {% if csrf_token %}
