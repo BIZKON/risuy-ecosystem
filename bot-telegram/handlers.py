@@ -62,6 +62,11 @@ class ClubSignup(StatesGroup):
     chain = State()
 
 
+class PartnerRef(StatesGroup):
+    """Реф-поток: клиент по партнёрской ссылке называет компанию → бот создаёт тенанта+бриф."""
+    company = State()
+
+
 # ⚠️ ИДЕНТИЧНО панели admin-panel/db.py::phone_query_hash (sha256 только-цифры). Любое расхождение
 # → поиск лида по телефону в панели молча вернёт пусто. Меняешь алгоритм — синхронно в обоих местах.
 def _phone_hash(phone: str) -> str:
@@ -292,6 +297,58 @@ async def _club_intro_open(message: Message, intro_id: str) -> None:
     )
 
 
+async def _ref_start(message: Message, ref_code: str, state: FSMContext) -> None:
+    """Вход реф-потока по ?start=ref_<code>. Резолв партнёра + лёгкий гард (дедуп + rate-limit)."""
+    partner = await db.get_partner_by_ref_code(ref_code)
+    if partner is None:
+        await messaging.reply_text(message, "Ссылка недействительна или отозвана.", source="system")
+        return
+    uid = message.from_user.id
+    dup = await db.find_pending_ref_brief(uid, str(partner["id"]))
+    if dup:
+        await messaging.reply_text(
+            message, f"Вы уже начали. Заполните бриф: {config.BOT_PUBLIC_BASE_URL}/brief/{dup}",
+            source="system")
+        return
+    if await db.count_recent_ref_tenants(uid, config.REF_RATELIMIT_HOURS) >= config.REF_RATELIMIT_MAX:
+        await messaging.reply_text(message, "Слишком много обращений. Попробуйте позже.", source="system")
+        return
+    await state.update_data(ref_partner_id=str(partner["id"]))
+    await state.set_state(PartnerRef.company)
+    await messaging.reply_text(message, "Как называется ваша компания?", source="system")
+
+
+@router.message(PartnerRef.company)
+async def on_ref_company(message: Message, state: FSMContext) -> None:
+    """Приём названия компании → создание реф-тенанта+брифа + уведомления партнёру/владельцу."""
+    company = (message.text or "").strip()[:120]
+    if not company:
+        await messaging.reply_text(message, "Напишите название компании текстом.", source="system")
+        return
+    data = await state.get_data()
+    partner_id = data.get("ref_partner_id")
+    await state.clear()
+    if not partner_id:
+        return
+    _tid, token = await db.create_ref_tenant(partner_id, company, message.from_user.id)
+    # Уведомления best-effort (не рушат создание, тенант уже создан): партнёру + владельцу.
+    try:
+        pchat = await db.get_partner_chat_id(partner_id)
+        if pchat and pchat.strip():
+            await db.enqueue_platform_notify(int(pchat), f"🎯 Новый тенант от тебя: {company}")
+    except Exception:  # noqa: BLE001
+        logger.warning("partner ref-create notify failed", exc_info=True)
+    try:
+        ochat = await db.get_owner_chat_id()
+        if ochat and ochat.strip():
+            await db.enqueue_platform_notify(int(ochat), f"🆕 Новый клиент: {company} (от партнёра)")
+    except Exception:  # noqa: BLE001
+        logger.warning("owner ref-create notify failed", exc_info=True)
+    await messaging.reply_text(
+        message, f"Готово! Заполните бриф по ссылке: {config.BOT_PUBLIC_BASE_URL}/brief/{token}",
+        source="system")
+
+
 @router.message(Command("start", ignore_case=True))
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
     # Перехват (§4 плана): оператор держит ручное управление → бот молчит. Закрывает
@@ -317,6 +374,13 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     if args.lower().startswith("intro_"):
         intro_id = args[len("intro_"):]
         await _club_intro_open(message, intro_id)
+        return
+    # Deep-link ?start=ref_<code> → вход по партнёрской реферальной ссылке (Task 4).
+    # ref_ — action-payload (как club/intro_), НЕ рекламный source: перехватываем ДО
+    # нормализации source и делаем early-return, «три места» (VALID_SOURCES) не трогаем.
+    if args.lower().startswith("ref_"):
+        ref_code = args[len("ref_"):]
+        await _ref_start(message, ref_code, state)
         return
     source = (command.args or "other").lower()
     if source not in VALID_SOURCES:

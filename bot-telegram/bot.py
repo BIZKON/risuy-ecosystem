@@ -569,6 +569,46 @@ async def _club_landing(request: web.Request) -> web.StreamResponse:
     return resp
 
 
+def _partner_landing_html(partner_name: str, deeplink: str) -> str:
+    """Самодостаточный HTML-лендинг реф-партнёра (без внешних ресурсов). Публичный."""
+    import html as _html
+    name = _html.escape(partner_name or "")
+    return (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>Персональный бриф — {name}</title>'
+        '<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;'
+        'margin:0 auto;padding:32px 20px;color:#1F2937;line-height:1.55}'
+        '.btn{display:inline-block;background:#E63946;color:#fff;padding:14px 28px;'
+        'border-radius:12px;text-decoration:none;font-weight:600;margin:20px 0}'
+        '.muted{color:#6b7280;font-size:14px}h1{font-size:24px}</style></head><body>'
+        f'<h1>Персональный бриф от партнёра {name}</h1>'
+        '<p>Нажмите кнопку — бот задаст пару вопросов о вашей компании и подготовит '
+        'персональный бриф для настройки ИИ-сотрудника.</p>'
+        f'<a class="btn" href="{_html.escape(deeplink)}">Получить бриф</a>'
+        '<p class="muted">Продолжая, вы соглашаетесь на обработку данных вашего бизнеса.</p>'
+        '</body></html>'
+    )
+
+
+async def _partner_landing(request: web.Request) -> web.StreamResponse:
+    """Публичная страница реф-партнёра: GET /p/{code}. Неизвестный/disabled/нет username → 404."""
+    code = request.match_info.get("code", "")
+    try:
+        partner = await db.get_partner_by_ref_code(code)
+    except Exception:  # noqa: BLE001
+        logger.warning("partner-landing: резолв упал code=%s", code, exc_info=True)
+        partner = None
+    if partner is None or not _BOT_USERNAME:
+        return web.Response(status=404, text="Ссылка недействительна")
+    deeplink = f"https://t.me/{_BOT_USERNAME}?start=ref_{code}"
+    resp = web.Response(text=_partner_landing_html(partner["name"], deeplink),
+                        content_type="text/html", charset="utf-8")
+    resp.headers["Cache-Control"] = "public, max-age=600"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
 async def _start_health() -> web.AppRunner:
     app = web.Application()
     app.router.add_get("/", _health)
@@ -576,6 +616,7 @@ async def _start_health() -> web.AppRunner:
     app.router.add_get("/r/{token}", _redirect)  # публичный трекинг-редирект (§6.2)
     app.router.add_get("/legal/{slug}/{doc_type}", _legal_page)  # публичные юр-страницы тенанта (152-ФЗ)
     app.router.add_get("/club/{slug}", _club_landing)  # публичный лендинг-приглашение в клуб тенанта
+    app.router.add_get("/p/{code}", _partner_landing)  # публичный лендинг реф-партнёра
     app.router.add_get("/brief/{token}", _brief_landing)   # публичный бриф-лендинг тенанта
     app.router.add_post("/brief/{token}", _brief_submit)   # приём ответов брифа
     app.router.add_post("/api/demo-chat", _demo_chat)     # веб-чат демо-Лии для сайта
