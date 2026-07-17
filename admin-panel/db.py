@@ -5210,3 +5210,83 @@ async def enqueue_platform_notify(chat_id: int, text: str) -> int:
         return await c.fetchval(
             "insert into platform_notify (chat_id, text) values ($1, $2) returning id",
             int(chat_id), text)
+
+
+# ── Партнёрская реферал-программа (partners + атрибуция tenants) ───────────────
+async def create_partner(name: str, tg_chat_id: str | None, *, actor: str,
+                         ip: str | None, user_agent: str | None) -> tuple[str, str]:
+    """Создать партнёра с авто-ref_code (secrets.token_hex(4), ретрай на unique). Возврат (id, ref_code)."""
+    safe_name = (name or "").strip()[:120] or "Партнёр"
+    chat = (tg_chat_id or "").strip() or None
+    async with pool.acquire() as c:
+        for _ in range(5):
+            ref = secrets.token_hex(4)
+            try:
+                async with c.transaction():
+                    pid = await c.fetchval(
+                        "insert into partners(name, ref_code, tg_chat_id) values($1,$2,$3) returning id",
+                        safe_name, ref, chat)
+                    await _insert_audit(c, actor=actor, action="partner_create", ip=ip,
+                                        user_agent=user_agent, detail={"partner_id": str(pid), "ref_code": ref})
+                return str(pid), ref
+            except asyncpg.UniqueViolationError:
+                continue
+        raise RuntimeError("не удалось сгенерировать уникальный ref_code")
+
+
+async def list_partners() -> list[dict]:
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select p.id, p.name, p.ref_code, p.tg_chat_id, p.status, p.created_at, "
+            "count(distinct t.id) as tenant_count, "
+            "count(distinct t.id) filter (where b.status in ('submitted','proposed','applied')) as brief_done "
+            "from partners p "
+            "left join tenants t on t.partner_id = p.id "
+            "left join tenant_brief b on b.tenant_id = t.id "
+            "group by p.id order by p.created_at desc")
+    return [dict(r) for r in rows]
+
+
+async def get_partner(partner_id: str) -> dict | None:
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select id, name, ref_code, tg_chat_id, status, created_at from partners where id = $1",
+            partner_id)
+    return dict(row) if row else None
+
+
+async def list_partner_tenants(partner_id: str) -> list[dict]:
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "select t.id, t.name, t.slug, t.created_at, "
+            "b.id as brief_id, b.status as brief_status, b.token "
+            "from tenants t left join tenant_brief b on b.tenant_id = t.id "
+            "where t.partner_id = $1 order by t.created_at desc", partner_id)
+    return [dict(r) for r in rows]
+
+
+async def set_partner_status(partner_id: str, status: str, *, actor: str,
+                            ip: str | None, user_agent: str | None) -> bool:
+    if status not in ("active", "disabled"):
+        return False
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute("update partners set status = $2 where id = $1", partner_id, status)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(c, actor=actor, action="partner_status", ip=ip,
+                                user_agent=user_agent, detail={"partner_id": partner_id, "status": status})
+    return True
+
+
+async def set_partner_chat_id(partner_id: str, tg_chat_id: str | None, *, actor: str,
+                             ip: str | None, user_agent: str | None) -> bool:
+    val = (tg_chat_id or "").strip() or None
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute("update partners set tg_chat_id = $2 where id = $1", partner_id, val)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(c, actor=actor, action="partner_chat_id", ip=ip,
+                                user_agent=user_agent, detail={"partner_id": partner_id, "set": bool(val)})
+    return True
