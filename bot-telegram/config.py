@@ -303,3 +303,7 @@ MESSAGES_TTL_DAYS = int(os.environ.get("MESSAGES_TTL_DAYS", "90"))
 ERASE_AFTER_DAYS = int(os.environ.get("ERASE_AFTER_DAYS", "30"))
 # Период цикла retention-обезличивания, сек (раз в час достаточно).
 RETENTION_INTERVAL = int(os.environ.get("RETENTION_INTERVAL", str(60 * 60)))
+
+# Партнёрский реф-поток: анти-абьюз (лёгкий гард).
+REF_RATELIMIT_HOURS = int(os.environ.get("REF_RATELIMIT_HOURS", "24"))
+REF_RATELIMIT_MAX = int(os.environ.get("REF_RATELIMIT_MAX", "3"))

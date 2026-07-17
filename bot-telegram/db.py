@@ -745,6 +745,63 @@ async def reclaim_stuck_platform_notify(after_seconds: int) -> int:
     return _affected(res)
 
 
+# ── Партнёрский реф-поток (partners resolve + создание реф-тенанта) ────────────
+async def get_partner_by_ref_code(ref_code: str) -> dict | None:
+    """Активный партнёр по ref_code (для лендинга и ?start=ref_). None — нет/disabled."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "select id, name, tg_chat_id from partners where ref_code = $1 and status = 'active'",
+            ref_code)
+    return dict(row) if row else None
+
+
+async def get_partner_chat_id(partner_id: str) -> str | None:
+    async with pool.acquire() as c:
+        return await c.fetchval("select tg_chat_id from partners where id = $1", partner_id)
+
+
+async def create_ref_tenant(partner_id: str, company: str, tg_user_id: int) -> tuple[str, str]:
+    """Зеркало create_tenant_admin + create_tenant_brief (admin-panel/db.py) в одной tx,
+    с атрибуцией партнёру. Возврат (tenant_id, brief_token).
+    Бот=owner-DSN (bypass RLS); audit не пишем (нет admin-actor, в отличие от панели)."""
+    import secrets
+    from datetime import datetime, timezone, timedelta
+    safe_name = (company or "").strip()[:120] or "Новый клиент"
+    slug = f"client-{secrets.token_hex(10)}"
+    token = secrets.token_hex(16)
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+    async with pool.acquire() as c:
+        async with c.transaction():
+            tid = await c.fetchval(
+                "insert into tenants (slug, name, status, partner_id, ref_tg_user_id) "
+                "values ($1, $2, 'active', $3, $4) returning id",
+                slug, safe_name, partner_id, tg_user_id)
+            await c.execute(
+                "insert into tenant_brief (tenant_id, token, status, created_by, expires_at) "
+                "values ($1, $2, 'pending', 'bot:ref', $3)",
+                tid, token, expires)
+    return str(tid), token
+
+
+async def find_pending_ref_brief(tg_user_id: int, partner_id: str) -> str | None:
+    """Дедуп: token незавершённого (pending) брифа, созданного этим tg_user для этого партнёра."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select b.token from tenant_brief b join tenants t on t.id = b.tenant_id "
+            "where t.ref_tg_user_id = $1 and t.partner_id = $2 and b.status = 'pending' "
+            "order by t.created_at desc limit 1",
+            tg_user_id, partner_id)
+
+
+async def count_recent_ref_tenants(tg_user_id: int, hours: int) -> int:
+    """Rate-limit: сколько реф-тенантов создал этот tg_user за последние `hours` часов."""
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "select count(*) from tenants where ref_tg_user_id = $1 "
+            "and created_at > now() - make_interval(hours => $2)",
+            tg_user_id, hours)
+
+
 async def release_outbox(item_id: int, error: str, max_attempts: int, max_age_hours: int) -> None:
     """Транзиентная ошибка: вернуть в queued, НО с потолком — иначе вечный pending (§5.10).
 
