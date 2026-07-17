@@ -1891,13 +1891,14 @@ async def submit_brief(token: str, answers: dict) -> str:
 
     Событие 2 (после успешного сабмита): ставит в очередь platform_notify уведомление
     владельцу «{tenant_name} прошёл бриф» — best-effort, сбой не должен рушить submit.
+    Если тенант реферальный (partner_id не пуст) — доп. best-effort уведомление партнёру.
     """
     from datetime import datetime, timezone
-    submitted: tuple[str, str] | None = None  # (brief_id, tenant_name) для Событие 2 после коммита
+    submitted: tuple[str, str, object] | None = None  # (brief_id, tenant_name, partner_id) для событий после коммита
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
-                "select b.id, b.status, b.expires_at, t.name as tenant_name "
+                "select b.id, b.status, b.expires_at, t.name as tenant_name, t.partner_id "
                 "from tenant_brief b join tenants t on t.id = b.tenant_id "
                 "where b.token = $1 for update",
                 token)
@@ -1911,7 +1912,7 @@ async def submit_brief(token: str, answers: dict) -> str:
                 "update tenant_brief set answers = $2::jsonb, status = 'submitted', "
                 "submitted_at = now() where id = $1",
                 row["id"], json.dumps(answers, ensure_ascii=False))
-            submitted = (str(row["id"]), row["tenant_name"])
+            submitted = (str(row["id"]), row["tenant_name"], row["partner_id"])
     # Событие 2 — ПОСЛЕ коммита сабмита и ВНЕ его транзакции (жёсткий инвариант: сбой уведомления
     # не должен откатывать submit). Отдельное соединение через enqueue_platform_notify + try/except.
     # Инлайн-INSERT в ту же транзакцию аборти́л бы её (aborted→COMMIT=ROLLBACK), молча теряя сабмит.
@@ -1925,6 +1926,14 @@ async def submit_brief(token: str, answers: dict) -> str:
                 await enqueue_platform_notify(int(chat), txt)
         except Exception:  # noqa: BLE001 — уведомление не должно рушить submit
             logging.getLogger(__name__).warning("brief submit notify failed", exc_info=True)
+        try:
+            partner_id = submitted[2]
+            if partner_id is not None:
+                pchat = await get_partner_chat_id(str(partner_id))
+                if pchat and pchat.strip():
+                    await enqueue_platform_notify(int(pchat), f"✅ {submitted[1]} прошёл бриф")
+        except Exception:  # noqa: BLE001 — уведомление не должно рушить submit
+            logging.getLogger(__name__).warning("brief submit partner notify failed", exc_info=True)
     return "ok"
 
 
