@@ -14,6 +14,7 @@
 {% if saved == 'status' %}{{ flash('Статус партнёра обновлён.', 'ok') }}{% endif %}
 {% if saved == 'chat' %}{{ flash('Chat ID партнёра сохранён.', 'ok') }}{% endif %}
 {% if err == 'no_name' %}{{ flash('Введите имя партнёра.', 'error') }}{% endif %}
+{% if err == 'not_found' %}{{ flash('Партнёр не найден.', 'error') }}{% endif %}
 
 {# ── Завести партнёра ── #}
 <section class="card" aria-label="Новый партнёр">

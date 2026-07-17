@@ -325,6 +325,17 @@ async def on_ref_company(message: Message, state: FSMContext) -> None:
     if not company:
         await messaging.reply_text(message, "Напишите название компании текстом.", source="system")
         return
+    if company.startswith("/"):
+        # Это команда (/revoke, /start, /stop...), а не название компании — не создаём
+        # мусорный тенант и не глушим команду (в т.ч. 152-ФЗ /revoke). Сбрасываем FSM,
+        # чтобы повторная отправка команды дошла до своего Command-хендлера.
+        await state.clear()
+        await messaging.reply_text(
+            message,
+            "Похоже, это команда, а не название компании. Ввод отменён — "
+            "если хотите заполнить бриф, откройте ссылку заново.",
+            source="system")
+        return
     data = await state.get_data()
     partner_id = data.get("ref_partner_id")
     await state.clear()

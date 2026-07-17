@@ -6496,29 +6496,34 @@ async def partners_create(request: Request, session: auth.Session = Depends(requ
 
 
 @app.post("/partners/{partner_id}/status")
-async def partners_set_status(request: Request, partner_id: str,
+async def partners_set_status(request: Request, partner_id: uuid.UUID,
                               session: auth.Session = Depends(require_session),
                               status: str = Form(""), csrf_token: str = Form("")):
     _require_admin(session)
     await _enforce_csrf(request, session, csrf_token)
-    await db.set_partner_status(partner_id, status.strip(), actor=session.actor,
-                                ip=_ip(request), user_agent=_ua(request))
+    ok = await db.set_partner_status(partner_id, status.strip(), actor=session.actor,
+                                     ip=_ip(request), user_agent=_ua(request))
+    if not ok:
+        return RedirectResponse(url="/partners?err=not_found", status_code=303)
     return RedirectResponse(url="/partners?saved=status", status_code=303)
 
 
 @app.post("/partners/{partner_id}/chat-id")
-async def partners_set_chat_id(request: Request, partner_id: str,
+async def partners_set_chat_id(request: Request, partner_id: uuid.UUID,
                                session: auth.Session = Depends(require_session),
                                tg_chat_id: str = Form(""), csrf_token: str = Form("")):
     _require_admin(session)
     await _enforce_csrf(request, session, csrf_token)
-    await db.set_partner_chat_id(partner_id, tg_chat_id, actor=session.actor,
-                                 ip=_ip(request), user_agent=_ua(request))
+    ok = await db.set_partner_chat_id(partner_id, tg_chat_id, actor=session.actor,
+                                      ip=_ip(request), user_agent=_ua(request))
+    if not ok:
+        return RedirectResponse(url="/partners?err=not_found", status_code=303)
     return RedirectResponse(url="/partners?saved=chat", status_code=303)
 
 
+# ---- /partners/{id} — карточка (uuid-типизация → мусор не дойдёт до SQL) --- #
 @app.get("/partners/{partner_id}", response_class=HTMLResponse)
-async def partner_detail(request: Request, partner_id: str,
+async def partner_detail(request: Request, partner_id: uuid.UUID,
                          session: auth.Session = Depends(require_session)):
     _require_admin(session)
     partner = await db.get_partner(partner_id)
