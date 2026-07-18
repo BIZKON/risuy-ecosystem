@@ -185,6 +185,11 @@ async def _notify(ctx: TriggerCtx, t: dict, *, reason: str) -> None:
     if chat_id is None:
         return
     import escalation  # client_link(messenger, external_id) — переиспользуем (vk.com/MAX/tg://)
+    # 152-ФЗ: карточка раскрывает контакт клиента менеджеру НАПРЯМУЮ (raw_send_text), МИНУЯ outbox
+    # → свой fail-closed гейт. Outbound-сигнал (без согласия) — контакт НЕ раскрываем (§6 путь 5).
+    # Единый чок для _fire и fire_intent; дублируется в их началах (defense-in-depth).
+    if not await escalation.lead_is_inbound(ctx.external_id, messenger=ctx.messenger):
+        return
     import messaging   # ленивый импорт (как escalation): тестируемость без aiogram
     import notifier
     send_bot = notifier.get_notifier_bot() or ctx.notifier_fallback_bot
@@ -212,6 +217,12 @@ async def _fire(ctx: TriggerCtx, t: dict, *, reason: str) -> None:
     action = t.get("action") or "notify_reply_continue"
     reply = (t.get("reply_text") or "").strip()
     try:
+        # 152-ФЗ: outbound-сигнал (спарсен без согласия) — НЕ шлём авто-ответ клиенту и НЕ
+        # раскрываем контакт менеджеру. Путь идёт мимо outbox_recheck → свой fail-closed гейт
+        # (строго '= inbound_optin') в начале _fire, ДО ctx.reply/_notify/pause (§6 путь 5).
+        import escalation
+        if not await escalation.lead_is_inbound(ctx.external_id, messenger=ctx.messenger):
+            return
         if action in ("notify_reply_continue", "notify_reply_pause") and reply:
             await ctx.reply(reply)
         await _notify(ctx, t, reason=reason)
@@ -226,6 +237,12 @@ async def fire_intent(ctx: TriggerCtx, intent_trigs: list, indices: list[int]) -
     """Сработавшие intent-триггеры (индексы из [[TRIGGER:N]]): уведомление менеджерам + опц. пауза.
     Ответ клиенту отдельно НЕ шлём — Лия уже ответила (инструкция в промпте, build_intent_addendum).
     Невалидный индекс игнорируем."""
+    # 152-ФЗ: outbound-сигнал (без согласия) — контакт менеджеру НЕ раскрываем и лид не трогаем
+    # (пауза). Путь идёт мимо outbox_recheck → свой fail-closed гейт в начале fire_intent (§6 путь 5).
+    # На outbound авто-диалог Лии не должен был запуститься (гейт #6 в handlers) — здесь defense-in-depth.
+    import escalation
+    if not await escalation.lead_is_inbound(ctx.external_id, messenger=ctx.messenger):
+        return
     for i in indices:
         if not (1 <= i <= len(intent_trigs)):
             continue

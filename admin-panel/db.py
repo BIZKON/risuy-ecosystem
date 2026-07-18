@@ -368,6 +368,10 @@ async def get_lead(lead_id) -> asyncpg.Record | None:
                guide_sent_at, follow_up_1_at, follow_up_2_at, follow_up_3_at,
                tg_user_id, max_user_id, vk_user_id, max_chat_id, notes, survey,
                erase_requested_at, bot_paused, unsubscribed_at, ai_persona,
+               -- 152-ФЗ (SL-шов): провенанс — дискриминатор операторских гейтов, source_url
+               -- показывается ВМЕСТО ПДн для outbound (ст.18 ч.3). Только чтение — оператор
+               -- не может перевернуть дискриминатор (panel_role без update на provenance).
+               provenance, source_url,
                -- C3: можно ли ответить лиду в его канале (есть адрес доставки)?
                (case messenger when 'tg' then tg_user_id
                                when 'vk' then vk_user_id
@@ -380,9 +384,21 @@ async def get_lead(lead_id) -> asyncpg.Record | None:
 
 
 async def reveal_phone(lead_id) -> str | None:
-    """Полный номер. Вызывается ТОЛЬКО из POST /reveal ПОСЛЕ записи аудита (§3.8)."""
+    """Полный номер. Вызывается ТОЛЬКО из POST /reveal ПОСЛЕ записи аудита (§3.8).
+
+    152-ФЗ (SL-шов, fail-closed): телефон отдаётся СТРОГО для provenance='inbound_optin'
+    (субъект сам обратился и дал согласие). Для outbound_signal / distributed_from_t0
+    раскрытие ПДн запрещено (ст.18 ч.3) → возвращаем None, номер не покидает БД-слой.
+    Defence-in-depth поверх app-гейта в lead_reveal; на текущих all-inbound данных — no-op.
+    """
     async with pool.acquire() as c:
-        return await c.fetchval("select phone from leads where id = $1", lead_id)
+        row = await c.fetchrow("select phone, provenance from leads where id = $1", lead_id)
+        if row is None:
+            return None
+        # 152-ФЗ: не-inbound провенанс → номер не раскрываем даже если app-слой промахнётся.
+        if row["provenance"] != "inbound_optin":
+            return None
+        return row["phone"]
 
 
 # --------------------------------------------------------------------------- #

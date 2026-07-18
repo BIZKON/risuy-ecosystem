@@ -858,6 +858,19 @@ async def on_buy(cb: CallbackQuery, bot: Bot):
     )
 
 
+async def _lead_provenance(uid: int, *, messenger: str = "tg") -> str:
+    """152-ФЗ (SL §6, путь 6): провенанс лида для fail-closed гейта авто-диалога Лии.
+    Нет строки лида → 'inbound_optin' (инбаунд-поведение без изменений: аутбаунд-строку
+    B-FWD физически создаёт с provenance='outbound_signal', фантомного лида гейтить нечем).
+    Сбой БД пробрасывается → хендлер прерывается ДО ask_ai (fail-closed на ошибке)."""
+    col = db._user_col(messenger)
+    async with db.pool.acquire() as c:
+        prov = await c.fetchval(
+            f"select provenance from leads where {col} = $1 and tenant_id = $2",
+            uid, db.tenant_id())
+    return prov or "inbound_optin"
+
+
 @router.message(StateFilter(None), F.text)
 async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     """Свободное сообщение ВНЕ воронки → отвечает AI-ассистент Лия.
@@ -871,6 +884,13 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # Перехват (§4): на паузе Лия молчит — оператор отвечает руками. Входящее уже
     # залогировано middleware; просто не запускаем авто-ответ.
     if await db.is_bot_paused(message.from_user.id):
+        return
+    # 152-ФЗ (SL §6, путь 6, fail-closed): авто-диалог Лии — ТОЛЬКО для инбаунд-лида (opt-in).
+    # Аутбаунд-сигнал / раздача тенант-0 (provenance != 'inbound_optin') = субъект без согласия →
+    # авто-контакт запрещён (152-ФЗ / ФЗ-38). Не отвечаем и не шлём триггер-канед — не контактируем.
+    # Легальный выход (§7): провести через consent-funnel; при захвате согласия provenance
+    # повышается до 'inbound_optin' и авто-диалог разблокируется штатно. На инбаунде — no-op.
+    if await _lead_provenance(message.from_user.id) != "inbound_optin":
         return
     # Глобальный тумблер Лии (раздел «ИИ-агенты» панели): выключена → молчим, как при
     # паузе (оператор ответит руками). agent_id/fallback берём поверх env из тех же настроек.

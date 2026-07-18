@@ -1360,6 +1360,14 @@ async def dialog_set_persona(
     return RedirectResponse(url=f"{base}/{lead_id}?staff=1#thread", status_code=303)
 
 
+# 152-ФЗ (SL-шов): единый провенанс-предикат ВСЕХ операторских контакт-путей панели.
+# Авто/операторский контакт и раскрытие ПДн разрешены СТРОГО для inbound_optin (субъект сам
+# обратился и дал согласие). Любой иной провенанс (outbound_signal / distributed_from_t0) →
+# fail-closed отказ. §3.4: consent-bool — НЕ дискриминатор источника, дискриминатор — provenance.
+# На текущих all-inbound данных гейты — доказуемый no-op (нет ни одной не-inbound строки).
+_PROVENANCE_INBOUND = "inbound_optin"
+
+
 def _chat_return(lead_id, from_: str, *, replied: bool = False,
                  paused: bool = False, err: str | None = None) -> RedirectResponse:
     """PRG-редирект после действия в чате. from_ ∈ {dialog, card} — allow-list,
@@ -1490,6 +1498,8 @@ def _reply_err_text(err: str | None) -> str | None:
         "empty_reply": "Пустой ответ: добавьте текст или вложение.",
         "bad_persona": "Неизвестный ИИ-сотрудник.",
         "persona_tw": "Не удалось подготовить агента сотрудника у ИИ-сервиса. Сотрудник не сменён — попробуйте ещё раз.",
+        # 152-ФЗ: outbound-сигнал (без согласия субъекта) — контакт запрещён, см. первоисточник.
+        "outbound": "Outbound-сигнал: контакт запрещён (152-ФЗ). Работайте через первоисточник, не пишите напрямую.",
     }.get(err or "")
 
 
@@ -1500,6 +1510,8 @@ def _club_invite_err_text(err: str | None) -> str | None:
         "no_tg": "У лида нет Telegram-адреса — приглашение некому доставить.",
         "no_bot": "Не задан username бота (раздел «Каналы») — deep-link воронки не собрать.",
         "enqueue": "Не удалось поставить приглашение в очередь. Попробуйте ещё раз.",
+        # 152-ФЗ: outbound-сигнал (без согласия субъекта) — в клуб не приглашаем.
+        "outbound": "Outbound-сигнал: приглашение запрещено (152-ФЗ). Нет согласия субъекта на контакт.",
     }.get(err or "")
 
 
@@ -1591,6 +1603,29 @@ async def lead_reveal(
     rec = await db.get_lead(lead_id)
     if rec is None:
         raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+
+    # 152-ФЗ: outbound-сигнал (без opt-in) → раскрытие телефона ЗАПРЕЩЕНО (ст.18 ч.3 —
+    # субъект не предоставлял ПДн оператору). Фиксируем попытку в аудит и показываем
+    # первоисточник + DSR-путь ВМЕСТО номера; сам номер из БД не достаём (reveal_phone тоже
+    # fail-closed — defence-in-depth). Для inbound_optin — прежнее поведение РОВНО как раньше.
+    if rec["provenance"] != _PROVENANCE_INBOUND:
+        await db.audit(actor=session.actor, action="phone_reveal_blocked", lead_id=lead_id,
+                       ip=_ip(request), user_agent=_ua(request),
+                       detail={"provenance": rec["provenance"]})
+        src = (rec["source_url"] or "").strip()
+        notice = ("Раскрытие запрещено: outbound-сигнал без согласия субъекта "
+                  "(152-ФЗ, ст.18 ч.3). "
+                  + (f"Первоисточник: {src}. " if src else "")
+                  + "Права субъекта реализуются через обращение (DSR), не через контакт.")
+        resp = templates.TemplateResponse(
+            request,
+            "lead.html",
+            _lead_context(request, session, rec, revealed=notice,
+                          bot_username=await _bot_username()),
+        )
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
 
     # Аудит ДО раскрытия (fail-closed): если INSERT упадёт — исключение, номер не отдаём.
     await db.audit(actor=session.actor, action="phone_revealed", lead_id=lead_id,
@@ -1689,6 +1724,16 @@ async def lead_reply(
     if from_ == "demo":
         await _scope_demo(session)
 
+    # 152-ФЗ: outbound-сигнал (без opt-in) → операторский контакт ЗАПРЕЩЁН. Ранний отказ в UI,
+    # чтобы оператор видел запрет сразу, а не «отправлено → тихо failed». Страховка — outbox-choke
+    # (bot outbox_recheck_address → outbound_no_contact) и ранний отказ enqueue_manual_reply.
+    # Для inbound_optin — прежнее поведение РОВНО как раньше (гейт = no-op).
+    rec = await db.get_lead(lead_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+    if rec["provenance"] != _PROVENANCE_INBOUND:
+        return _chat_return(lead_id, from_, err="outbound")
+
     # Длину капим ПЕРВЫМ действием, до БД (§3.13/§5.11). plain-текст, без parse_mode.
     text = (text or "").strip()[: config.MSG_MAX_LEN]
 
@@ -1772,6 +1817,12 @@ async def club_invite_lead(
     if rec is None:
         raise StarletteHTTPException(status_code=404, detail="Лид не найден")
 
+    # Гейт-0 (152-ФЗ, §3.4): provenance — дискриминатор источника, а НЕ consent-bool.
+    # outbound-сигнал (спарсен без согласия) в клуб не приглашаем даже теоретически; хард-CHECK
+    # держит outbound на consent=false, но опираться на consent как на дискриминатор запрещено.
+    # Для inbound_optin — прежнее поведение РОВНО как раньше (гейт = no-op на текущих данных).
+    if rec["provenance"] != _PROVENANCE_INBOUND:
+        return _club_invite_return(lead_id, err="outbound")
     # Гейт-1: только opt-in лид (дал согласие на обработку ПДн в боте). Без согласия
     # приглашать нельзя — это была бы новая коммуникация без правового основания.
     if not rec["consent"]:
@@ -1806,6 +1857,8 @@ def _invoice_err_text(err: str | None) -> str | None:
         "bad_product": "Выберите офер с ценой в рублях (активный, из каталога).",
         "no_tg": "У лида нет Telegram-адреса — счёт некому доставить.",
         "yk_failed": "Не удалось создать платёж. Попробуйте ещё раз или проверьте ключи оплаты.",
+        # 152-ФЗ: outbound-сигнал (без согласия субъекта) — счёт не выставляем.
+        "outbound": "Outbound-сигнал: счёт запрещён (152-ФЗ). Нет согласия субъекта на контакт.",
     }.get(err or "")
 
 
@@ -1832,6 +1885,14 @@ async def lead_invoice(
     ШКОЛЫ) → лиду сообщение со ссылкой на оплату через outbox (доставит БОТ — панель в
     Telegram не пишет). Подтверждение оплаты — единый вебхук (paid + converted)."""
     await _enforce_csrf(request, session, csrf_token)
+    # 152-ФЗ: outbound-сигнал (без opt-in) → счёт/контакт ЗАПРЕЩЁН. Гейт ПЕРЕД созданием заказа
+    # ЮKassa и enqueue-сообщения (fail-closed). Страховка — outbox-choke на доставке счёта; но
+    # заказ вообще не должен появляться. Для inbound_optin — прежнее поведение РОВНО как раньше.
+    rec = await db.get_lead(lead_id)
+    if rec is None:
+        raise StarletteHTTPException(status_code=404, detail="Лид не найден")
+    if rec["provenance"] != _PROVENANCE_INBOUND:
+        return _invoice_return(lead_id, err="outbound")
     if not (config.SHOP_PAYMENTS_CONFIGURED and await db.get_online_payments_enabled()):
         return _invoice_return(lead_id, err="pay_off")
     try:
@@ -4504,6 +4565,18 @@ async def club_intro_propose(
     if not bot_username:
         await _audit_intro(delivered=False, reason="no_bot")
         return RedirectResponse(url=f"/club?intro=1&intro_err=no_bot", status_code=303)
+
+    # 152-ФЗ: знакомство = взаимный контакт-обмен ПДн, поэтому ОБЕ стороны должны быть
+    # inbound_optin. Явная проверка провенанса обеих сторон ДО enqueue (fail-closed); страховка —
+    # outbox-choke на каждой доставке. Для all-inbound данных гейт = no-op. Intro-строка (уже
+    # создана) контакта не инициирует — при отказе просто не уведомляем (как при enqueue-фейле).
+    from_lead = await db.get_lead(from_lead_id)
+    to_lead = await db.get_lead(to_lead_id)
+    if (from_lead is None or to_lead is None
+            or from_lead["provenance"] != _PROVENANCE_INBOUND
+            or to_lead["provenance"] != _PROVENANCE_INBOUND):
+        await _audit_intro(delivered=False, reason="outbound")
+        return RedirectResponse(url="/club?intro=1&intro_err=outbound", status_code=303)
 
     # Уведомление КАЖДОЙ стороне в её lead-канал — один и тот же deep-link (бот сам
     # определит сторону по tg_user_id клика). Обе доставки best-effort, но ОБЕ должны

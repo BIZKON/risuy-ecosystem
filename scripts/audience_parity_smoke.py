@@ -32,11 +32,14 @@ FAILS: list[str] = []
 # tg→tg_user_id, vk→vk_user_id, max→max_chat_id. Эти же литералы пинит c3-смоук на стороне бота.
 CANON = {
     "tg": ("messenger = 'tg' and tg_user_id is not null and consent = true "
-           "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false"),
+           "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false "
+           "and provenance = 'inbound_optin'"),
     "vk": ("messenger = 'vk' and vk_user_id is not null and consent = true "
-           "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false"),
+           "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false "
+           "and provenance = 'inbound_optin'"),
     "max": ("messenger = 'max' and max_chat_id is not null and consent = true "
-            "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false"),
+            "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false "
+           "and provenance = 'inbound_optin'"),
 }
 
 

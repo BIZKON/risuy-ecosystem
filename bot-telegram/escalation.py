@@ -151,6 +151,28 @@ def client_link(messenger: str, external_id: int) -> tuple[str, str] | None:
     return None  # tg → None (format_card дефолтит tg://)
 
 
+async def lead_is_inbound(external_id: int, *, messenger: str = "tg") -> bool:
+    """152-ФЗ провенанс-гейт для контакт-путей, идущих МИМО outbox_recheck (escalate/triggers).
+    True — ТОЛЬКО если лид подтверждён как инбаунд-optin (provenance='inbound_optin'); всё
+    остальное (outbound_signal / distributed_from_t0 / нет строки / сбой БД) → False = авто-
+    контакт клиенту и раскрытие ПДн менеджеру ЗАПРЕЩЕНЫ. Fail-closed и НЕ бросает: инбаунд
+    подтверждаем ПОЗИТИВНО, при любой ошибке блокируем. Единый предикат — строго '= inbound_optin'
+    (как в db.claim_lead_escalation / db.outbox_recheck_address). Свой SELECT: эти пути не зовут
+    outbox_recheck_address, а db.py править нельзя (claim уже гейчен — здесь defense-in-depth)."""
+    try:
+        col = db._user_col(messenger)  # канальный резолвер id (как в claim_lead_escalation)
+        async with db.pool.acquire() as c:
+            prov = await c.fetchval(
+                f"select provenance from leads where {col} = $1 and tenant_id = $2",
+                external_id, db.tenant_id(),
+            )
+        return prov == "inbound_optin"
+    except Exception as e:  # noqa: BLE001 — 152-ФЗ fail-closed: не подтвердили инбаунд → блокируем
+        logger.warning("lead_is_inbound: провенанс не подтверждён (%s=%s): %s — блокируем контакт",
+                       messenger, external_id, e)
+        return False
+
+
 async def escalate(bot, tg_user_id: int, payload: dict, *,
                    messenger: str = "tg", raw: str | None = None,
                    target_override: "tuple[int, int | None] | None" = None) -> None:
@@ -171,6 +193,11 @@ async def escalate(bot, tg_user_id: int, payload: dict, *,
         send_bot = notifier.get_notifier_bot() or bot
         if send_bot is None:
             return  # ни нотификатора, ни разговорного бота (vk без нотификатора) → слать нечем
+        # 152-ФЗ: карточка с ПДн лида (name/phone) идёт менеджеру НАПРЯМУЮ через raw_send_text,
+        # МИНУЯ outbox_recheck → свой fail-closed гейт ПЕРЕД claim/отправкой. Outbound-сигнал
+        # (спарсен без согласия) НЕ эскалируем — менеджера с ПДн не зовём (см. §6 путь 3).
+        if not await lead_is_inbound(tg_user_id, messenger=messenger):
+            return
         if not await db.claim_lead_escalation(tg_user_id, messenger=messenger):
             return  # уже эскалирован / нет лида / гонка проиграна
         try:
