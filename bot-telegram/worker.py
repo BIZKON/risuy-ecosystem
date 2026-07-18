@@ -238,6 +238,11 @@ async def _drain_outbox_channels() -> None:
             if it.get("erase_requested_at") is not None:
                 await db.mark_outbox_failed(item_id, "erased")
                 continue
+            # 152-ФЗ: аутбаунд-сигнал — контакт запрещён. Симметрия с TG-веткой (outbox_recheck_address);
+            # defense-in-depth поверх раннего гейта enqueue_manual_reply (все каналы).
+            if it.get("provenance") != "inbound_optin":
+                await db.mark_outbox_failed(item_id, "outbound_no_contact")
+                continue
             if not addr:
                 # vk: нет vk_user_id; max: ещё не знаем chat_id (лид не писал в личку) — слать некуда.
                 await db.mark_outbox_failed(item_id, "no_address")

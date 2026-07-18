@@ -621,7 +621,7 @@ async def claim_outbox_channels(limit: int) -> list[dict]:
             select c.*,
                    case c.messenger when 'vk' then l.vk_user_id
                                     when 'max' then l.max_chat_id end as reply_address,
-                   l.erase_requested_at
+                   l.erase_requested_at, l.provenance
             from claimed c
             join leads l on l.id = c.lead_id
             """,

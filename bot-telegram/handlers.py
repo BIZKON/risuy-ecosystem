@@ -890,6 +890,8 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # авто-контакт запрещён (152-ФЗ / ФЗ-38). Не отвечаем и не шлём триггер-канед — не контактируем.
     # Легальный выход (§7): провести через consent-funnel; при захвате согласия provenance
     # повышается до 'inbound_optin' и авто-диалог разблокируется штатно. На инбаунде — no-op.
+    # NB: явный роутинг в funnel ОТСЮДА отложен (funnel.send_consent как единицы пока нет; голый
+    # return — fail-closed; реактивный inbound входит в согласие через /start cmd_start). Подключить с B-FWD.
     if await _lead_provenance(message.from_user.id) != "inbound_optin":
         return
     # Глобальный тумблер Лии (раздел «ИИ-агенты» панели): выключена → молчим, как при
