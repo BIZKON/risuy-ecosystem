@@ -1,0 +1,46 @@
+# Локальный dev-субстрат S0M. Эфемерно, НЕ прод. БД названа risuy_dev — чтобы
+# rls_leads_messages_smoke.py прошёл свой DSN-гард (/risuy_dev) без правок.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: gen_user_local
+      POSTGRES_PASSWORD: gen_user_local
+      POSTGRES_DB: risuy_dev
+    ports: ["5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gen_user_local -d risuy_dev"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6380:6379"]
+
+  engine-ingest:
+    build:
+      context: .
+      dockerfile: engine/common/Dockerfile
+    command: python -m engine.ingest_consumer.main
+    environment:
+      ENGINE_DSN: postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev
+      REDIS_URL: redis://redis:6379/0
+      HEALTH_PORT: "8090"
+    ports: ["8090:8090"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  # dev-профиль: одноразовый producer для walking-skeleton (make skeleton).
+  engine-stub:
+    profiles: ["skeleton"]
+    build:
+      context: .
+      dockerfile: engine/common/Dockerfile
+    command: python -m engine._stub_producer.main
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ENGINE_STUB_TENANT_ID: "00000000-0000-0000-0000-000000000000"
+    depends_on:
+      redis: { condition: service_started }
