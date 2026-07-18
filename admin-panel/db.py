@@ -588,7 +588,10 @@ async def stream_leads_anon(*, row_cap: int):
                 "unsubscribed_at, erase_requested_at, ai_persona, "
                 "bot_paused, escalated_at, "
                 "(notes is not null and notes <> '') as has_notes "
-                "from leads order by created_at desc limit $1",
+                # 152-ФЗ C1: outbound-сигналы (спарсенное публичное, НЕ субъекты ПДн) исключаются
+                # из РКН-реестра. Предикат ПОБАЙТОВО совпадает со stream_leads_map (инвариант выше).
+                "from leads where provenance = 'inbound_optin' "
+                "order by created_at desc limit $1",
                 row_cap,
             ):
                 yield rec
@@ -606,10 +609,27 @@ async def stream_leads_map(*, row_cap: int):
             async for rec in c.cursor(
                 "select id, name, phone, tg_user_id, vk_user_id, max_user_id, "
                 "max_chat_id, web_session_id, notes, erase_requested_at "
-                "from leads order by created_at desc limit $1",
+                # 152-ФЗ C1: тот же провенанс-предикат, ПОБАЙТОВО как в stream_leads_anon.
+                "from leads where provenance = 'inbound_optin' "
+                "order by created_at desc limit $1",
                 row_cap,
             ):
                 yield rec
+
+
+async def count_leads_anon() -> int:
+    """Число лидов, реально попадающих в РКН-обезличенную выгрузку: ТОЛЬКО inbound_optin
+    (outbound-сигналы исключены — 152-ФЗ C1, тот же предикат, что stream_leads_anon/map).
+    Аудит pii_export_* должен считать этим, а НЕ count_leads({}) — иначе завышает число
+    субъектов ПДн на объём аутбаунд-сигналов."""
+    tid = _active_tenant.get()
+    if not tid:
+        raise RuntimeError("count_leads_anon: активный тенант не установлен (RLS-скоуп)")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", tid)
+            return int(await c.fetchval(
+                "select count(*) from leads where provenance = 'inbound_optin'") or 0)
 
 
 # =========================================================================== #

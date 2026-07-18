@@ -2079,7 +2079,7 @@ async def export_anon(
     await _enforce_csrf(request, session, csrf_token)
     if not session.active_tenant_id:
         raise StarletteHTTPException(status_code=400, detail="Кабинет не привязан к клиенту")
-    matched = await db.count_leads({})
+    matched = await db.count_leads_anon()  # 152-ФЗ C1: только inbound_optin (как anon-стрим)
     # Аудит ДО стрима (fail-closed). Без ПДн.
     await db.audit(actor=session.actor, action="pii_export_anon", ip=_ip(request),
                    user_agent=_ua(request), detail={"matched": matched, "row_cap": config.EXPORT_ROW_CAP})
@@ -2105,7 +2105,7 @@ async def export_subject_map(
     reason = reason.strip()
     if not reason:
         raise StarletteHTTPException(status_code=400, detail="Укажите основание выгрузки справочника")
-    matched = await db.count_leads({})
+    matched = await db.count_leads_anon()  # 152-ФЗ C1: только inbound_optin (как map-стрим)
     # Отдельный аудит «передача справочника» с поводом (БЕЗ ПДн).
     await db.audit(actor=session.actor, action="pii_export_map", ip=_ip(request),
                    user_agent=_ua(request),
