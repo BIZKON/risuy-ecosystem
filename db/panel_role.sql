@@ -261,6 +261,8 @@ grant select, insert, update, delete on tenant_agents         to panel_rw;  -- W
 grant select, insert, update, delete on tenant_triggers       to panel_rw;  -- Слой B: CRUD триггеров клиента
 grant select, insert                 on consent_events        to panel_rw;  -- 152-ФЗ ст.9: реестр согласий (append-only — читает + пишет 'revoked')
 revoke update, delete                on consent_events        from panel_rw; -- доказательная база неизменна (зеркало admin_audit / migrate_consent_events.sql:44)
+grant select, insert                 on lead_feedback         to panel_rw;  -- S1-RAW: фидбек тенанта → ScoreAgent (зеркало migrate_engine_schema.sql). id=identity → sequence-грант не нужен
+revoke update, delete                on lead_feedback         from panel_rw; -- append-only (как consent_events)
 grant select, insert, update         on prospects             to panel_rw;  -- карточки ЕГРЮЛ: панель пишет; без delete (archived-флаг). Зеркало migrate_prospects.sql
 
 -- Клуб предпринимателей (Фаза 1, Уровень 1) — объекты в db/migrate_club.sql. Зеркало его грантов.

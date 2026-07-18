@@ -13,10 +13,19 @@ grant usage on schema engine to panel_rw;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- engine.raw_messages — SHARED firehose. Глобальный дедуп (source_kind, external_id)
 -- БЕЗ tenant_id (одно публичное сообщение = одна строка; тенант появляется в matching).
--- drop cascade суперсёдит S0M-заглушку (и её FK-иждивенцев, если есть — они пересоздаются ниже).
+-- Суперсёд S0M-заглушки — ТОЛЬКО по её сигнатуре (колонка tenant_id): безусловный drop cascade
+-- ломал бы идемпотентность (стирал firehose + ронял FK matching→raw_messages без восстановления
+-- на re-apply). Гардированный drop срабатывает лишь на заглушке (matching тогда ещё не создан),
+-- финальную таблицу re-run не трогает.
 -- ─────────────────────────────────────────────────────────────────────────────
-drop table if exists engine.raw_messages cascade;
-create table engine.raw_messages (
+do $$ begin
+  if exists (select 1 from information_schema.columns
+             where table_schema = 'engine' and table_name = 'raw_messages'
+               and column_name = 'tenant_id') then
+    drop table engine.raw_messages cascade;
+  end if;
+end $$;
+create table if not exists engine.raw_messages (
     id           bigint generated always as identity primary key,
     created_at   timestamptz not null default now(),
     source_kind  text not null,                  -- telegram|vk|boards|tenders
@@ -36,6 +45,11 @@ create index if not exists raw_messages_embedding_hnsw on engine.raw_messages
 create index if not exists raw_messages_created_idx on engine.raw_messages (created_at);
 create index if not exists raw_messages_metadata_gin on engine.raw_messages
     using gin (metadata jsonb_path_ops);
+-- 152-ФЗ retention-контракт (raw_messages.body = сырой публичный текст, может нести ПДн
+-- третьих лиц в тексте объявления). Правовое основание обработки — публичный первоисточник
+-- («сигнал+ссылка», не база ПДн). Presidio-RU (S5) маскирует ПУТЬ к внешнему LLM, НЕ хранение
+-- at-rest. TTL-sweep по created_at (индекс выше готов) — ОТДЕЛЬНЫЙ engine-retention-джоб
+-- (own-роль/DSN), НЕ bot-telegram/retention.py; задача S2/S5. Срок хранения — решение владельца.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- engine.accounts — PLATFORM пул userbot-сессий (vault-шифр., без tenant_id, без RLS).
@@ -165,6 +179,15 @@ create table if not exists engine.matching (
     unique (search_profile_id, raw_message_id)
 );
 alter table engine.matching owner to engine_rw;
+-- Идемпотентное восстановление FK matching→raw_messages: если прежний безусловный
+-- drop cascade его снял, а create-if-not-exists не пересоздал — вернуть (self-heal re-apply).
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'matching_raw_message_id_fkey') then
+    alter table engine.matching
+      add constraint matching_raw_message_id_fkey
+      foreign key (raw_message_id) references engine.raw_messages(id) on delete cascade;
+  end if;
+end $$;
 create index if not exists matching_tenant_status_idx on engine.matching (tenant_id, status);
 create index if not exists matching_raw_idx on engine.matching (raw_message_id);
 create index if not exists matching_lead_idx on engine.matching (lead_id) where lead_id is not null;

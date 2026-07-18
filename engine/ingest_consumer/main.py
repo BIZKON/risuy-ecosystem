@@ -1,6 +1,7 @@
 """Walking-skeleton потребителя: читает engine:raw и делает ОДИН idempotent-ish insert
-в engine.raw_messages под ролью engine_rw с явным app.tenant_id. РЕАЛЬНАЯ транспортная
-семантика (consumer-group, ack/retry, DLQ, backpressure, дедуп) — S2, НЕ здесь."""
+в engine.raw_messages под ролью engine_rw. raw_messages — SHARED сырьё (без tenant_id;
+тенант появляется в matching, не здесь). РЕАЛЬНАЯ транспортная семантика (consumer-group,
+ack/retry, DLQ, backpressure, дедуп) — S2, НЕ здесь."""
 from __future__ import annotations
 
 import asyncio
