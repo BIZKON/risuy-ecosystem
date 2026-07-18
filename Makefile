@@ -22,6 +22,7 @@ db-init:
 	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/schema_snapshot.sql | $(PG) || echo "нет schema_snapshot.sql — только roles_bootstrap"
 	cat db/_dev/roles_bootstrap.sql | $(PG)
 	cat db/migrate_engine_schema.sql | $(PG)
+	cat db/migrate_leads_provenance.sql | $(PG)
 	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/owner_reassign.sql | $(PG) || echo "снапшота нет — reassign владельца пропущен"
 
 # Walking-skeleton: одно событие → одна строка в engine.raw_messages.

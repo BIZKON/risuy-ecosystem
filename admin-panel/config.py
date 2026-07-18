@@ -238,6 +238,11 @@ SOURCES = ("reels", "dzen", "youtube", "vk", "max", "other")
 # vk добавлен (C3: VK-канал активен) → бейдж/фильтр лидов знают VK. Синхрон с MESSENGER_LABELS ниже
 # и BROADCAST_MESSENGERS (db.py). Инвариант: каждый канал из BROADCAST_MESSENGERS имеет лейбл.
 MESSENGERS = ("tg", "vk", "max")
+# provenance — дискриминатор источника лида (SL-шов). inbound_optin = opt-in-инбаунд (человек
+# сам оставил ПДн); outbound_signal = спарсенный публичный сигнал движка (БЕЗ согласия, «сигнал+
+# ссылка»); distributed_from_t0 = раздан через тенант-0. Синхрон с db/migrate_leads_provenance.sql
+# (leads_provenance_chk). 152-ФЗ: outbound исключён из anon-выгрузки и всех авто-контакт-путей.
+PROVENANCES = ("inbound_optin", "outbound_signal", "distributed_from_t0")
 
 # Человекочитаемые подписи для UI (бейджи, фильтры, дашборд).
 STATUS_LABELS = {

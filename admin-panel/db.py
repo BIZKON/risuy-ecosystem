@@ -74,6 +74,9 @@ MESSENGERS: tuple[str, ...] = config.MESSENGERS
 _STATUS_SET = frozenset(STATUSES)
 _SOURCE_SET = frozenset(SOURCES)
 _MESSENGER_SET = frozenset(MESSENGERS)
+# provenance-шов (SL): defence-in-depth поверх leads_provenance_chk. Гейтинг 152-ФЗ держится
+# на литерале 'inbound_optin' в SQL; набор — для валидации будущих app-записей провенанса.
+_PROVENANCE_SET = frozenset(config.PROVENANCES)
 
 # Каталог продуктов (оферов): allow-list'ы видов/статусов/валют — defence-in-depth
 # поверх CHECK'ов схемы (products_kind_chk / products_status_chk) и валидации хендлера.
