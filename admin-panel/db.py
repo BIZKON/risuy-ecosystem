@@ -748,11 +748,15 @@ async def enqueue_manual_reply(
             # max → max_chat_id (адрес ответа в личке). Нет адреса в канале лида → не ставим
             # (бот всё равно не доставит). outbox.messenger → канальный дренаж воркера.
             lead = await c.fetchrow(
-                "select messenger, tg_user_id, vk_user_id, max_chat_id "
+                "select messenger, tg_user_id, vk_user_id, max_chat_id, provenance "
                 "from leads where id = $1 for update",
                 lead_id,
             )
             if lead is None:
+                return None
+            # 152-ФЗ: аутбаунд-сигнал — контакт запрещён. Ранний отказ на enqueue (не только
+            # на дренаже outbox_recheck) — операторский исходящий не попадёт в очередь.
+            if lead["provenance"] != "inbound_optin":
                 return None
             messenger = lead["messenger"] or "tg"
             addr = {"tg": lead["tg_user_id"], "vk": lead["vk_user_id"],
@@ -854,6 +858,9 @@ def _broadcast_audience_where(
         "unsubscribed_at is null",
         "erase_requested_at is null",
         "bot_paused = false",
+        # 152-ФЗ (§3.4): явный провенанс, не только consent-bool. ПОСЛЕДНЯЯ клауза —
+        # побайтово == bot _audience_where (там provenance тоже в конце). Golden-smoke сверяет.
+        "provenance = 'inbound_optin'",
     ]
     params: list[Any] = []
     i = start_idx

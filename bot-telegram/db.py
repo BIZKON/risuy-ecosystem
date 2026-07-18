@@ -286,6 +286,7 @@ async def get_due_followups(col: str, delay_seconds: int) -> list[int]:
           and {col} is null
           and unsubscribed_at is null
           and bot_paused = false
+          and provenance = 'inbound_optin'
           and guide_sent_at + make_interval(secs => $1) <= now()
         limit 100
     """
@@ -377,6 +378,7 @@ async def get_due_tenant_followups(
           and l.bot_paused = false
           and l.escalated_at is null
           and l.status <> 'converted'
+          and l.provenance = 'inbound_optin'
           and x.last_in is not null
           and (l.{col} is null or l.{col} < x.last_in)
           and {anchor_gate}
@@ -452,7 +454,9 @@ async def claim_lead_escalation(tg_user_id: int, *, messenger: str = "tg") -> bo
         async with pool.acquire() as c:
             res = await c.execute(
                 f"update leads set escalated_at = now() "
-                f"where {col} = $1 and tenant_id = $2 and escalated_at is null",
+                f"where {col} = $1 and tenant_id = $2 and escalated_at is null "
+                # 152-ФЗ: outbound-сигнал НЕ эскалируется (карточка с ПДн менеджеру запрещена).
+                f"and provenance = 'inbound_optin'",
                 tg_user_id, tenant_id(),
             )
         return res.endswith(" 1")
@@ -650,7 +654,7 @@ async def outbox_recheck_address(tg_user_id: int) -> str | None:
     """
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select tg_user_id, erase_requested_at from leads "
+            "select tg_user_id, erase_requested_at, provenance from leads "
             "where tg_user_id = $1 and tenant_id = $2",
             tg_user_id, tenant_id(),
         )
@@ -658,6 +662,10 @@ async def outbox_recheck_address(tg_user_id: int) -> str | None:
         return "no_address"
     if row["erase_requested_at"] is not None:
         return "erased"
+    # 152-ФЗ: аутбаунд-сигнал — авто/операторский контакт запрещён (только source_url + DSR).
+    # Единый чок перед send для lead_reply/lead_invoice/club → outbound не уйдёт из outbox.
+    if row["provenance"] != "inbound_optin":
+        return "outbound_no_contact"
     return None
 
 
@@ -844,7 +852,8 @@ def _audience_where(messenger: str = "tg") -> str:
     ⚠️ ДОЛЖНО побайтово совпадать с admin-panel/db.py::_broadcast_audience_where(messenger)."""
     addr = _reply_addr_col(messenger)
     return (f"messenger = '{messenger}' and {addr} is not null and consent = true "
-            "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false")
+            "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false "
+            "and provenance = 'inbound_optin'")
 
 
 # tg-вариант как константа (обратная совместимость; для tg строка идентична прежней).
