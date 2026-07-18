@@ -98,7 +98,12 @@ def parse(fields: dict) -> dict:
     posted_at (datetime|None), lang, metadata (dict).
     """
     f = _decode(fields)
-    version = f.get("v", "")
+    # Отсутствие обязательного ключа v — invalid_envelope (спека §3: «обязательные
+    # поля отсутствуют → ядовитое»); unsupported_version — ТОЛЬКО для присутствующей,
+    # но незнакомой версии (иначе dlq_reason врал бы про причину).
+    if "v" not in f:
+        raise EnvelopeError("обязательное поле v отсутствует")
+    version = f["v"]
     if version != VERSION:
         raise EnvelopeError(
             f"неподдерживаемая версия envelope: {version!r}", reason="unsupported_version"

@@ -42,6 +42,10 @@ services:
       ENGINE_DSN: postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev
       REDIS_URL: redis://redis:6379/0
       HEALTH_PORT: "8090"
+      # Стабильное имя консьюмера: дефолт hostname (config.py, остаётся для N>1)
+      # в dev плодит мёртвого консьюмера в группе на каждый re-create контейнера
+      # (PEL подхватывает наш reclaim, но реестр консьюмеров растёт без чистки).
+      INGEST_CONSUMER: "ingest-1"
     ports: ["8090:8090"]
     depends_on:
       postgres: { condition: service_healthy }

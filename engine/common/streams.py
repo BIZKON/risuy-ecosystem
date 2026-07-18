@@ -51,7 +51,9 @@ async def pending_over_idle(r: redis.Redis) -> list[dict]:
 async def claim(r: redis.Redis, message_id) -> list[tuple[bytes, dict]]:
     """XCLAIM записи на себя (инкрементит delivery count — аналог attempts на claim).
 
-    Пусто, если другой консьюмер успел забрать/ack'нуть первым.
+    Пусто в двух случаях: (а) другой консьюмер успел забрать/ack'нуть первым;
+    (б) сообщение вытримлено MAXLEN~ — Redis 7 при триме сам удаляет запись из
+    PEL, XCLAIM возвращает пусто (проверено на живом Redis 7.4).
     """
     return await r.xclaim(
         config.INGEST_STREAM,

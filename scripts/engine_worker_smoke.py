@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import logging
 import os
+import signal
 import time
 
 # Фикстура транспорта — строго ДО импорта engine.common (см. докстринг).
@@ -81,6 +82,12 @@ def check_envelope() -> None:
         lambda: envelope.parse({"v": "1", "source_kind": "telegram", "body": "x"}),
         "invalid_envelope",
     )
+    # Регресс C1: ОТСУТСТВИЕ ключа v = невалидный envelope (не unsupported_version —
+    # та причина только для присутствующей, но незнакомой версии).
+    ожидать_ошибку(
+        lambda: envelope.parse({"source_kind": "telegram", "external_id": "1:2", "body": "x"}),
+        "invalid_envelope",
+    )
     ожидать_ошибку(
         lambda: envelope.parse(
             {"v": "1", "source_kind": "rss", "external_id": "1", "body": "x"}
@@ -136,6 +143,26 @@ class ТестВоркер(base_worker.BaseWorker):
         return [ядовитое, валидное]
 
 
+class СигтермВоркер(base_worker.BaseWorker):
+    """E1: одна итерация шлёт себе НАСТОЯЩИЙ SIGTERM — run() обязан выйти сам."""
+
+    def __init__(self, redis_url: str) -> None:
+        super().__init__(redis_url)
+        self.итераций = 0
+
+    async def collect_once(self) -> list[dict]:
+        self.итераций += 1
+        os.kill(os.getpid(), signal.SIGTERM)  # не stop.set(): проверяем сам хэндлер сигнала
+        return []
+
+
+class БуферВоркер(base_worker.BaseWorker):
+    """E3: пустой коллектор — нужен только для проверки emit/_pending вне run()."""
+
+    async def collect_once(self) -> list[dict]:
+        return []
+
+
 async def check_worker() -> None:
     """DoD 6: throttle в границах, graceful по stop, emit fail-closed, floodwait_backoff."""
     r = redis.from_url(REDIS_URL)
@@ -146,8 +173,12 @@ async def check_worker() -> None:
         await asyncio.wait_for(w.run(), timeout=10)
         assert len(w.метки) == 3, f"итераций {len(w.метки)}, ожидалось 3"
         # throttle ≥ THROTTLE_MIN_S между итерациями (допуск 5 мс на таймер планировщика)
+        # и ≤ THROTTLE_MAX_S + маржа 0.3 с на работу итерации (E2: пауза не зависает)
         for a, b in zip(w.метки, w.метки[1:]):
             assert b - a >= 0.095, f"throttle-интервал {b - a:.3f} с < THROTTLE_MIN_S=0.1 с"
+            assert b - a <= config.THROTTLE_MAX_S + 0.3, (
+                f"throttle-интервал {b - a:.3f} с > THROTTLE_MAX_S={config.THROTTLE_MAX_S} с + 0.3"
+            )
         # emit fail-closed: из двух событий 3-й итерации в стриме только валидное
         n = await r.xlen(config.INGEST_STREAM)
         assert n == 1, f"в стриме {n} записей, ожидалась 1 (ядовитое обязано отвергаться)"
@@ -155,7 +186,38 @@ async def check_worker() -> None:
         t0 = time.monotonic()
         await w.floodwait_backoff(0.3)
         assert time.monotonic() - t0 >= 0.3, "floodwait_backoff вернулся раньше retry_after"
+        # E1: настоящий SIGTERM (без stop.set()) — хэндлер run() ловит → graceful-выход
+        sw = СигтермВоркер(REDIS_URL)
+        await asyncio.wait_for(sw.run(), timeout=10)
+        assert sw.итераций == 1, f"после SIGTERM итераций {sw.итераций}, ожидалась 1"
         print("  base_worker: OK")
+    finally:
+        await r.delete(config.INGEST_STREAM)  # самоочистка
+        await r.aclose()
+
+
+async def check_pending_buffer() -> None:
+    """Регресс B1/B2: XADD при мёртвом Redis НЕ теряет событие — буфер досылается.
+
+    Заодно B2: emit вне run() — клиент создаётся лениво, без AttributeError.
+    Доступ к _pending/_r — осознанный тест внутренностей каркаса (белый ящик).
+    """
+    w = БуферВоркер("redis://127.0.0.1:1/0")  # мёртвый порт: connect откажет сразу
+    событие = envelope.build(
+        "telegram", envelope.make_external_id("telegram", 999500003, 1), "буферизуемое"
+    )
+    await w.emit(событие)  # ленивый клиент на мёртвый порт → XADD падает → буфер
+    assert len(w._pending) == 1, "событие обязано остаться в _pending при недоступном Redis"
+    # «Оживление» Redis: подмена клиента на живой → буфер обязан дослаться
+    await w._r.aclose()
+    w._r = redis.from_url(REDIS_URL)
+    r = w._r
+    try:
+        assert await w._flush_pending(), "_flush_pending не дослал буфер на живом Redis"
+        assert not w._pending, "буфер обязан опустеть после досылки"
+        n = await r.xlen(config.INGEST_STREAM)
+        assert n == 1, f"в стриме {n} записей, ожидалась 1 (досланное событие)"
+        print("  pending-буфер: OK")
     finally:
         await r.delete(config.INGEST_STREAM)  # самоочистка
         await r.aclose()
@@ -167,7 +229,11 @@ def main() -> None:
     )
     check_envelope()
     asyncio.run(check_worker())
-    print("engine_worker_smoke: OK (envelope v1 + throttle/graceful/emit fail-closed)")
+    asyncio.run(check_pending_buffer())
+    print(
+        "engine_worker_smoke: OK "
+        "(envelope v1 + throttle/graceful/SIGTERM/emit fail-closed + pending-буфер)"
+    )
 
 
 main()

@@ -30,7 +30,7 @@ UPSERT_SQL = """
     on conflict (source_kind, external_id) do nothing
 """
 
-# Классификация ошибок PG (спека §4, фикс-волна ревью): permanent = ТОЛЬКО явные
+# Классификация ошибок PG (спека §4, per-task ревью Task 3): permanent = ТОЛЬКО явные
 # не-ретраябельные классы вставки — данные / целостность / схема-права. Все
 # остальные PostgresError (классы 08/40/53/57: обрыв соединения, deadlock и
 # serialization, исчерпание ресурсов, рестарт/recovery сервера — проверено на
@@ -123,15 +123,14 @@ async def tick(pool, r) -> int:
     return n
 
 
-async def _check_ready(dsn: str, redis_url: str) -> bool:
-    """Readiness: PG И Redis, каждый — своим короткоживущим подключением (cross-loop-грабля).
-
-    Контракт health.serve — Awaitable[bool] (200/503 по значению): любая
-    недоступность → False, исключения НЕ выпускаем в health-тред.
-    """
+async def _probe_ready(dsn: str, redis_url: str) -> bool:
+    """Собственно проба PG И Redis, каждый — своим короткоживущим подключением
+    (cross-loop-грабля). Потолок времени навешивает _check_ready."""
     if not await db.ping(dsn):
         return False
-    probe = redis.from_url(redis_url)
+    # Свои сокет-таймауты: без них зависшее соединение (дроп без RST) держит
+    # пробу дефолтные десятки секунд — дольше потолка health-треда.
+    probe = redis.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
     try:
         await probe.ping()
         return True
@@ -139,6 +138,33 @@ async def _check_ready(dsn: str, redis_url: str) -> bool:
         return False
     finally:
         await probe.aclose()
+
+
+async def _check_ready(dsn: str, redis_url: str) -> bool:
+    """Readiness: PG И Redis под общим потолком 4 с.
+
+    Контракт health.serve — Awaitable[bool] (200/503 по значению): любая
+    недоступность → False, исключения НЕ выпускаем в health-тред.
+    Потолок 4 с < .result(timeout=5) health-треда: иначе рваное соединение
+    (db.ping ждёт дефолтный timeout asyncpg 60 с) оставляет /readyz без
+    HTTP-ответа вовсе — хуже честного 503.
+    """
+    try:
+        return await asyncio.wait_for(_probe_ready(dsn, redis_url), timeout=4.0)
+    except TimeoutError:
+        return False
+
+
+async def _sleep_or_stop(stop: asyncio.Event, delay: float) -> None:
+    """Прерываемая пауза (паттерн base_worker): stop будит досрочно.
+
+    Голый asyncio.sleep не будится SIGTERM'ом: длинный backoff при аутедже
+    переживал бы stop_grace_period 15 с compose → SIGKILL вместо graceful.
+    """
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=delay)
+    except TimeoutError:
+        pass
 
 
 async def run() -> None:
@@ -163,13 +189,32 @@ async def run() -> None:
         try:
             await tick(pool, r)
             backoff = 1.0
+        except redis.ResponseError as exc:
+            # Самовосстановление NOGROUP (спека §4, fail-mode «не тихий fail-open»):
+            # стрим/группа исчезли (DEL/FLUSHDB/потеря AOF) → XPENDING/XREADGROUP
+            # кидают NOGROUP. Без этой ветки он падал бы в generic-except —
+            # вечный лог+sleep без единого чтения, т.е. тихий отказ под видом
+            # живого процесса. ensure_group идемпотентен (BUSYGROUP глотается),
+            # поэтому пересоздание безопасно и возвращает консьюмера в строй.
+            if "NOGROUP" not in str(exc):
+                logger.exception("Сбой тика ingest (ResponseError)")
+                await _sleep_or_stop(stop, 1.0)
+                continue
+            logger.warning("NOGROUP (%s) — пересоздаю группу и продолжаю", exc)
+            try:
+                await streams.ensure_group(r)
+            except Exception:  # noqa: BLE001 — Redis мог упасть между NOGROUP и пересозданием
+                logger.exception("Пересоздание группы не удалось — повтор на следующем витке")
+                await _sleep_or_stop(stop, 1.0)
+            continue
         except _TRANSIENT as exc:
-            logger.warning("Транзиент (%s: %s) — пауза %.1f с", type(exc).__name__, exc, backoff)
-            await asyncio.sleep(backoff + random.uniform(0, backoff / 2))
+            pause = backoff + random.uniform(0, backoff / 2)
+            logger.warning("Транзиент (%s: %s) — пауза %.1f с", type(exc).__name__, exc, pause)
+            await _sleep_or_stop(stop, pause)
             backoff = min(backoff * 2, config.INGEST_BACKOFF_MAX_S)
         except Exception:  # noqa: BLE001 — цикл не должен падать (эталон worker.py)
             logger.exception("Сбой тика ingest")
-            await asyncio.sleep(1)
+            await _sleep_or_stop(stop, 1.0)
         now = time.monotonic()
         if now - last_lag_log >= config.INGEST_LAG_LOG_EVERY_S:
             try:

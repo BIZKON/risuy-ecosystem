@@ -3,7 +3,8 @@
 Сценарии: E3-идемпотентность (дубль → 1 строка), E3-рестарт (at-least-once,
 reclaim через XPENDING/XCLAIM — здесь же сверяются живые сигнатуры redis-py 5.2.1,
 риск §11 спеки), ядовитое → DLQ без блокировки потока, потолок доставок → DLQ,
-backpressure MAXLEN~. Гард DSN: только эфемерный risuy_dev. Redis — БД №1
+backpressure MAXLEN~, NOGROUP-самовосстановление (DEL стрима под живым ingest.run()).
+Гард DSN: только эфемерный risuy_dev. Redis — БД №1
 (SMOKE_REDIS_URL), живому консьюмеру на БД №0 не мешаем.
 Env-фикстура — строго ДО импорта engine-модулей (константы читаются на импорте).
 Самоочистка: DEL smoke:raw smoke:raw:dlq + delete тест-строк (префикс 9995…).
@@ -11,6 +12,7 @@ Env-фикстура — строго ДО импорта engine-модулей 
 import asyncio
 import logging
 import os
+import signal
 
 # Фикстура транспорта — строго ДО импорта engine.common/engine.ingest_consumer.
 os.environ["INGEST_STREAM"] = "smoke:raw"
@@ -170,6 +172,52 @@ async def scenario_maxlen(r: redis.Redis) -> None:
     print(f"  сценарий 5 (MAXLEN~): OK, XLEN={xlen}")
 
 
+async def _дождаться_строки(pool: asyncpg.Pool, external_id: str, что: str) -> None:
+    """Поллинг ≤ 5 с: фоновый ingest.run() пишет строку асинхронно."""
+    for _ in range(50):
+        if await row_count(pool, external_id) == 1:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(что)
+
+
+async def scenario_nogroup_recovery(pool: asyncpg.Pool, r: redis.Redis) -> None:
+    """Регресс A1: DEL стрима под живым run() → NOGROUP → группа пересоздана, поток жив.
+
+    Гоняем НАСТОЯЩИЙ ingest.run() фоновой таской (не эмуляцию его except-ветки
+    ручным ensure_group — она не регрессила бы сам клин в run()); остановка —
+    настоящим SIGTERM через его же хэндлер. Redis может отдать заблокированному
+    XREADGROUP и «UNBLOCKED...» (не NOGROUP) — тогда клин срабатывает со
+    следующего тика, поэтому пересоздание группы ждём поллингом, а не 2 тика.
+    """
+    os.environ["ENGINE_DSN"] = DSN  # run() читает через config.req на старте
+    os.environ["REDIS_URL"] = REDIS_URL
+    await r.delete(config.INGEST_STREAM, config.INGEST_DLQ_STREAM)  # хвост MAXLEN-сценария
+    task = asyncio.create_task(ingest.run())
+    try:
+        ext1 = envelope.make_external_id("telegram", 999560001, 1)
+        await streams.emit(r, envelope.build("telegram", ext1, "до потери группы"))
+        await _дождаться_строки(pool, ext1, "событие до DEL не записано — run() не заработал")
+        await r.delete(config.INGEST_STREAM)  # группа исчезает вместе со стримом → NOGROUP
+        groups: list = []
+        for _ in range(50):  # ≤ 5 с на самовосстановление (обычно — миллисекунды)
+            try:
+                groups = await r.xinfo_groups(config.INGEST_STREAM)
+            except redis.ResponseError:  # стрима ещё нет — клин не дошёл до ensure_group
+                groups = []
+            if groups:
+                break
+            await asyncio.sleep(0.1)
+        assert groups, "группа не пересоздана после NOGROUP (клин run() не сработал)"
+        ext2 = envelope.make_external_id("telegram", 999560002, 1)
+        await streams.emit(r, envelope.build("telegram", ext2, "после пересоздания"))
+        await _дождаться_строки(pool, ext2, "событие после пересоздания группы не записано")
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)  # graceful-стоп run() (его хэндлер ловит)
+        await asyncio.wait_for(task, timeout=10)
+    print("  сценарий 6 (NOGROUP-самовосстановление): OK")
+
+
 async def main() -> None:
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     r = redis.from_url(REDIS_URL)
@@ -181,11 +229,12 @@ async def main() -> None:
         await scenario_poison(pool, r)
         await scenario_max_deliveries(pool, r)
         await scenario_maxlen(r)
+        await scenario_nogroup_recovery(pool, r)
     finally:
         await cleanup(pool, r)
         await r.aclose()
         await pool.close()
-    print("engine_transport_smoke: OK (E3+DLQ+потолок+MAXLEN)")
+    print("engine_transport_smoke: OK (E3+DLQ+потолок+MAXLEN+NOGROUP)")
 
 
 logging.basicConfig(
