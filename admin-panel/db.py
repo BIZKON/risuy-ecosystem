@@ -5258,9 +5258,16 @@ async def get_partner(partner_id: str) -> dict | None:
 async def list_partner_tenants(partner_id: str) -> list[dict]:
     async with pool.acquire() as c:
         rows = await c.fetch(
+            # LEFT JOIN LATERAL: по одной строке на тенанта (последний бриф),
+            # иначе при 2+ брифах одного тенанта строки дублировались бы и
+            # расходились с tenant_count (count distinct) в list_partners.
             "select t.id, t.name, t.slug, t.created_at, "
             "b.id as brief_id, b.status as brief_status, b.token "
-            "from tenants t left join tenant_brief b on b.tenant_id = t.id "
+            "from tenants t "
+            "left join lateral ("
+            "  select id, status, token from tenant_brief "
+            "  where tenant_id = t.id order by created_at desc limit 1"
+            ") b on true "
             "where t.partner_id = $1 order by t.created_at desc", partner_id)
     return [dict(r) for r in rows]
 

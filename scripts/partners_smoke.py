@@ -58,6 +58,19 @@ async def main():
         m2 = [r for r in rows2 if str(r["id"]) == pid][0]
         check("tenant_count=1", m2["tenant_count"] == 1, f"c={m2['tenant_count']}")
         check("brief_done=1", m2["brief_done"] == 1, f"d={m2['brief_done']}")
+        print("3b. дедуп: тенант с 2 брифами → одна строка (последний бриф):")
+        async with db.pool.acquire() as c:
+            await c.execute("insert into tenant_brief(tenant_id,token,status,created_at) "
+                            "values($1,'smoke-reft-tok2','proposed', now() + interval '1 second')", tid)
+        pt2 = await db.list_partner_tenants(pid)
+        mine_rows = [r for r in pt2 if str(r["id"]) == str(tid)]
+        check("тенант с 2 брифами — ровно одна строка", len(mine_rows) == 1, f"строк={len(mine_rows)}")
+        check("показан последний бриф (proposed)",
+              bool(mine_rows) and mine_rows[0]["brief_status"] == "proposed",
+              f"st={mine_rows[0]['brief_status'] if mine_rows else None}")
+        rows2b = await db.list_partners()
+        m2b = [r for r in rows2b if str(r["id"]) == pid][0]
+        check("tenant_count всё ещё 1 (не задвоился)", m2b["tenant_count"] == 1, f"c={m2b['tenant_count']}")
         print("4. set_partner_status disabled → get_partner видит:")
         await db.set_partner_status(pid, "disabled", actor="smoke", ip=None, user_agent=None)
         check("status disabled", (await db.get_partner(pid))["status"] == "disabled")
