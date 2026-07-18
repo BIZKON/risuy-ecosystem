@@ -34,6 +34,10 @@ services:
     # engine_rw создаётся в db-init ПОСЛЕ старта инфры; при гонке контейнер
     # переподключается, а не остаётся Exited (make up гарантирует порядок отдельно).
     restart: unless-stopped
+    # Явный грейс: среда может отдавать контейнерам StopTimeout=1с (наблюдалось на
+    # Docker Desktop 29.x) → SIGKILL раньше, чем консьюмер дочитает XREADGROUP BLOCK
+    # (INGEST_BLOCK_MS=5с) и закроет пул. 15с покрывает блок + graceful-очистку.
+    stop_grace_period: 15s
     environment:
       ENGINE_DSN: postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev
       REDIS_URL: redis://redis:6379/0
