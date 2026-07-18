@@ -6418,7 +6418,7 @@ async def brief_center_create_new(request: Request,
 
 
 @app.get("/brief-center/{brief_id}", response_class=HTMLResponse)
-async def brief_detail(request: Request, brief_id: str,
+async def brief_detail(request: Request, brief_id: uuid.UUID,
                        session: auth.Session = Depends(require_session),
                        saved: str | None = None, err: str | None = None):
     _require_admin(session)
@@ -6433,7 +6433,7 @@ async def brief_detail(request: Request, brief_id: str,
 
 
 @app.post("/brief-center/{brief_id}/orchestrate")
-async def brief_orchestrate(request: Request, brief_id: str,
+async def brief_orchestrate(request: Request, brief_id: uuid.UUID,
                             session: auth.Session = Depends(require_session),
                             csrf_token: str = Form("")):
     _require_admin(session)
@@ -6447,7 +6447,7 @@ async def brief_orchestrate(request: Request, brief_id: str,
 
 
 @app.post("/brief-center/{brief_id}/apply")
-async def brief_apply_route(request: Request, brief_id: str,
+async def brief_apply_route(request: Request, brief_id: uuid.UUID,
                             session: auth.Session = Depends(require_session),
                             csrf_token: str = Form(""), sections: list[str] = Form(default=[])):
     _require_admin(session)
