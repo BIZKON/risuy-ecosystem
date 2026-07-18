@@ -12,20 +12,13 @@ from engine.common import db as engine_db
 from engine.common import health
 
 
-async def _readiness(pool) -> bool:
-    try:
-        async with pool.acquire() as c:
-            await c.execute("select 1")
-        return True
-    except Exception:
-        return False
-
-
 async def run() -> None:
     dsn = os.environ["ENGINE_DSN"]
     redis_url = os.environ["REDIS_URL"]
     pool = await engine_db.make_pool(dsn)
-    health.serve(int(os.environ.get("HEALTH_PORT", "8090")), lambda: _readiness(pool))
+    # readiness = db.ping со СВОИМ соединением (health крутит свой event-loop; пул
+    # главного loop трогать нельзя — cross-loop RuntimeError → вечный 503).
+    health.serve(int(os.environ.get("HEALTH_PORT", "8090")), lambda: engine_db.ping(dsn))
     r = aioredis.from_url(redis_url)
     last_id = "0"
     while True:
@@ -36,12 +29,15 @@ async def run() -> None:
                 f = {k.decode(): v.decode() for k, v in fields.items()}
                 async with pool.acquire() as c:
                     await engine_db.set_tenant(c, f["tenant_id"])
-                    await c.execute(
+                    status = await c.execute(
                         "insert into engine.raw_messages (tenant_id, source_kind, external_id, text) "
                         "values ($1,$2,$3,$4) on conflict (source_kind, external_id) do nothing",
                         f["tenant_id"], f["source_kind"], f["external_id"], f["text"],
                     )
-                print(f"ingest: строка записана из {msg_id.decode()}")
+                # asyncpg возвращает статус "INSERT 0 1" (вставлено) либо "INSERT 0 0" (дубль-пропуск).
+                inserted = status.rsplit(" ", 1)[-1] == "1"
+                verb = "строка записана" if inserted else "дубликат пропущен"
+                print(f"ingest: {verb} — {msg_id.decode()}")
 
 
 if __name__ == "__main__":

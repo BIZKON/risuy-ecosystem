@@ -17,12 +17,20 @@ services:
   redis:
     image: redis:7-alpine
     ports: ["6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   engine-ingest:
     build:
       context: .
       dockerfile: engine/common/Dockerfile
     command: python -m engine.ingest_consumer.main
+    # engine_rw создаётся в db-init ПОСЛЕ старта инфры; при гонке контейнер
+    # переподключается, а не остаётся Exited (make up гарантирует порядок отдельно).
+    restart: unless-stopped
     environment:
       ENGINE_DSN: postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev
       REDIS_URL: redis://redis:6379/0
@@ -30,7 +38,7 @@ services:
     ports: ["8090:8090"]
     depends_on:
       postgres: { condition: service_healthy }
-      redis: { condition: service_started }
+      redis: { condition: service_healthy }
 
   # dev-профиль: одноразовый producer для walking-skeleton (make skeleton).
   engine-stub:

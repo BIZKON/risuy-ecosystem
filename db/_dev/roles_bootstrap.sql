@@ -33,5 +33,22 @@ grant usage, select on all sequences in schema engine to engine_rw;
 alter default privileges in schema engine grant select, insert, update on tables to engine_rw;
 
 -- Гранты engine_rw на public.leads (forward-совместимо под B-FWD; RLS применяется — не owner).
+-- Гард: public.leads приезжает только из schema_snapshot.sql; без него грант ронял бы
+-- db-init под ON_ERROR_STOP=1 (relation does not exist). GRANT в plpgsql — через execute.
 grant usage on schema public to engine_rw;
-grant select, insert, update on public.leads to engine_rw;
+do $$ begin
+  if to_regclass('public.leads') is not null then
+    execute 'grant select, insert, update on public.leads to engine_rw';
+  end if;
+end $$;
+
+-- Смоук-тенанты для scripts/engine_rw_leads_isolation_smoke.py (leads.tenant_id → FK на
+-- tenants). Сидим привилегированно (owner), под гардом наличия tenants (только из снапшота).
+do $$ begin
+  if to_regclass('public.tenants') is not null then
+    insert into tenants (id, slug, name, status) values
+      ('11111111-1111-1111-1111-111111111111', 'smoke-engine-a', 'Smoke A', 'active'),
+      ('22222222-2222-2222-2222-222222222222', 'smoke-engine-b', 'Smoke B', 'active')
+    on conflict (id) do nothing;
+  end if;
+end $$;
