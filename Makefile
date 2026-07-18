@@ -32,7 +32,8 @@ skeleton:
 	$(PG) -c "select count(*) as rows_in_raw from engine.raw_messages;"
 
 lint:
-	ruff check engine/ scripts/engine_rw_leads_isolation_smoke.py
+	ruff check engine/ scripts/engine_rw_leads_isolation_smoke.py \
+	  scripts/engine_worker_smoke.py scripts/engine_transport_smoke.py
 
 # db-смоуки против эфемерного PG: engine_rw-изоляция на leads + RLS панели. Хост-python
 # без asyncpg → гоняем в python:3.12 на сети compose (postgres:5432). Панель-смоук — под
