@@ -15,16 +15,8 @@ end $$;
 -- Схема сырья движка (решение Q10 — отдельная схема, не инстанс).
 create schema if not exists engine authorization engine_rw;
 
--- Заглушка raw_messages ТОЛЬКО под walking-skeleton S0M. Финальный DDL — S1-RAW.
-create table if not exists engine.raw_messages (
-    id          bigserial primary key,
-    created_at  timestamptz not null default now(),
-    tenant_id   text not null,
-    source_kind text not null,
-    external_id text not null,
-    text        text,
-    unique (source_kind, external_id)
-);
+-- engine.raw_messages и вся схема данных движка — в db/migrate_engine_schema.sql (S1-RAW),
+-- применяется db-init ПОСЛЕ этого файла. Заглушка S0M убрана (была walking-skeleton-only).
 
 -- Гранты engine_rw на схему engine.
 grant usage on schema engine to engine_rw;

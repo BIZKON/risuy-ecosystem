@@ -19,8 +19,9 @@ down:
 # При наличии снапшота — ещё и передать владение не-суперюзеру gen_user (иначе смоук
 # изоляции панели ложно проваливается: локальный owner-суперюзер обходит RLS даже при FORCE).
 db-init:
-	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/schema_snapshot.sql | $(PG) || echo "нет schema_snapshot.sql — только roles_bootstrap (Task 5 сгенерит снапшот)"
+	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/schema_snapshot.sql | $(PG) || echo "нет schema_snapshot.sql — только roles_bootstrap"
 	cat db/_dev/roles_bootstrap.sql | $(PG)
+	cat db/migrate_engine_schema.sql | $(PG)
 	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/owner_reassign.sql | $(PG) || echo "снапшота нет — reassign владельца пропущен"
 
 # Walking-skeleton: одно событие → одна строка в engine.raw_messages.
@@ -40,6 +41,12 @@ smoke:
 	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
 	  -e ENGINE_RW_SMOKE_DSN="postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev" \
 	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/engine_rw_leads_isolation_smoke.py"
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e ENGINE_SCHEMA_SMOKE_DSN="postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev" \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/engine_schema_smoke.py"
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e PANEL_RW_SMOKE_DSN="postgresql://panel_rw:panel_rw_local@postgres:5432/risuy_dev" \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/engine_tenant_isolation_smoke.py"
 	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
 	  -e RLS_SMOKE_DSN="postgresql://gen_user:gen_user_local@postgres:5432/risuy_dev" \
 	  -e PYTHONPATH="admin-panel:." \

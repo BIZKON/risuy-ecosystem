@@ -28,11 +28,12 @@ async def run() -> None:
                 last_id = msg_id
                 f = {k.decode(): v.decode() for k, v in fields.items()}
                 async with pool.acquire() as c:
-                    await engine_db.set_tenant(c, f["tenant_id"])
+                    # raw_messages — SHARED сырьё (без tenant_id): глобальный дедуп, тенант
+                    # появляется в matching, не здесь → set_tenant не нужен.
                     status = await c.execute(
-                        "insert into engine.raw_messages (tenant_id, source_kind, external_id, text) "
-                        "values ($1,$2,$3,$4) on conflict (source_kind, external_id) do nothing",
-                        f["tenant_id"], f["source_kind"], f["external_id"], f["text"],
+                        "insert into engine.raw_messages (source_kind, external_id, body) "
+                        "values ($1,$2,$3) on conflict (source_kind, external_id) do nothing",
+                        f["source_kind"], f["external_id"], f["text"],
                     )
                 # asyncpg возвращает статус "INSERT 0 1" (вставлено) либо "INSERT 0 0" (дубль-пропуск).
                 inserted = status.rsplit(" ", 1)[-1] == "1"

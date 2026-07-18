@@ -49,6 +49,5 @@ services:
     command: python -m engine._stub_producer.main
     environment:
       REDIS_URL: redis://redis:6379/0
-      ENGINE_STUB_TENANT_ID: "00000000-0000-0000-0000-000000000000"
     depends_on:
       redis: { condition: service_started }

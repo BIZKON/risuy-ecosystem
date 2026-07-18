@@ -8,9 +8,8 @@ import redis
 
 def main() -> None:
     r = redis.from_url(os.environ["REDIS_URL"])
-    tenant_id = os.environ["ENGINE_STUB_TENANT_ID"]
+    # raw_messages — shared, без tenant_id (глобальное сырьё).
     r.xadd("engine:raw", {
-        "tenant_id": tenant_id,
         "source_kind": "telegram",
         "external_id": "stub-1",
         "text": "ищу подрядчика на ремонт офиса",
