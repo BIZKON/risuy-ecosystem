@@ -1960,7 +1960,7 @@ async def export_masked(
     await _enforce_csrf(request, session, csrf_token)
     filters, raw = _parse_filters(request, session)
 
-    total = await db.count_leads(filters)
+    total = await db.count_leads_export(filters)  # 152-ФЗ: только inbound (как экспорт-стрим)
     # Аудит ДО старта стрима (fail-closed): падение → 500, ни одной строки CSV.
     await db.audit(actor=session.actor, action="export", ip=_ip(request), user_agent=_ua(request),
                    detail={"filters": _audit_filters(raw), "matched": total,
@@ -1993,7 +1993,7 @@ async def export_full(
             detail="Для выгрузки полных телефонов задайте хотя бы один фильтр",
         )
 
-    total = await db.count_leads(filters)
+    total = await db.count_leads_export(filters)  # 152-ФЗ: только inbound (как экспорт-стрим)
     await db.audit(actor=session.actor, action="export_full", ip=_ip(request),
                    user_agent=_ua(request),
                    detail={"filters": _audit_filters(raw), "matched": total,

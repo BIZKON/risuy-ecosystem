@@ -250,6 +250,16 @@ async def count_leads(filters: dict[str, Any]) -> int:
         return int(await c.fetchval(q, *params))
 
 
+async def count_leads_export(filters: dict[str, Any]) -> int:
+    """Число лидов, реально попадающих в операторскую CSV-выгрузку: ТОЛЬКО inbound_optin
+    (тот же провенанс-предикат, что stream_export_masked/full). НЕ count_leads(filters):
+    иначе аудит export завышает matched на объём outbound-сигналов (аналог count_leads_anon)."""
+    where_sql, params, _ = build_filters(**filters)
+    q = f"select count(*) from leads where ({where_sql}) and provenance = 'inbound_optin'"
+    async with pool.acquire() as c:
+        return int(await c.fetchval(q, *params))
+
+
 async def list_leads(
     filters: dict[str, Any], *, sort: str, limit: int, offset: int
 ) -> list[asyncpg.Record]:
@@ -550,7 +560,9 @@ async def stream_export_masked(filters: dict[str, Any], *, row_cap: int):
                messenger, source, status, consent, subscribed,
                guide_sent_at, erase_requested_at
         from leads
-        where {where_sql}
+        -- 152-ФЗ: outbound-сигнал НЕ в операторской CSV-выгрузке (аналог anon-фикса; провенанс
+        -- ТОЛЬКО в экспорт-стриме, НЕ в общем build_filters — панель легитимно видит outbound).
+        where ({where_sql}) and provenance = 'inbound_optin'
         order by created_at desc
         limit ${next_i}
     """
@@ -569,7 +581,8 @@ async def stream_export_full(filters: dict[str, Any], *, row_cap: int):
                messenger, source, status, consent, subscribed,
                guide_sent_at, erase_requested_at
         from leads
-        where {where_sql}
+        -- 152-ФЗ: полные телефоны outbound-сигналов НЕ выгружаются (провенанс в стриме, не в build_filters).
+        where ({where_sql}) and provenance = 'inbound_optin'
         order by created_at desc
         limit ${next_i}
     """

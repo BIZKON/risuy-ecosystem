@@ -34,8 +34,8 @@ async def main() -> None:
                 "insert into leads (tenant_id, messenger, source, status, tg_user_id, provenance) "
                 "values ($1,'tg','other','new',$2,'inbound_optin')", TA, IB)
             await c.execute(
-                "insert into leads (tenant_id, messenger, source, status, tg_user_id, provenance, consent, source_url) "
-                "values ($1,'tg','other','new',$2,'outbound_signal',false,'https://t.me/x/1')", TA, OB)
+                "insert into leads (tenant_id, messenger, source, status, tg_user_id, name, phone, provenance, consent, source_url) "
+                "values ($1,'tg','other','new',$2,'ВЗЛОМ-OUTBOUND','+79990000001','outbound_signal',false,'https://t.me/x/1')", TA, OB)
             ib_id = await c.fetchval("select id from leads where tg_user_id=$1", IB)
             ob_id = await c.fetchval("select id from leads where tg_user_id=$1", OB)
 
@@ -53,6 +53,14 @@ async def main() -> None:
         # robust к предсуществующим строкам: считает ровно inbound и исключает наш outbound-сид.
         assert cnt == inbound_total, f"count_leads_anon != число inbound ({cnt} vs {inbound_total})"
         assert cnt < all_total, "count_leads_anon должен исключать outbound (< всех лидов)"
+
+        # Операторская CSV-выгрузка (completeness-фикс): outbound НЕ в masked/full + count_leads_export.
+        masked_names = [r["name"] async for r in db.stream_export_masked({}, row_cap=1000)]
+        full_phones = [r["phone"] async for r in db.stream_export_full({}, row_cap=1000)]
+        assert "ВЗЛОМ-OUTBOUND" not in masked_names, "outbound-имя НЕ должно быть в masked-экспорте"
+        assert "+79990000001" not in full_phones, "outbound-телефон НЕ должен быть в full-экспорте"
+        assert await db.count_leads_export({}) < await db.count_leads({}), \
+            "count_leads_export должен исключать outbound"
     finally:
         db.set_active_tenant(None)
         async with db.pool.acquire() as c:
