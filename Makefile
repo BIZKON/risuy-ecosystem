@@ -16,9 +16,12 @@ down:
 	$(COMPOSE) down -v
 
 # Применить снапшот схемы risuy (если есть) + роли/схему engine к эфемерному PG.
+# При наличии снапшота — ещё и передать владение не-суперюзеру gen_user (иначе смоук
+# изоляции панели ложно проваливается: локальный owner-суперюзер обходит RLS даже при FORCE).
 db-init:
 	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/schema_snapshot.sql | $(PG) || echo "нет schema_snapshot.sql — только roles_bootstrap (Task 5 сгенерит снапшот)"
 	cat db/_dev/roles_bootstrap.sql | $(PG)
+	@test -f db/_dev/schema_snapshot.sql && cat db/_dev/owner_reassign.sql | $(PG) || echo "снапшота нет — reassign владельца пропущен"
 
 # Walking-skeleton: одно событие → одна строка в engine.raw_messages.
 skeleton:
@@ -29,6 +32,15 @@ skeleton:
 lint:
 	ruff check engine/ scripts/engine_rw_leads_isolation_smoke.py
 
-# db-смоуки: RLS панели + engine_rw-изоляция на leads (см. Task 6 плана). Гонит КОНТРОЛЛЕР.
+# db-смоуки против эфемерного PG: engine_rw-изоляция на leads + RLS панели. Хост-python
+# без asyncpg → гоняем в python:3.12 на сети compose (postgres:5432). Панель-смоук — под
+# не-суперюзером gen_user (иначе суперюзер обходит RLS даже при FORCE).
+NET=$(shell basename $(CURDIR))_default
 smoke:
-	@echo "см. Task 6 плана: RLS_SMOKE_DSN + engine_rw_leads_isolation_smoke"
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e ENGINE_RW_SMOKE_DSN="postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev" \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/engine_rw_leads_isolation_smoke.py"
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e RLS_SMOKE_DSN="postgresql://gen_user:gen_user_local@postgres:5432/risuy_dev" \
+	  -e PYTHONPATH="admin-panel:." \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/rls_leads_messages_smoke.py"
