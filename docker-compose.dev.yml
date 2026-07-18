@@ -16,6 +16,9 @@ services:
 
   redis:
     image: redis:7-alpine
+    # AOF: PEL/retry транспорта переживают рестарт Redis в dev (спека S2 §7).
+    # Volume НЕ добавляем — `make down` = `down -v` остаётся чистилкой; прод-Redis — S7M.
+    command: ["redis-server", "--appendonly", "yes"]
     ports: ["6380:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

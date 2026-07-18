@@ -49,7 +49,8 @@ create index if not exists raw_messages_metadata_gin on engine.raw_messages
 -- третьих лиц в тексте объявления). Правовое основание обработки — публичный первоисточник
 -- («сигнал+ссылка», не база ПДн). Presidio-RU (S5) маскирует ПУТЬ к внешнему LLM, НЕ хранение
 -- at-rest. TTL-sweep по created_at (индекс выше готов) — ОТДЕЛЬНЫЙ engine-retention-джоб
--- (own-роль/DSN), НЕ bot-telegram/retention.py; задача S2/S5. Срок хранения — решение владельца.
+-- (own-роль/DSN), НЕ bot-telegram/retention.py; задача S7M (прод-инфра-джоб: там появляются
+-- прод-DDL и раннер, спека S2 §8). Срок хранения — решение владельца.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- engine.accounts — PLATFORM пул userbot-сессий (vault-шифр., без tenant_id, без RLS).

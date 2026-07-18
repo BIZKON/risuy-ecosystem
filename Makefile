@@ -52,3 +52,14 @@ smoke:
 	  -e RLS_SMOKE_DSN="postgresql://gen_user:gen_user_local@postgres:5432/risuy_dev" \
 	  -e PYTHONPATH="admin-panel:." \
 	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/rls_leads_messages_smoke.py"
+	# S2-смоуки транспорта (Redis БД №1 — не мешаем живому консьюмеру на №0):
+	# envelope+base_worker (DoD 5-6) и E3/DLQ/потолок/MAXLEN (DoD 1-4, 8).
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e SMOKE_REDIS_URL="redis://redis:6379/1" \
+	  -e PYTHONPATH="." \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 redis==5.2.1 && python scripts/engine_worker_smoke.py"
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e ENGINE_TRANSPORT_SMOKE_DSN="postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev" \
+	  -e SMOKE_REDIS_URL="redis://redis:6379/1" \
+	  -e PYTHONPATH="." \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 redis==5.2.1 && python scripts/engine_transport_smoke.py"
