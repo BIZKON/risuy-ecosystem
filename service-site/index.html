@@ -37,48 +37,50 @@
   <!-- ============ HERO ============ -->
   <section class="hero">
     <div class="wrap">
-      <span class="chip"><span class="chip__dot" aria-hidden="true"></span>Уже работает: школа рисунка им.&nbsp;Б.&nbsp;В.&nbsp;Лесова</span>
+      <span class="chip" data-m><span class="chip__dot" aria-hidden="true"></span>Уже работает: школа рисунка им.&nbsp;Б.&nbsp;В.&nbsp;Лесова</span>
       <h1>ИИ-команда, которая продаёт и поддерживает клиентов — в Telegram, VK и MAX</h1>
-      <p class="lead">«ИИ-Агент Про» — не один чат-бот, а <b>команда ИИ-сотрудников</b>: отвечают по вашей базе знаний, помнят каждого клиента, принимают оплату прямо в переписке. Сложные случаи передают живому оператору. Всё видно в одном кабинете.</p>
-      <div class="cta">
+      <p class="lead" data-m>«ИИ-Агент Про» — не один чат-бот, а <b>команда ИИ-сотрудников</b>: отвечают по вашей базе знаний, помнят каждого клиента, принимают оплату прямо в переписке. Сложные случаи передают живому оператору. Всё видно в одном кабинете.</p>
+      <div class="cta" data-m>
         <a class="btn btn--primary" href="#tarify">Выбрать тариф</a>
         <a class="btn btn--outline" href="#demo-chat">Попробовать живое демо</a>
         <a class="btn btn--outline" href="https://t.me/My_Pro_Patent_Bot" target="_blank" rel="noopener">Протестировать в Telegram →</a>
       </div>
-      <div class="trust" role="list">
+      <div class="trust" role="list" data-m>
         <span class="pill" role="listitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 22s8-3.6 8-9V5l-8-3-8 3v8c0 5.4 8 9 8 9z"/></svg>Серверы в РФ · 152-ФЗ</span>
         <span class="pill" role="listitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>Без автосписаний</span>
         <span class="pill" role="listitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Запуск за 1 рабочий день</span>
       </div>
 
-      <!-- Мокап кабинета: продукт в действии (CSS, без изображений) -->
-      <div class="dash" aria-label="Пример кабинета: диалог и карточка лида">
+      <!-- Мокап кабинета: продукт в действии (CSS, без изображений). Секвенция
+           «клиент → Лия печатает → ответ → карточка лида» — см. скрипт моушена внизу. -->
+      <div class="dash" data-m aria-label="Пример кабинета: диалог и карточка лида">
         <div class="dash__bar" aria-hidden="true">
           <span class="dash__cir"></span><span class="dash__cir"></span><span class="dash__cir"></span>
           <span class="dash__url">кабинет «ИИ-Агент Про»</span>
         </div>
         <div class="dash__body">
           <aside class="dash__side" aria-hidden="true">
-            <span class="dash__nav dash__nav--on">💬 Диалоги</span>
-            <span class="dash__nav">👥 Лиды и воронка</span>
-            <span class="dash__nav">📚 База знаний</span>
-            <span class="dash__nav">🤖 ИИ-команда</span>
-            <span class="dash__nav">📣 Рассылки</span>
-            <span class="dash__nav">📈 Аналитика</span>
+            <span class="dash__nav dash__nav--on" data-m>💬 Диалоги</span>
+            <span class="dash__nav" data-m>👥 Лиды и воронка</span>
+            <span class="dash__nav" data-m>📚 База знаний</span>
+            <span class="dash__nav" data-m>🤖 ИИ-команда</span>
+            <span class="dash__nav" data-m>📣 Рассылки</span>
+            <span class="dash__nav" data-m>📈 Аналитика</span>
           </aside>
           <div class="dash__feed">
-            <div class="dash__cap">Диалог · Telegram</div>
-            <p class="dmsg dmsg--in">Здравствуйте! Сколько стоит абонемент и можно ли начать с пробного занятия?<span class="dmsg__meta">Клиент · 23:47</span></p>
-            <p class="dmsg dmsg--out">Добрый вечер! 🙂 Пробное занятие — бесплатно, абонемент на месяц — 4 900 ₽. Записать вас и прислать ссылку на оплату?<span class="dmsg__meta">Лия · ИИ-администратор · ответ за 3 сек</span></p>
-            <p class="dmsg dmsg--note">Оператор видит диалог и может подключиться в любой момент</p>
+            <div class="dash__cap" data-m>Диалог · Telegram</div>
+            <p class="dmsg dmsg--in" data-m>Здравствуйте! Сколько стоит абонемент и можно ли начать с пробного занятия?<span class="dmsg__meta">Клиент · 23:47</span></p>
+            <p class="dmsg dmsg--in dmsg--typing" data-m hidden aria-hidden="true"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></p>
+            <p class="dmsg dmsg--out" data-m>Добрый вечер! 🙂 Пробное занятие — бесплатно, абонемент на месяц — 4 900 ₽. Записать вас и прислать ссылку на оплату?<span class="dmsg__meta">Лия · ИИ-администратор · ответ за 3 сек</span></p>
+            <p class="dmsg dmsg--note" data-m>Оператор видит диалог и может подключиться в любой момент</p>
           </div>
           <aside class="dash__crm" aria-hidden="true">
-            <div class="dash__cap">Карточка клиента</div>
-            <div class="kv"><span>Статус</span><b class="tag-hot">Горячий</b></div>
-            <div class="kv"><span>Канал</span><b>Telegram</b></div>
-            <div class="kv"><span>Источник</span><b>Реклама VK</b></div>
-            <div class="kv"><span>Помнит</span><b>спрашивал про акварель</b></div>
-            <div class="kv"><span>Оплата</span><b>ссылка отправлена</b></div>
+            <div class="dash__cap" data-m>Карточка клиента</div>
+            <div class="kv" data-m><span>Статус</span><b class="tag-hot">Горячий</b></div>
+            <div class="kv" data-m><span>Канал</span><b>Telegram</b></div>
+            <div class="kv" data-m><span>Источник</span><b>Реклама VK</b></div>
+            <div class="kv" data-m><span>Помнит</span><b>спрашивал про акварель</b></div>
+            <div class="kv" data-m><span>Оплата</span><b>ссылка отправлена</b></div>
           </aside>
         </div>
       </div>
@@ -200,7 +202,7 @@
         <h2>Один сервис вместо дежурного менеджера, CRM и рассыльщика</h2>
         <p>Подключаем ИИ-команду к вашим мессенджерам — и клиентские переписки работают сами. Ниже — то, что уже работает в проде, не обещания.</p>
       </div>
-      <div class="features">
+      <div class="features" data-stagger>
         <div class="feature reveal">
           <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 20c0-3.2 2.9-5.5 6.5-5.5s6.5 2.3 6.5 5.5"/><circle cx="17.5" cy="9" r="2.4"/><path d="M15.5 14.6c2.9.5 4.5 2.5 4.5 5.4"/></svg></div>
           <h3>ИИ-команда, а не один бот</h3>
@@ -254,7 +256,7 @@
         <h2>Наймите ИИ-сотрудника под свою задачу</h2>
         <p>Каждый «сотрудник» — готовая настройка сервиса под роль: характер, сценарии и навыки. Найм за пару минут, без собеседований и отпусков. Роль можно сменить в кабинете в любой момент.</p>
       </div>
-      <div class="team">
+      <div class="team" data-stagger>
 
         <div class="person reveal">
           <div class="person__avatar" aria-hidden="true">
@@ -384,11 +386,11 @@
           <p class="about">Школа рисунка и живописи им. Б. В. Лесова подключила «ИИ-Агент Про», чтобы заявки из рекламы не ждали утра, а у администраторов освободились руки.</p>
           <p class="about">ИИ-помощница «Лия» встречает каждого нового подписчика, выдаёт бесплатный материал школы и отвечает на вопросы о курсах — в характере бренда школы.</p>
         </div>
-        <ul class="case-list reveal">
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Заявка не ждёт утра</b><span>ИИ отвечает сразу — даже ночью и в выходные, когда администраторы спят.</span></div></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Операторы — только там, где нужны</b><span>Живой диалог подхватывается из кабинета: ИИ снимает рутину, человек закрывает сделку.</span></div></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Оплата не выходя из чата</b><span>Рассылка с кнопкой «Купить» → оплата картой → заказ и статус видны школе в кабинете.</span></div></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Понятно, какая реклама работает</b><span>У каждой площадки своя ссылка-метка — конверсия каналов видна в аналитике.</span></div></li>
+        <ul class="case-list" data-stagger>
+          <li class="reveal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Заявка не ждёт утра</b><span>ИИ отвечает сразу — даже ночью и в выходные, когда администраторы спят.</span></div></li>
+          <li class="reveal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Операторы — только там, где нужны</b><span>Живой диалог подхватывается из кабинета: ИИ снимает рутину, человек закрывает сделку.</span></div></li>
+          <li class="reveal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Оплата не выходя из чата</b><span>Рассылка с кнопкой «Купить» → оплата картой → заказ и статус видны школе в кабинете.</span></div></li>
+          <li class="reveal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg><div><b>Понятно, какая реклама работает</b><span>У каждой площадки своя ссылка-метка — конверсия каналов видна в аналитике.</span></div></li>
         </ul>
       </div>
     </div>
@@ -402,7 +404,7 @@
         <h2>От заявки до работающей ИИ-команды — четыре шага</h2>
         <p>Программист не нужен. Настроить агента можно самому в личном кабинете — или доверить нашей команде интеграторов: настроят «под ключ» под ваш бизнес.</p>
       </div>
-      <div class="steps">
+      <div class="steps" data-stagger>
         <div class="step reveal"><h3>Заявка</h3><p>Оставляете заявку — обсуждаем нишу, сценарии и каналы: Telegram, VK, MAX.</p></div>
         <div class="step reveal"><h3>Настройка</h3><p>Загружаете базу знаний (продукты, цены, ответы), выбираете роли и тон. Сами в кабинете или с нашей командой интеграторов.</p></div>
         <div class="step reveal"><h3>Оплата и доступ</h3><p>Выбираете тариф и оплачиваете картой. Доступ к кабинету — в течение 1 рабочего дня.</p></div>
@@ -419,7 +421,7 @@
         <h2>Прозрачные тарифы без автосписаний</h2>
         <p>Оплата картой за расчётный период (30 дней) — разовым платежом, по вашей инициативе. НДС не облагается (УСН).</p>
       </div>
-      <div class="plans">
+      <div class="plans" data-stagger>
         <div class="plan reveal">
           <h3>Эконом</h3>
           <div class="price">3 750 ₽<small> / 30 дней</small></div>
@@ -564,17 +566,90 @@
 
 <script>
 (function(){
+  // Моушен по канону скилла apple-motion-design: вход cubic-bezier(0.16,1,0.3,1),
+  // стаггер 3–5 кадров (~110 мс), один overshoot на сцену, hold после сборки.
   if(!('IntersectionObserver' in window))return;
+  var docEl=document.documentElement;
+  var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ── Скролл-reveal: группы [data-stagger] стаггерят детей, одиночные — как раньше ──
+  var opts={rootMargin:'0px 0px -8% 0px',threshold:.08};
+  var gio=new IntersectionObserver(function(es){
+    es.forEach(function(e){
+      if(!e.isIntersecting)return;
+      gio.unobserve(e.target);
+      e.target.querySelectorAll('.reveal:not(.is-in)').forEach(function(el,i){
+        el.style.transitionDelay=(i*110)+'ms';
+        el.classList.add('is-in');
+        // стаггер — только на вход; снять delay, чтобы hover-переходы не запаздывали
+        setTimeout(function(){el.style.transitionDelay='';},900+i*110);
+      });
+    });
+  },opts);
   var io=new IntersectionObserver(function(es){
     es.forEach(function(e){
       if(e.isIntersecting){e.target.classList.add('is-in');io.unobserve(e.target);}
     });
-  },{rootMargin:'0px 0px -8% 0px',threshold:.08});
-  document.querySelectorAll('.reveal').forEach(function(el){io.observe(el);});
+  },opts);
+  document.querySelectorAll('[data-stagger]').forEach(function(g){gio.observe(g);});
+  document.querySelectorAll('.reveal').forEach(function(el){
+    if(!el.closest('[data-stagger]'))io.observe(el);
+  });
   // Страховка: если наблюдатель по любой причине не сработал — показать всё.
   setTimeout(function(){
-    document.querySelectorAll('.reveal:not(.is-in)').forEach(function(el){el.classList.add('is-in');});
+    document.querySelectorAll('.reveal:not(.is-in)').forEach(function(el){
+      el.style.transitionDelay='';el.classList.add('is-in');
+    });
   },2500);
+
+  // ── Герой-секвенция (сцена 1): сборка → диалог в мокапе → hold ──
+  // Фейлсейф ПЕРВЫМ: html.m-done снимает все скрытия, что бы ни случилось ниже.
+  setTimeout(function(){docEl.classList.add('m-done');},4600);
+  if(reduce){docEl.classList.add('m-done');return;}
+  try{
+    var h1=document.querySelector('.hero h1');
+    if(h1&&!h1.querySelector('.w')){
+      var words=h1.textContent.split(/\s+/).filter(Boolean);
+      h1.textContent='';
+      words.forEach(function(w,i){
+        var s=document.createElement('span');s.className='w';s.textContent=w;
+        h1.appendChild(s);
+        if(i<words.length-1)h1.appendChild(document.createTextNode(' '));
+      });
+    }
+    var at=function(t,fn){setTimeout(fn,t);};
+    var inEl=function(sel,t,stag){
+      document.querySelectorAll(sel).forEach(function(el,i){
+        at(t+(stag||0)*i,function(){el.classList.add('m-in');});
+      });
+    };
+    inEl('.hero .chip',0);
+    // заголовок word-by-word: строка >6 слов → стаггер ~70 мс, слово ~380 мс
+    document.querySelectorAll('.hero h1 .w').forEach(function(w,i){
+      at(120+i*70,function(){w.classList.add('m-in');});
+    });
+    inEl('.hero .lead',950);
+    inEl('.hero .cta',1080);
+    inEl('.hero .trust',1210);
+    // мокап: контейнер раньше внутренних деталей (канон UI-сборки)
+    inEl('.hero .dash',1350);
+    inEl('.dash__nav',1600,60);
+    inEl('.dash__feed .dash__cap',1680);
+    inEl('.dash__feed .dmsg--in:not(.dmsg--typing)',1900);
+    var typing=document.querySelector('.dmsg--typing');
+    at(2350,function(){if(typing){typing.hidden=false;typing.classList.add('m-in');}});
+    at(3150,function(){if(typing){typing.hidden=true;}});
+    inEl('.dash__feed .dmsg--out',3180);
+    inEl('.dash__crm .dash__cap',3300);
+    document.querySelectorAll('.dash__crm .kv').forEach(function(el,i){
+      at(3400+i*130,function(){el.classList.add('m-in');});
+    });
+    // единственный overshoot сцены — пилюля «Горячий» (≤6%)
+    at(3560,function(){
+      var t=document.querySelector('.tag-hot');if(t)t.classList.add('m-pop');
+    });
+    inEl('.dash__feed .dmsg--note',3900);
+  }catch(err){docEl.classList.add('m-done');}
 })();
 </script>
 

@@ -36,7 +36,7 @@
         <p>Каждый «сотрудник» — готовая настройка сервиса «ИИ-Агент Про» под конкретную задачу: характер, сценарии, навыки. Отвечают по вашей базе знаний в Telegram, VK и MAX, помнят каждого клиента и передают сложное живому оператору. Работают 24/7, не уходят в отпуск, стоят от 125 ₽ в день.</p>
       </div>
 
-      <div class="team">
+      <div class="team" data-stagger>
 
         <div class="person reveal">
           <div class="person__avatar" aria-hidden="true">
@@ -197,16 +197,35 @@
 
 <script>
 (function(){
+  // Моушен-канон (скилл apple-motion-design): группы [data-stagger] стаггерят
+  // детей ~110 мс, одиночные .reveal — как раньше. Зеркало скрипта index.html.
   if(!('IntersectionObserver' in window))return;
+  var opts={rootMargin:'0px 0px -8% 0px',threshold:.08};
+  var gio=new IntersectionObserver(function(es){
+    es.forEach(function(e){
+      if(!e.isIntersecting)return;
+      gio.unobserve(e.target);
+      e.target.querySelectorAll('.reveal:not(.is-in)').forEach(function(el,i){
+        el.style.transitionDelay=(i*110)+'ms';
+        el.classList.add('is-in');
+        setTimeout(function(){el.style.transitionDelay='';},900+i*110);
+      });
+    });
+  },opts);
   var io=new IntersectionObserver(function(es){
     es.forEach(function(e){
       if(e.isIntersecting){e.target.classList.add('is-in');io.unobserve(e.target);}
     });
-  },{rootMargin:'0px 0px -8% 0px',threshold:.08});
-  document.querySelectorAll('.reveal').forEach(function(el){io.observe(el);});
+  },opts);
+  document.querySelectorAll('[data-stagger]').forEach(function(g){gio.observe(g);});
+  document.querySelectorAll('.reveal').forEach(function(el){
+    if(!el.closest('[data-stagger]'))io.observe(el);
+  });
   // Страховка: если наблюдатель по любой причине не сработал — показать всё.
   setTimeout(function(){
-    document.querySelectorAll('.reveal:not(.is-in)').forEach(function(el){el.classList.add('is-in');});
+    document.querySelectorAll('.reveal:not(.is-in)').forEach(function(el){
+      el.style.transitionDelay='';el.classList.add('is-in');
+    });
   },2500);
 })();
 </script>

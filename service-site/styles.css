@@ -71,10 +71,15 @@ a:hover{text-decoration:underline; text-underline-offset:3px}
 h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 
 /* Scroll-reveal: активен ТОЛЬКО при html.js (JS+IntersectionObserver) и
-   только без prefers-reduced-motion. Без JS контент виден сразу. */
+   только без prefers-reduced-motion. Без JS контент виден сразу.
+   Кривые — канон скилла apple-motion-design: вход 0.16,1,0.3,1. */
+:root{
+  --ease-enter:cubic-bezier(.16,1,.3,1);  /* вход элементов */
+  --ease-move:cubic-bezier(.45,0,.55,1);  /* перемещение внутри кадра */
+}
 @media (prefers-reduced-motion:no-preference){
   html.js .reveal{opacity:0; transform:translateY(16px);
-    transition:opacity .6s cubic-bezier(.2,.7,.3,1), transform .6s cubic-bezier(.2,.7,.3,1)}
+    transition:opacity .55s var(--ease-enter), transform .55s var(--ease-enter)}
   html.js .reveal.is-in{opacity:1; transform:none}
 }
 
@@ -566,6 +571,34 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 @media (max-width:760px){
   .tg-float{ right:16px; bottom:16px; padding:.8rem; }   /* на мобиле — компактный кружок (только иконка) */
   .tg-float__label{ display:none; }
+}
+
+/* ---------- 15bis. Герой-секвенция (канон apple-motion-design) ----------
+   Сцена 1 «сборка hero»: чип → заголовок word-by-word → лид/CTA/трасты → мокап
+   кабинета проигрывает диалог (клиент → «Лия печатает…» → ответ → карточка лида).
+   Скрытые состояния ТОЛЬКО при html.js и без prefers-reduced-motion (как .reveal);
+   html.m-done — фейлсейф: снимает все скрытия (ставится JS по таймеру/ошибке). */
+@media (prefers-reduced-motion:no-preference){
+  html.js:not(.m-done) .hero [data-m]{opacity:0; transform:translateY(14px)}
+  html.js .hero [data-m]{transition:opacity .5s var(--ease-enter), transform .5s var(--ease-enter)}
+  html.js .hero [data-m].m-in{opacity:1; transform:none}
+  /* word-by-word заголовка: слово 350–400 мс, стаггер ~70 мс (строка >6 слов) */
+  html.js .hero h1 .w{display:inline-block;
+    transition:opacity .38s var(--ease-enter), transform .38s var(--ease-enter)}
+  html.js:not(.m-done) .hero h1 .w{opacity:0; transform:translateY(12px)}
+  html.js .hero h1 .w.m-in{opacity:1; transform:none}
+  /* единственный overshoot сцены (≤6%) — пилюля «Горячий» в карточке лида */
+  html.js .tag-hot.m-pop{animation:m-pop .34s var(--ease-enter) both}
+  @keyframes m-pop{0%{transform:scale(.9)} 62%{transform:scale(1.05)} 100%{transform:scale(1)}}
+}
+/* «Лия печатает…» — транзитный пузырь, виден только во время секвенции (hidden снимает JS) */
+.dmsg--typing{display:inline-flex; align-items:center; gap:5px; min-block-size:2.1em}
+.tdot{inline-size:6px; block-size:6px; border-radius:50%; background:#98A2B3}
+@media (prefers-reduced-motion:no-preference){
+  .tdot{animation:tdot 1s infinite var(--ease-move)}
+  .tdot:nth-child(2){animation-delay:.15s}
+  .tdot:nth-child(3){animation-delay:.3s}
+  @keyframes tdot{0%,60%,100%{transform:none; opacity:.55} 30%{transform:translateY(-3px); opacity:1}}
 }
 
 /* ---------- 16. Веб-чат демо «Лии» ---------- */
