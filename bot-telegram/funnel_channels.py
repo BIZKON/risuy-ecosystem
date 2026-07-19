@@ -94,11 +94,13 @@ class VkFunnelChannel:
         await self.bot.send(self.peer_id, msg + "\n\nПодпишитесь и напишите «я подписался».")
 
     async def check_subscription(self, gate_cfg: dict, uid: int) -> bool:
-        """Проверка членства в VK-сообществе-гейте. Fail-closed: нет group_id → держим гейт."""
-        gid = (gate_cfg or {}).get("vk_gate_group_id")
-        if not gid:
+        """Проверка членства в VK-сообществе-гейте. Fail-closed: нет group_id → держим гейт.
+        Мусор в настройке (поле свободного текста, напр. «vk.com/club123») — тоже fail-closed
+        False, а не ValueError: краш здесь молча вешал бы воронку на гейте для всех лидов."""
+        gid_s = str((gate_cfg or {}).get("vk_gate_group_id") or "").strip()
+        if not gid_s or not gid_s.lstrip("-").isdigit():
             return False
-        return await self.bot.is_member(int(gid), uid)
+        return await self.bot.is_member(int(gid_s), uid)
 
     async def deliver_text(self, text: str) -> None:
         await self.bot.send(self.peer_id, text)
@@ -153,11 +155,12 @@ class MaxFunnelChannel:
         await self.bot.send(self.chat_id, msg + "\n\nПодпишитесь и напишите «я подписался».")
 
     async def check_subscription(self, gate_cfg: dict, uid: int) -> bool:
-        """Проверка членства в MAX-канале-гейте. Fail-closed: нет chat_id → держим гейт."""
-        cid = (gate_cfg or {}).get("max_gate_chat_id")
-        if not cid:
+        """Проверка членства в MAX-канале-гейте. Fail-closed: нет chat_id → держим гейт.
+        Мусор в настройке — fail-closed False, не ValueError (симметрия с VK-адаптером)."""
+        cid_s = str((gate_cfg or {}).get("max_gate_chat_id") or "").strip()
+        if not cid_s or not cid_s.lstrip("-").isdigit():
             return False
-        return await self.bot.is_channel_member(int(cid), uid)
+        return await self.bot.is_channel_member(int(cid_s), uid)
 
     async def deliver_text(self, text: str) -> None:
         await self.bot.send(self.chat_id, text)

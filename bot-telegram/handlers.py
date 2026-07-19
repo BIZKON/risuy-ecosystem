@@ -297,6 +297,17 @@ async def _club_intro_open(message: Message, intro_id: str) -> None:
     )
 
 
+def _brief_link(token) -> str | None:
+    """Абсолютная ссылка на бриф или None при пустом BOT_PUBLIC_BASE_URL (затёртый env).
+    Все остальные потребители base URL гардят пустоту — без гарда лид получал бы
+    битую ссылку «/brief/x» без хоста."""
+    base = (config.BOT_PUBLIC_BASE_URL or "").rstrip("/")
+    if not base:
+        logger.error("BOT_PUBLIC_BASE_URL пуст — ссылку на бриф отдать нечем")
+        return None
+    return f"{base}/brief/{token}"
+
+
 async def _ref_start(message: Message, ref_code: str, state: FSMContext) -> None:
     """Вход реф-потока по ?start=ref_<code>. Резолв партнёра + лёгкий гард (дедуп + rate-limit)."""
     partner = await db.get_partner_by_ref_code(ref_code)
@@ -306,8 +317,11 @@ async def _ref_start(message: Message, ref_code: str, state: FSMContext) -> None
     uid = message.from_user.id
     dup = await db.find_pending_ref_brief(uid, str(partner["id"]))
     if dup:
+        link = _brief_link(dup)
         await messaging.reply_text(
-            message, f"Вы уже начали. Заполните бриф: {config.BOT_PUBLIC_BASE_URL}/brief/{dup}",
+            message,
+            (f"Вы уже начали. Заполните бриф: {link}" if link
+             else "Вы уже начали. Ссылка на бриф временно недоступна — напишите нам, поможем."),
             source="system")
         return
     if await db.count_recent_ref_tenants(uid, config.REF_RATELIMIT_HOURS) >= config.REF_RATELIMIT_MAX:
@@ -355,8 +369,11 @@ async def on_ref_company(message: Message, state: FSMContext) -> None:
             await db.enqueue_platform_notify(int(ochat), f"🆕 Новый клиент: {company} (от партнёра)")
     except Exception:  # noqa: BLE001
         logger.warning("owner ref-create notify failed", exc_info=True)
+    link = _brief_link(token)
     await messaging.reply_text(
-        message, f"Готово! Заполните бриф по ссылке: {config.BOT_PUBLIC_BASE_URL}/brief/{token}",
+        message,
+        (f"Готово! Заполните бриф по ссылке: {link}" if link
+         else "Готово! Компания записана. Ссылка на бриф временно недоступна — мы свяжемся с вами."),
         source="system")
 
 
@@ -490,6 +507,11 @@ async def on_consent(cb: CallbackQuery, state: FSMContext):
 
 @router.message(Funnel.phone, F.contact)
 async def on_phone(message: Message, state: FSMContext, bot: Bot):
+    # Принимаем ТОЛЬКО собственный контакт (reply-кнопка request_contact шлёт именно его):
+    # пересланный чужой контакт записал бы в лид чужой номер (ПДн третьего лица, 152-ФЗ).
+    if message.contact.user_id != message.from_user.id:
+        await message.answer(texts.PHONE_BUTTON_HINT, reply_markup=_phone_kb())
+        return
     phone = message.contact.phone_number
     await db.set_phone(message.from_user.id, phone, _phone_hash(phone))
     await messaging.reply_text(

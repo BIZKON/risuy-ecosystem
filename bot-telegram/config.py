@@ -10,6 +10,31 @@ def _req(name: str) -> str:
     return val
 
 
+# Безопасный парсинг чисел из env (фолбэк на дефолт при мусоре — НЕ валим импорт, иначе
+# опечатка в одной переменной в UI Timeweb кладёт весь бот в crash-loop). Ревизия: раньше
+# ~25 переменных парсились голым int()/float() мимо этих хелперов.
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    """int из env с фолбэком на дефолт при мусоре (не валим импорт → нет crash-loop)."""
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        val = int(raw) if raw else default
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r не int — беру дефолт %s", name, raw, default)
+        val = default
+    return max(val, minimum) if minimum is not None else val
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip().replace(",", ".")
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r не float — беру дефолт %s", name, raw, default)
+        return default
+
+
 BOT_TOKEN = _req("BOT_TOKEN")
 DATABASE_URL = _req("DATABASE_URL")
 
@@ -88,37 +113,15 @@ YOOKASSA_API_BASE = os.environ.get("YOOKASSA_API_BASE", "https://api.yookassa.ru
 # Чек 54-ФЗ: включать, если у боевого магазина школы включена фискализация (иначе
 # create_payment без receipt отвергается). Дефолт ВЫКЛ. vat_code 1 = без НДС (УСН/НПД).
 SHOP_RECEIPT_ENABLED = os.environ.get("SHOP_RECEIPT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
-SHOP_VAT_CODE = int(os.environ.get("SHOP_VAT_CODE", "1"))
+SHOP_VAT_CODE = _env_int("SHOP_VAT_CODE", 1)
 # TTL переиспользования pending-заказа при повторном клике «Купить», минуты: та же
 # ссылка на оплату вместо нового платежа (анти-двойное списание). Платёж ЮKassa
 # живёт ~1 час — TTL держим заметно меньше.
-ORDER_REUSE_MINUTES = int(os.environ.get("ORDER_REUSE_MINUTES", "30"))
+ORDER_REUSE_MINUTES = _env_int("ORDER_REUSE_MINUTES", 30)
 # Просроченные pending-заказы онлайн-оплаты → failed (часов; чистит retention-цикл).
-ORDER_STALE_HOURS = int(os.environ.get("ORDER_STALE_HOURS", "24"))
+ORDER_STALE_HOURS = _env_int("ORDER_STALE_HOURS", 24)
 
 # ── Метеринг (Wave 3, ТЗ §5.2) ────────────────────────────────────────────────
-def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
-    """int из env с фолбэком на дефолт при мусоре (не валим импорт → нет crash-loop)."""
-    raw = (os.environ.get(name) or "").strip()
-    try:
-        val = int(raw) if raw else default
-    except ValueError:
-        logging.getLogger(__name__).warning(
-            "%s=%r не int — беру дефолт %s", name, raw, default)
-        val = default
-    return max(val, minimum) if minimum is not None else val
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = (os.environ.get(name) or "").strip().replace(",", ".")
-    try:
-        return float(raw) if raw else default
-    except ValueError:
-        logging.getLogger(__name__).warning(
-            "%s=%r не float — беру дефолт %s", name, raw, default)
-        return default
-
-
 # Тенант env-бота (Школа): его tenant_id резолвится по slug при старте и пишется
 # во все вставки tenant-scoped таблиц явно. DEFAULT в БД на этих колонках пока
 # стоит (переходник, DECISIONS п.12) и СНИМЕТСЯ отдельной миграцией Wave 3 (3d).
@@ -144,34 +147,34 @@ AI_HISTORY_MESSAGES = _env_int("AI_HISTORY_MESSAGES", 10, minimum=0)
 # top-k сводок и порог косинусной дистанции при ретриве памяти.
 MEMORY_SUMMARIZE_EVERY = _env_int("MEMORY_SUMMARIZE_EVERY", 10, minimum=0)
 MEMORY_TOP_K = _env_int("MEMORY_TOP_K", 3, minimum=1)
-MEMORY_MAX_DISTANCE = float(os.environ.get("MEMORY_MAX_DISTANCE", "0.55"))
+MEMORY_MAX_DISTANCE = _env_float("MEMORY_MAX_DISTANCE", 0.55)
 
 # Порт для health-эндпоинта (Timeweb App Platform проксирует сюда). Бот работает на long-polling.
-PORT = int(os.environ.get("PORT", "8080"))
+PORT = _env_int("PORT", 8080)
 
 # Тайминги прогрева в секундах от момента выдачи гайда.
 FOLLOW_UP_DELAYS = [
-    int(os.environ.get("FOLLOW_UP_1_DELAY", str(60 * 60))),          # +1 час
-    int(os.environ.get("FOLLOW_UP_2_DELAY", str(60 * 60 * 24))),     # +1 день
-    int(os.environ.get("FOLLOW_UP_3_DELAY", str(60 * 60 * 24 * 3))), # +3 дня
+    _env_int("FOLLOW_UP_1_DELAY", 60 * 60),          # +1 час
+    _env_int("FOLLOW_UP_2_DELAY", 60 * 60 * 24),     # +1 день
+    _env_int("FOLLOW_UP_3_DELAY", 60 * 60 * 24 * 3), # +3 дня
 ]
 
 # ── Очередь и рассылки (worker.run) ──────────────────────────────────────────
 # Единый process-wide rate-limit на ВЕСЬ исходящий трафик одного Bot (воронка,
 # Лия, прогрев, outbox, рассылки) — общий лимит Telegram ~30/с. Берём 15/с с
 # headroom под интерактив; рассылка уступает приоритет интерактиву (§5.3 плана).
-BROADCAST_RATE = float(os.environ.get("BROADCAST_RATE", "15"))   # msg/s, token-bucket
-BROADCAST_BATCH = int(os.environ.get("BROADCAST_BATCH", "50"))   # claim-батч получателей за тик
-OUTBOX_BATCH = int(os.environ.get("OUTBOX_BATCH", "20"))         # claim-батч точечных ответов за тик
-MAX_SEND_ATTEMPTS = int(os.environ.get("MAX_SEND_ATTEMPTS", "3"))   # потолок попыток на получателя рассылки
-OUTBOX_MAX_ATTEMPTS = int(os.environ.get("OUTBOX_MAX_ATTEMPTS", "10"))  # потолок попыток на запись outbox
-OUTBOX_MAX_AGE_HOURS = int(os.environ.get("OUTBOX_MAX_AGE_HOURS", "24"))  # старше — в failed (не висеть вечно)
+BROADCAST_RATE = _env_float("BROADCAST_RATE", 15.0)   # msg/s, token-bucket
+BROADCAST_BATCH = _env_int("BROADCAST_BATCH", 50)   # claim-батч получателей за тик
+OUTBOX_BATCH = _env_int("OUTBOX_BATCH", 20)         # claim-батч точечных ответов за тик
+MAX_SEND_ATTEMPTS = _env_int("MAX_SEND_ATTEMPTS", 3)   # потолок попыток на получателя рассылки
+OUTBOX_MAX_ATTEMPTS = _env_int("OUTBOX_MAX_ATTEMPTS", 10)  # потолок попыток на запись outbox
+OUTBOX_MAX_AGE_HOURS = _env_int("OUTBOX_MAX_AGE_HOURS", 24)  # старше — в failed (не висеть вечно)
 # Reclaim застрявших 'sending' (краш/редеплой). 10 мин > rolling-overlap Timeweb (§5.5).
-RECLAIM_AFTER_SECONDS = int(os.environ.get("RECLAIM_AFTER_SECONDS", str(60 * 10)))
-WORKER_INTERVAL = int(os.environ.get("WORKER_INTERVAL", "5"))     # период цикла воркера, сек
+RECLAIM_AFTER_SECONDS = _env_int("RECLAIM_AFTER_SECONDS", 60 * 10)
+WORKER_INTERVAL = _env_int("WORKER_INTERVAL", 5)     # период цикла воркера, сек
 # Circuit-breaker молодого бота: при доле failed среди первых N > порога — авто-пауза (§5.9).
-CB_MIN_SAMPLE = int(os.environ.get("CB_MIN_SAMPLE", "20"))       # сколько отправок накопить перед оценкой
-CB_FAIL_RATIO = float(os.environ.get("CB_FAIL_RATIO", "0.30"))   # доля failed для авто-паузы
+CB_MIN_SAMPLE = _env_int("CB_MIN_SAMPLE", 20)       # сколько отправок накопить перед оценкой
+CB_FAIL_RATIO = _env_float("CB_FAIL_RATIO", 0.3)   # доля failed для авто-паузы
 
 # Служебный чат для первичной заливки файла рассылки (НЕ первый получатель, §5.6).
 # Тот же чат используется для первичной заливки файла ПРОДУКТА (каталог оферов):
@@ -260,17 +263,17 @@ if OPS_CHAT_ID is not None and is_gate_channel(OPS_CHAT_ID):
 # MIME+magic-byte, отказ исполняемым) — здесь дублируем верхнюю границу как защиту
 # на стороне бота перед заливкой в OPS_CHAT_ID (битый/слишком большой файл не валит
 # воркер, продукт просто не получает file_tg_id и логируется). Меняется редко.
-MAX_PRODUCT_FILE_MB = int(os.environ.get("MAX_PRODUCT_FILE_MB", "50"))
+MAX_PRODUCT_FILE_MB = _env_int("MAX_PRODUCT_FILE_MB", 50)
 MAX_PRODUCT_FILE_BYTES = MAX_PRODUCT_FILE_MB * 1024 * 1024
 # Сколько продуктов-офферов заливать за один тик воркера (обычно их единицы — каталог
 # мал, заливка однократна; батч держим маленьким, чтобы не занимать bucket надолго).
-PRODUCT_UPLOAD_BATCH = int(os.environ.get("PRODUCT_UPLOAD_BATCH", "5"))
+PRODUCT_UPLOAD_BATCH = _env_int("PRODUCT_UPLOAD_BATCH", 5)
 # Потолок попыток заливки файла офера (симметрично OUTBOX_MAX_ATTEMPTS/MAX_SEND_ATTEMPTS):
 # валидный-по-magic, но отвергаемый Telegram файл не должен переселектироваться вечно
 # каждым тиком (5с), тратя токен бакета и засоряя OPS_CHAT_ID. После N неудач офер
 # выпадает из очереди заливки (products.upload_attempts >= лимит), file_tg_id остаётся
 # null → рассылка-продукт с таким файлом уйдёт на паузу (см. worker._prepare_product_broadcast).
-PRODUCT_UPLOAD_MAX_ATTEMPTS = int(os.environ.get("PRODUCT_UPLOAD_MAX_ATTEMPTS", "5"))
+PRODUCT_UPLOAD_MAX_ATTEMPTS = _env_int("PRODUCT_UPLOAD_MAX_ATTEMPTS", 5)
 
 # ── Вложения в личный ответ оператора лиду (outbox-заливка) ───────────────────
 # Паттерн клонирован с продуктовой заливки: панель кладёт байты в outbox.file_bytes,
@@ -279,18 +282,18 @@ PRODUCT_UPLOAD_MAX_ATTEMPTS = int(os.environ.get("PRODUCT_UPLOAD_MAX_ATTEMPTS", 
 # существующий MAX_PRODUCT_FILE_BYTES (тот же потолок Telegram 50 МБ, не дублируем).
 # Сколько вложений заливать за один тик воркера (личных ответов с файлом обычно единицы;
 # батч держим маленьким, чтобы не занимать bucket надолго — как у продуктов).
-OUTBOX_UPLOAD_BATCH = int(os.environ.get("OUTBOX_UPLOAD_BATCH", "5"))
+OUTBOX_UPLOAD_BATCH = _env_int("OUTBOX_UPLOAD_BATCH", 5)
 # Потолок попыток заливки вложения (симметрично PRODUCT_UPLOAD_MAX_ATTEMPTS): валидный-по-
 # magic, но отвергаемый Telegram файл не должен переселектироваться вечно каждым тиком (5с),
 # тратя токен бакета и засоряя OPS_CHAT_ID. После N неудач исходящее выпадает из очереди
 # заливки (outbox.upload_attempts >= лимит), file_id остаётся null → личный ответ с этим
 # вложением на паузе (текстовая часть/иные ответы не затронуты — см. worker._drain_outbox).
-OUTBOX_UPLOAD_MAX_ATTEMPTS = int(os.environ.get("OUTBOX_UPLOAD_MAX_ATTEMPTS", "5"))
+OUTBOX_UPLOAD_MAX_ATTEMPTS = _env_int("OUTBOX_UPLOAD_MAX_ATTEMPTS", 5)
 # Путь к ffmpeg для транскода голосового (запись с микрофона → ogg/opus voice). Если ffmpeg
 # упал/отсутствует — воркёр откатывает kind='voice' → 'audio' и шлёт исходник как файл.
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 # Таймаут одного запуска ffmpeg-транскода голосового, сек (короткий клип; не вешаем тик воркера).
-VOICE_TRANSCODE_TIMEOUT = int(os.environ.get("VOICE_TRANSCODE_TIMEOUT", "15"))
+VOICE_TRANSCODE_TIMEOUT = _env_int("VOICE_TRANSCODE_TIMEOUT", 15)
 
 # Публичный базовый URL БОТА (его поддомен на Timeweb) — на нём живёт трекинг-редирект
 # /r/<token>. Ссылка {link} в рассылке строится как BOT_PUBLIC_BASE_URL + /r/<click_token>.
@@ -298,12 +301,12 @@ VOICE_TRANSCODE_TIMEOUT = int(os.environ.get("VOICE_TRANSCODE_TIMEOUT", "15"))
 BOT_PUBLIC_BASE_URL = os.environ.get("BOT_PUBLIC_BASE_URL", "").rstrip("/")
 
 # TTL абсолютной чистки текста переписки (самый объёмный ПДн-поток), дни. §6.4.
-MESSAGES_TTL_DAYS = int(os.environ.get("MESSAGES_TTL_DAYS", "90"))
+MESSAGES_TTL_DAYS = _env_int("MESSAGES_TTL_DAYS", 90)
 # Срок обезличивания по отзыву согласия (erase_requested_at + N дней). Совпадает с панелью/privacy.
-ERASE_AFTER_DAYS = int(os.environ.get("ERASE_AFTER_DAYS", "30"))
+ERASE_AFTER_DAYS = _env_int("ERASE_AFTER_DAYS", 30)
 # Период цикла retention-обезличивания, сек (раз в час достаточно).
-RETENTION_INTERVAL = int(os.environ.get("RETENTION_INTERVAL", str(60 * 60)))
+RETENTION_INTERVAL = _env_int("RETENTION_INTERVAL", 60 * 60)
 
 # Партнёрский реф-поток: анти-абьюз (лёгкий гард).
-REF_RATELIMIT_HOURS = int(os.environ.get("REF_RATELIMIT_HOURS", "24"))
-REF_RATELIMIT_MAX = int(os.environ.get("REF_RATELIMIT_MAX", "3"))
+REF_RATELIMIT_HOURS = _env_int("REF_RATELIMIT_HOURS", 24)
+REF_RATELIMIT_MAX = _env_int("REF_RATELIMIT_MAX", 3)

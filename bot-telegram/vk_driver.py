@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,10 @@ class VKBot:
         self.token = token
         self.group_id = int(group_id)
         self.on_message = on_message
-        self._send_counter = 0
+        # Сид от времени старта: после рестарта/пересоздания бота счётчик не начинается
+        # снова с 1 — иначе random_id повторял бы значения прошлого запуска и VK молча
+        # дедупил бы (не отправлял) первые сообщения нового процесса.
+        self._send_counter = int(time.time()) % _RANDOM_ID_MOD
         self._session = None  # aiohttp.ClientSession
 
     async def _api(self, method: str, **params):

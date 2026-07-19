@@ -281,4 +281,12 @@ def validate_funnel_fields(d: dict) -> list[str]:
         elif not _is_http_url(d.get("gate_channel_url")):
             errs.append("Ссылка на канал-гейт должна начинаться с http:// или https://.")
 
+    # ID гейтов VK/MAX — числовые (поле свободного текста; «vk.com/club123» на гейте давал бы
+    # fail-closed отказ всем лидам канала — ловим опечатку ещё при сохранении, а не в воронке).
+    for key, label in (("vk_gate_group_id", "ID VK-сообщества для гейта"),
+                       ("max_gate_chat_id", "ID MAX-канала для гейта")):
+        val = str(d.get(key) or "").strip()
+        if val and not val.lstrip("-").isdigit():
+            errs.append(f"{label} должен быть числом (например -123456789), а не ссылкой/именем.")
+
     return errs

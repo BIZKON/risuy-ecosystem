@@ -159,6 +159,10 @@ async def t_contact(message: Message) -> None:
     cfg = await db.get_funnel_config(db.tenant_id())
     if not cfg["enabled"]:
         return
+    # Только собственный контакт (как on_phone главного бота): пересланный чужой контакт
+    # записал бы в лид чужой номер (ПДн третьего лица, 152-ФЗ).
+    if message.contact.user_id != message.from_user.id:
+        return
     phone = message.contact.phone_number
     if not phone:  # контакт без номера (редкий, но валидный апдейт) → не падаем
         return
