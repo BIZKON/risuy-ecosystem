@@ -142,10 +142,28 @@ async def _drain_outbox_uploads(bot: Bot) -> None:
 
 # ── OUTBOX: точечные ответы оператора ────────────────────────────────────────
 async def _drain_outbox(bot: Bot) -> None:
+    """Мультитенантный дренаж TG-outbox: строка тенанта уходит через ЕГО tg-бота из реестра
+    мультиплекса, re-check адреса и зеркало в тред — в контексте ЕГО тенанта (раньше все
+    tg-строки дренились ботом Школы: ответ оператора тенант-лиду падал в 'no_address' либо
+    уходил от чужого бота). Вложения тенантов шлём БАЙТАМИ напрямую — file_id из стейджинга
+    OPS_CHAT привязан к главному боту и тенант-ботам неприменим."""
+    import multiplex  # лениво: исключить риск цикла импорта (общий процесс через bot.py)
     items = await db.claim_outbox(config.OUTBOX_BATCH)  # короткая tx, соединение отдано
+    default_tid = db.default_tenant_id()
     for it in items:
         item_id = it["id"]
         tg_user_id = it["tg_user_id"]
+        tid = it.get("tenant_id") or default_tid
+        if tid == default_tid:
+            sbot = bot
+        else:
+            sbot = multiplex.get_channel_bot(tid, "tg")
+            if sbot is None:
+                # Канал тенанта не поднят (не настроен / рестарт) — возврат в очередь с потолком.
+                await db.release_outbox(item_id, "tg-бот тенанта не поднят",
+                                        config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS)
+                continue
+        ctx = db.current_tenant_id.set(tid)
         try:
             # Re-check адресности перед send (§5.10): нет адреса / отозвал согласие на ПДн.
             skip = await db.outbox_recheck_address(tg_user_id)
@@ -156,11 +174,27 @@ async def _drain_outbox(bot: Bot) -> None:
             kind = it.get("kind") or "text"
             text = it.get("text")
             file_id = it.get("file_id")
-            if kind == "text" or not file_id:
-                sent = await messaging.raw_send_text(bot, tg_user_id, text or "")
-            else:
+            file_bytes = it.get("file_bytes")
+            if kind == "text" or (not file_id and not file_bytes):
+                sent = await messaging.raw_send_text(sbot, tg_user_id, text or "")
+            elif file_id:
                 sent = await messaging.raw_send_by_kind(
-                    bot, tg_user_id, kind, file_id=file_id, caption=text
+                    sbot, tg_user_id, kind, file_id=file_id, caption=text
+                )
+            else:
+                # Тенантское вложение: байты напрямую (клеймится с байтами, см. claim_outbox).
+                content = bytes(file_bytes)
+                if kind == "voice":
+                    try:
+                        content = await messaging.transcode_voice(content, it.get("file_mime"))
+                    except Exception as e:  # noqa: BLE001 — деградация voice→audio, бот не падает
+                        logger.warning(
+                            "Outbox #%s: транскод voice не удался (%s) → шлём как audio", item_id, e
+                        )
+                        kind = "audio"
+                sent, _fid = await messaging.upload_file_to_chat(
+                    sbot, tg_user_id, kind, content=content,
+                    filename=it.get("file_name"), mime=it.get("file_mime"), caption=text,
                 )
 
             await db.mark_outbox_sent(item_id)
@@ -182,6 +216,8 @@ async def _drain_outbox(bot: Bot) -> None:
             await db.release_outbox(
                 item_id, str(e), config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS
             )
+        finally:
+            db.current_tenant_id.reset(ctx)
 
 
 # ── Дренаж очереди уведомлений владельцу/партнёрам (platform_notify) ───────────
@@ -420,6 +456,25 @@ async def _prepare_product_broadcast(bc: dict) -> str:
         return "pause"
     bc["_product"] = product
     file_tg_id = product.get("file_tg_id")
+    # TG-рассылка НЕ-дефолт тенанта: file_tg_id офера залит ГЛАВНЫМ ботом и tg-боту тенанта
+    # неприменим (file_id привязан к боту-заливщику), а байты после стейджинга обнулены.
+    # Пер-бот стейджинг оферов — отдельная работа; пока честная деградация: офер со ссылкой
+    # уходит текстом+ссылкой, офер только-с-файлом — пауза с понятной причиной.
+    tenant_tg = ((bc.get("messenger") or "tg") == "tg"
+                 and bc.get("tenant_id") is not None
+                 and bc.get("tenant_id") != db.default_tenant_id())
+    if file_tg_id and tenant_tg:
+        if product.get("link"):
+            logger.warning(
+                "Рассылка #%s: файл офера недоступен tg-боту тенанта (file_id Школы) — "
+                "доставляем без файла по ссылке офера", bc["id"],
+            )
+            return "ready"  # bc["_tg_file_id"] не кладём → kind=text, {link} добавится
+        logger.error(
+            "Рассылка #%s: офер только с файлом, но file_id Школы неприменим tg-боту тенанта "
+            "→ пауза", bc["id"],
+        )
+        return "pause"
     if file_tg_id:
         bc["_tg_file_id"] = file_tg_id
         return "ready"
@@ -484,7 +539,12 @@ async def _ensure_file_ready(bot: Bot, bc: dict) -> bool:
         return False
     # C3: VK/MAX — НЕ стейджим в OPS_CHAT (TG file_id неприменим). Шлём байты per-recipient
     # канальным драйвером. bytes остаются в broadcast_files (set_broadcast_file_id для них не зовём).
-    if (bc.get("messenger") or "tg") != "tg":
+    # То же для TG-рассылок НЕ-дефолт тенантов: file_id, залитый главным ботом, неприменим
+    # их tg-ботам — байты уходят напрямую (первый получатель), дальше file_id-кэш батча.
+    tenant_tg = ((bc.get("messenger") or "tg") == "tg"
+                 and bc.get("tenant_id") is not None
+                 and bc.get("tenant_id") != db.default_tenant_id())
+    if (bc.get("messenger") or "tg") != "tg" or tenant_tg:
         content = fr.get("bytes")
         if not content:
             logger.error("Рассылка #%s (%s): bytes пусты, медиа недоступно", bc["id"], bc.get("messenger"))
@@ -566,15 +626,46 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
 
     # C3: канал рассылки. Для VK/MAX — берём ЖИВОЙ канальный бот тенанта из реестра multiplex.
     # Если канал не поднят (не настроен / рестарт) — НЕ клеймим батч (не жжём attempts), ждём тик.
+    import multiplex
     messenger = bc.get("messenger") or "tg"
+    tid = bc.get("tenant_id")
+    default_tid = db.default_tenant_id()
     cbot = None
     if messenger != "tg":
-        import multiplex
-        cbot = multiplex.get_channel_bot(bc.get("tenant_id"), messenger)
+        cbot = multiplex.get_channel_bot(tid, messenger)
         if cbot is None:
+            if tid == default_tid:
+                # Школа вне мультиплекса → vk/max-бота у неё не будет НИКОГДА: вечный «ждём»
+                # держал бы рассылку в 'sending' на 0% — пауза с понятной причиной.
+                logger.error("Рассылка #%s: канал %s недоступен для дефолт-тенанта → пауза",
+                             broadcast_id, messenger)
+                await db.pause_broadcast(broadcast_id)
+                return
             logger.info("Рассылка #%s: канал %s не поднят — ждём", broadcast_id, messenger)
             return
+    # Мультитенантность (фикс): TG-рассылка тенанта уходит через ЕГО tg-бота, не бота Школы.
+    sbot = bot
+    if messenger == "tg" and tid is not None and tid != default_tid:
+        sbot = multiplex.get_channel_bot(tid, "tg")
+        if sbot is None:
+            logger.info("Рассылка #%s: tg-бот тенанта не поднят — ждём", broadcast_id)
+            return
 
+    # Контекст тенанта на весь батч: log_message (зеркало в правильный тред «Диалогов»),
+    # is_online_payments_enabled и пр. резолвятся в тенанте РАССЫЛКИ, а не Школы.
+    tctx = db.current_tenant_id.set(tid) if tid is not None else None
+    try:
+        await _send_batch_body(bot, sbot, cbot, bc, messenger)
+    finally:
+        if tctx is not None:
+            db.current_tenant_id.reset(tctx)
+
+
+async def _send_batch_body(bot: Bot, sbot, cbot, bc: dict, messenger: str) -> None:
+    """Тело батча рассылки (вынесено из _send_batch ради try/finally tenant-контекста).
+    bot — главный бот (ops-уведомления _post_batch), sbot — TG-бот доставки (бот Школы или
+    tg-бот тенанта), cbot — канальный драйвер VK/MAX (или None для tg)."""
+    broadcast_id = bc["id"]
     batch = await db.claim_broadcast_recipients(broadcast_id, config.BROADCAST_BATCH)
     if not batch:
         # Получателей в pending не осталось → если и sending нет, финализируем.
@@ -628,12 +719,23 @@ async def _send_batch(bot: Bot, bc: dict) -> None:
                 text = template.replace("{link}", "")
 
             if messenger == "tg":
-                if kind == "text" or not tg_file_id:
-                    sent = await messaging.raw_send_text(bot, addr, text, reply_markup=unsub_kb)
-                else:
+                if kind != "text" and (tg_file_id or bc.get("_tenant_tg_file_id")):
                     sent = await messaging.raw_send_by_kind(
-                        bot, addr, kind, file_id=tg_file_id, caption=text, reply_markup=unsub_kb
+                        sbot, addr, kind, file_id=tg_file_id or bc["_tenant_tg_file_id"],
+                        caption=text, reply_markup=unsub_kb
                     )
+                elif kind != "text" and bc.get("_file_bytes"):
+                    # Тенантская TG-рассылка с файлом: file_id Школы неприменим → первый
+                    # получатель получает БАЙТЫ, а file_id из ответа (валиден для ЭТОГО
+                    # бота) кэшируем на остаток батча.
+                    sent, fid = await messaging.upload_file_to_chat(
+                        sbot, addr, kind, content=bc["_file_bytes"],
+                        filename=bc.get("_file_name"), mime=None, caption=text,
+                        reply_markup=unsub_kb,
+                    )
+                    bc["_tenant_tg_file_id"] = fid
+                else:
+                    sent = await messaging.raw_send_text(sbot, addr, text, reply_markup=unsub_kb)
                 tg_message_id = getattr(sent, "message_id", None)
             else:
                 # VK/MAX: футер отписки (нет inline-кнопки как в TG); текст или медиа байтами.

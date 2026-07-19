@@ -470,31 +470,36 @@ async def raw_send_by_kind(bot: Bot, chat_id: int, kind: str, *, file_id: str | 
 
 async def upload_file_to_chat(bot: Bot, chat_id: int, kind: str, *, content: bytes,
                               filename: str | None, mime: str | None,
-                              caption: str | None) -> tuple[Message, str]:
-    """Первичная заливка файла рассылки в СЛУЖЕБНЫЙ чат (§5.6) → (message, tg_file_id).
+                              caption: str | None,
+                              reply_markup: Any | None = None) -> tuple[Message, str]:
+    """Отправка медиа БАЙТАМИ в чат → (message, tg_file_id). Исторически — первичная
+    заливка файла рассылки в СЛУЖЕБНЫЙ чат (§5.6); тем же путём шлём байты напрямую
+    лидам тенант-ботов (file_id Школы для них неприменим: file_id привязан к боту-заливщику).
 
-    Возвращает file_id для переиспользования. Тип метода — по kind. parse_mode plain.
+    Возвращает file_id для переиспользования ТЕМ ЖЕ ботом. Тип метода — по kind.
+    parse_mode plain. reply_markup — опционально (футер «Отписаться» тенантских рассылок).
     """
     from aiogram.types import BufferedInputFile
     buf = BufferedInputFile(content, filename=filename or "file")
     cap = caption[:CAPTION_LIMIT] if caption else None
+    kb = reply_markup
     if kind == "photo":
-        msg = await _rate_limited_call(lambda: bot.send_photo(chat_id, buf, caption=cap))
+        msg = await _rate_limited_call(lambda: bot.send_photo(chat_id, buf, caption=cap, reply_markup=kb))
         file_id = msg.photo[-1].file_id
     elif kind == "video":
-        msg = await _rate_limited_call(lambda: bot.send_video(chat_id, buf, caption=cap))
+        msg = await _rate_limited_call(lambda: bot.send_video(chat_id, buf, caption=cap, reply_markup=kb))
         file_id = msg.video.file_id
     elif kind == "voice":
-        msg = await _rate_limited_call(lambda: bot.send_voice(chat_id, buf, caption=cap))
+        msg = await _rate_limited_call(lambda: bot.send_voice(chat_id, buf, caption=cap, reply_markup=kb))
         file_id = msg.voice.file_id
     elif kind == "audio":
-        msg = await _rate_limited_call(lambda: bot.send_audio(chat_id, buf, caption=cap))
+        msg = await _rate_limited_call(lambda: bot.send_audio(chat_id, buf, caption=cap, reply_markup=kb))
         file_id = msg.audio.file_id
     elif kind == "animation":
-        msg = await _rate_limited_call(lambda: bot.send_animation(chat_id, buf, caption=cap))
+        msg = await _rate_limited_call(lambda: bot.send_animation(chat_id, buf, caption=cap, reply_markup=kb))
         file_id = msg.animation.file_id
     else:  # document / other
-        msg = await _rate_limited_call(lambda: bot.send_document(chat_id, buf, caption=cap))
+        msg = await _rate_limited_call(lambda: bot.send_document(chat_id, buf, caption=cap, reply_markup=kb))
         file_id = msg.document.file_id
     return msg, file_id
 

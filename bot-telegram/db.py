@@ -581,19 +581,26 @@ async def claim_outbox(limit: int) -> list[dict]:
     SKIP LOCKED исключает гонку нескольких воркеров/инстансов в пределах одного claim.
     """
     async with pool.acquire() as c:
+        # Гард вложений: строки Школы с байтами без file_id ждут стейджинга в OPS_CHAT
+        # (_drain_outbox_uploads), иначе claim увёл бы вложение в отправку пустым текстом.
+        # Тенантские строки (боты мультиплекса) клеймятся С байтами: их file_id Школы
+        # неприменим (file_id привязан к боту-заливщику) — воркер шлёт байты напрямую.
         rows = await c.fetch(
             """
             update outbox set status = 'sending', attempts = attempts + 1, claimed_at = now()
             where id in (
                 select id from outbox
                 where status = 'queued' and messenger = 'tg'
+                  and (file_bytes is null or file_id is not null
+                       or tenant_id is distinct from $2)
                 order by id
                 limit $1
                 for update skip locked
             )
-            returning id, lead_id, tg_user_id, kind, text, file_id, attempts, created_at
+            returning id, lead_id, tg_user_id, kind, text, file_id, attempts, created_at,
+                      tenant_id, file_bytes, file_name, file_mime
             """,
-            limit,
+            limit, default_tenant_id(),
         )
     return [dict(r) for r in rows]
 
@@ -869,18 +876,20 @@ async def claim_broadcast_to_send() -> dict | None:
     """
     async with pool.acquire() as c:
         async with c.transaction():
+            # Без tenant-фильтра: воркер один на процесс и обслуживает рассылки ВСЕХ тенантов
+            # (панель создаёт их с tenant_id активного клиента). Изоляция — ниже по конвейеру:
+            # materialize_recipients скоупит адресатов по broadcasts.tenant_id, а _send_batch
+            # выбирает бота тенанта и выставляет tenant-контекст.
             row = await c.fetchrow(
                 """
                 select id, title, messenger, kind, body_template, recipient_count, product_id,
                        tenant_id
                 from broadcasts
                 where status = 'queued' and recipient_count is not null
-                  and tenant_id = $1
                 order by id
                 limit 1
                 for update skip locked
                 """,
-                tenant_id(),  # воркер берёт рассылки ТОЛЬКО своего тенанта (бот=owner, RLS обходит)
             )
             if row is None:
                 return None
@@ -1289,11 +1298,14 @@ async def list_outbox_pending_upload(limit: int, max_attempts: int) -> list[dict
             from outbox
             where file_bytes is not null and file_id is null
               and messenger = 'tg'
+              and tenant_id = $3
               and upload_attempts < $2
             order by id
             limit $1
             """,
-            limit, max_attempts,
+            limit, max_attempts, default_tenant_id(),
+            # Стейджинг — ТОЛЬКО строки Школы: file_id, залитый главным ботом, неприменим
+            # для тенант-ботов мультиплекса. Тенантские вложения шлются байтами напрямую.
         )
     return [dict(r) for r in rows]
 
@@ -1591,6 +1603,14 @@ async def list_active_tenants() -> list[dict]:
     async with pool.acquire() as c:
         rows = await c.fetch("select id, slug from tenants where status = 'active'")
     return [dict(r) for r in rows]
+
+
+async def list_tenant_ids() -> list:
+    """ВСЕ тенанты (включая suspended) — для retention-cron: обязанность обезличивания
+    по 152-ФЗ не зависит от статуса подписки тенанта."""
+    async with pool.acquire() as c:
+        rows = await c.fetch("select id from tenants")
+    return [r["id"] for r in rows]
 
 
 async def get_tenant_secret(tid, key_name: str) -> str | None:

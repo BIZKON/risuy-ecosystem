@@ -37,6 +37,25 @@ async def run(interval: int | None = None) -> None:
 
 
 async def _tick() -> None:
+    """Обходит ВСЕ тенанты (включая suspended — 152-ФЗ не зависит от статуса подписки):
+    все выборки ниже tenant-scoped через contextvar, без обхода лиды тенант-ботов после
+    /revoke не обезличивались бы никогда. Дефолт-тенант (Школа) идёт без контекста —
+    как раньше; один сбойный тенант не валит остальных."""
+    await _tick_tenant()  # Школа (дефолт-контекст)
+    default = db.default_tenant_id()
+    for tid in await db.list_tenant_ids():
+        if tid == default:
+            continue
+        token = db.current_tenant_id.set(tid)
+        try:
+            await _tick_tenant()
+        except Exception as e:  # noqa: BLE001 — один тенант не должен ронять цикл
+            logger.exception("Retention: тик тенанта %s упал: %s", tid, e)
+        finally:
+            db.current_tenant_id.reset(token)
+
+
+async def _tick_tenant() -> None:
     # 1) Обезличивание по отзыву согласия (срок истёк).
     lead_ids = await db.due_for_erase(config.ERASE_AFTER_DAYS)
     for lead_id in lead_ids:
