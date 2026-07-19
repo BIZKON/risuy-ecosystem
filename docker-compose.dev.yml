@@ -62,3 +62,47 @@ services:
       REDIS_URL: redis://redis:6379/0
     depends_on:
       redis: { condition: service_started }
+
+  # collectors-профиль: коллекторы TG/VK. В dev боевых кредов (TG_API_ID/сессии) нет
+  # → по умолчанию НЕ стартуют (profiles); фейк-прогон — через смоуки/профиль.
+  # VAULT_MASTER_KEY нужен только коллекторам (ingest vault не трогает) — dev-фиктивный
+  # hex-64 (все нули); прод-ключ вписывается ТОЛЬКО twc-set-env, в репо не живёт.
+  engine-collector-tg:
+    profiles: ["collectors"]
+    build:
+      context: .
+      dockerfile: engine/common/Dockerfile
+    command: python -m engine.collectors.telegram
+    restart: unless-stopped
+    # Грейс на дренаж push→queue + graceful (как engine-ingest).
+    stop_grace_period: 15s
+    environment:
+      ENGINE_DSN: postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev
+      REDIS_URL: redis://redis:6379/0
+      VAULT_MASTER_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      # Стабильное имя воркера в compose (config.py дефолтит на hostname).
+      TG_COLLECTOR_NAME: "tg-1"
+      COLLECTOR_HEALTH_PORT: "8091"
+    ports: ["8091:8091"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  engine-collector-vk:
+    profiles: ["collectors"]
+    build:
+      context: .
+      dockerfile: engine/common/Dockerfile
+    command: python -m engine.collectors.vk
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      ENGINE_DSN: postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev
+      REDIS_URL: redis://redis:6379/0
+      VAULT_MASTER_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      VK_COLLECTOR_NAME: "vk-1"
+      COLLECTOR_HEALTH_PORT: "8092"
+    ports: ["8092:8092"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }

@@ -39,3 +39,21 @@ INGEST_BACKOFF_MAX_S = _env_float("INGEST_BACKOFF_MAX_S", 30.0)
 INGEST_LAG_LOG_EVERY_S = _env_float("INGEST_LAG_LOG_EVERY_S", 60.0)
 THROTTLE_MIN_S = _env_float("THROTTLE_MIN_S", 1.0)
 THROTTLE_MAX_S = _env_float("THROTTLE_MAX_S", 2.0)
+
+# ── Коллекторы (S3 §4) ────────────────────────────────────────────────────────
+# VAULT_MASTER_KEY читает напрямую shared/vault.py (_master_key) из окружения —
+# сюда НЕ выносим и НЕ оборачиваем в req() на импорте: коллектор проверяет наличие
+# ключа через vault.enabled() на старте (fail-fast только в боевом, не в фейке).
+SOURCES_POLL_INTERVAL_S = _env_int("SOURCES_POLL_INTERVAL_S", 30)
+TG_COLLECTOR_NAME = os.environ.get("TG_COLLECTOR_NAME", socket.gethostname())
+VK_COLLECTOR_NAME = os.environ.get("VK_COLLECTOR_NAME", socket.gethostname())
+VK_API_VERSION = os.environ.get("VK_API_VERSION", "5.199")
+VK_API_BASE = os.environ.get("VK_API_BASE", "https://api.vk.com/method")
+COLLECTOR_HEALTH_PORT = _env_int("COLLECTOR_HEALTH_PORT", 8091)
+# Фейк-режим смоуков: путь к JSON-фикстуре; пусто → боевой клиент (сеть).
+FAKE_TELEGRAM = os.environ.get("FAKE_TELEGRAM", "")
+FAKE_VK = os.environ.get("FAKE_VK", "")
+# MTProto app-креды (одни на платформу): обязательны в боевом (req в main коллектора),
+# в фейк-режиме не нужны — поэтому здесь мягкий get, НЕ req() на импорте.
+TG_API_ID = os.environ.get("TG_API_ID", "")
+TG_API_HASH = os.environ.get("TG_API_HASH", "")

@@ -1,2 +1,4 @@
 asyncpg==0.30.0
 redis==5.2.1
+# vault (shared/vault.py) — AES-256-GCM; пин идентичен admin-panel/requirements.txt (S3)
+cryptography==48.0.1
