@@ -120,66 +120,137 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
   margin-block-end:var(--s3);
 }
 
-/* ---------- 4. Шапка (v2 — единая на все 7 страниц, править синхронно) ----------
-   Бар: brand + burger(≤820px) + nav[5 ссылок + 2 кнопки]. Анти-переносы: nowrap на
-   бренде/ссылках (иначе «ИИ-Агент» и «ИИ-команда» ломались по дефису при сжатии).
-   ≤820px: ссылки и «Войти» уезжают в выпадающую панель под шапкой (absolute внутри
-   sticky → едет вместе с баром), в баре остаются brand + «Выбрать тариф» + бургер. */
+/* ---------- 4. Шапка (v4 «премиум-минимализм, ноль мёртвых зон» — единая на все 7 страниц, править синхронно) ----------
+   Модель Linear/Vercel: один воздушный ряд 64px. Слева — brand. Справа — кластер
+   [5 текст-ссылок · «Войти» | сплошная CTA «Выбрать тариф»]: «Войти» — деликатная
+   ТЕКСТ-ссылка с тонким вертикальным хэйрлайн-разделителем перед правым кластером,
+   единственная сплошная primary-CTA «Выбрать тариф» — крайняя справа.
+   Порядок кластера (Войти=1, CTA=2) задан flex-order → РАЗМЕТКУ НЕ трогаем.
+   Анти-переносы: nowrap на бренде и всех ссылках («ИИ-Агент»/«ИИ-команда» рвались по дефису).
+
+   ПОРОГ БУРГЕРА 1024px. Замерено ВЖИВУЮ в браузере (system-ui, macOS): полный слим-ряд
+   (brand ~169 + gap 16 + [5 ссылок ~381 + «Войти»-текст с хэйрлайном ~64 + CTA ~154 +
+   гэпы] + паддинги .wrap 2×32) = min-width ~929–971px. Порог 1024 > этого с запасом ~10%
+   → покрывает разброс глифов между ОС (Segoe UI/Roboto шире). Мёртвой зоны 821..~1000 из
+   v2 больше нет: при ≥1025px ряд помещается всегда, при ≤1024px он в панели. Стандартные
+   лэптопы (1280/1366/1440) — чистый ряд; бургер — на планшетах/узких окнах ≤1024.
+   Self-contained: без CDN/внешних шрифтов; login-URL и якоря — в разметке. */
 .top{
   position:sticky; inset-block-start:0; z-index:20;
-  background:rgba(255,255,255,.88); backdrop-filter:blur(10px) saturate(150%);
+  background:rgba(255,255,255,.85);
+  -webkit-backdrop-filter:blur(12px) saturate(160%);
+  backdrop-filter:blur(12px) saturate(160%);
   border-block-end:1px solid var(--line);
 }
 .top .wrap{display:flex; align-items:center; justify-content:space-between;
   gap:var(--s4); min-block-size:64px; position:relative}
-.brand{display:inline-flex; align-items:center; gap:.625rem; white-space:nowrap;
-  flex:none; font-weight:800; font-size:1.125rem; letter-spacing:-.01em; color:var(--ink)}
+
+/* --- Бренд: крайний слева, не сжимается --- */
+.brand{display:inline-flex; align-items:center; gap:.625rem; white-space:nowrap; flex:none;
+  order:0; font-weight:800; font-size:1.125rem; letter-spacing:-.015em; color:var(--ink)}
 .brand:hover{text-decoration:none}
 .logo{
   inline-size:32px; block-size:32px; border-radius:9px; flex:none;
   background:linear-gradient(135deg,var(--primary) 0%,#3B6FE8 100%);
   display:inline-flex; align-items:center; justify-content:center; color:#fff;
+  box-shadow:0 1px 2px rgba(29,78,216,.25);
 }
 .logo svg{inline-size:18px; block-size:18px}
-.nav{display:flex; align-items:center; gap:clamp(.8rem,1.2vw,1.4rem);
-  font-size:var(--fs-s); font-weight:600}
-.nav a{white-space:nowrap}
-.nav a:not(.btn){color:var(--muted)}
-.nav a:not(.btn):hover{color:var(--ink); text-decoration:none}
-.nav a.btn--primary{color:#fff}
-.nav a.btn--primary:hover{text-decoration:none}
-.nav .btn{padding:.55rem 1.05rem; font-size:var(--fs-s)}
-.nav .nav-login{background:transparent; color:var(--ink); border:1px solid var(--line)}
-.nav .nav-login:hover{border-color:var(--primary); color:var(--primary); text-decoration:none}
 
-/* Бургер: виден только ≤820px; состояние — aria-expanded (см. инлайн-скрипт шапки) */
-.burger{display:none; flex:none; inline-size:44px; block-size:44px; padding:10px;
-  background:none; border:1px solid var(--line); border-radius:var(--r-s); cursor:pointer}
-.burger span{display:block; block-size:2px; background:var(--ink); border-radius:2px;
+/* --- Навигация (десктоп-ряд): 5 лёгких ссылок + «Войти» (текст) + одна сплошная CTA --- */
+.nav{display:flex; align-items:center; gap:clamp(.85rem,1.1vw,1.3rem);
+  font-size:var(--fs-s); font-weight:500}
+.nav a{white-space:nowrap}                          /* nowrap → нет переноса по дефису */
+.nav a:not(.btn){color:var(--muted); letter-spacing:-.005em;
+  transition:color .15s var(--ease-move)}
+.nav a:not(.btn):hover{color:var(--ink); text-decoration:none}
+
+/* Единственная сплошная primary-CTA — крайняя справа (order:2). База .btn--primary из секции 3. */
+.nav .btn--primary{order:2; padding:.5rem 1.15rem; font-size:var(--fs-s); font-weight:600; color:#fff}
+.nav .btn--primary:hover{color:#fff; text-decoration:none}
+
+/* «Войти» — деликатная ТЕКСТ-ссылка (сброс вида базового .btn) + вертикальный хэйрлайн-разделитель
+   перед правым кластером. order:1 → сразу после 5 ссылок, перед сплошной CTA. */
+.nav .nav-login{order:1; position:relative;
+  margin:0; padding-block:0; padding-inline:1.25rem 0;
+  background:none; border:0; border-radius:0; box-shadow:none;
+  font-size:var(--fs-s); font-weight:500; color:var(--muted);
+  transition:color .15s var(--ease-move)}
+.nav .nav-login::before{content:""; position:absolute; inset-inline-start:0;
+  inset-block-start:50%; transform:translateY(-50%);
+  inline-size:1px; block-size:20px; background:var(--line)}
+.nav .nav-login:hover{color:var(--ink); background:none; border:0;
+  box-shadow:none; transform:none; text-decoration:none}
+
+/* Доступность: видимый фокус клавиатуры на всех интерактивных элементах шапки */
+.brand:focus-visible,
+.nav a:focus-visible,
+.top-cta:focus-visible,
+.burger:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:var(--r-s)}
+
+/* Бургер: виден только ≤1024px; состояние — aria-expanded (инлайн-скрипт шапки) */
+.burger{display:none; order:3; flex:none; inline-size:44px; block-size:44px; padding:10px;
+  background:none; border:1px solid var(--line); border-radius:var(--r-s); cursor:pointer; color:var(--ink)}
+.burger span{display:block; block-size:2px; background:currentColor; border-radius:2px;
   margin-block:5px; transition:transform .2s var(--ease-move), opacity .2s var(--ease-move)}
 .burger[aria-expanded="true"] span:nth-child(1){transform:translateY(7px) rotate(45deg)}
 .burger[aria-expanded="true"] span:nth-child(2){opacity:0}
 .burger[aria-expanded="true"] span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
 @media (prefers-reduced-motion:reduce){ .burger span{transition:none} }
 
-@media (max-width:820px){
-  .burger{display:block; order:3}
-  /* В баре остаётся только главный CTA; остальное — в панель */
+/* Мобильный дубль CTA в баре («Выбрать тариф»); по умолчанию скрыт (десктоп-ряд его не показывает) */
+.top-cta{display:none}
+
+/* ---- Бургер-режим: ≤1024px (порог заведомо выше ~929px min-width ряда, см. шапку) ---- */
+@media (max-width:1024px){
+  .burger{display:block}
+  .top .wrap{gap:.75rem}
+
+  /* nav → выпадающая панель под баром (absolute внутри sticky → едет вместе с баром) */
   .nav{position:absolute; inset-inline:0; inset-block-start:100%; z-index:19;
     display:none; flex-direction:column; align-items:stretch; gap:0;
     background:var(--bg); border-block-end:1px solid var(--line);
-    box-shadow:var(--shadow-m); padding:var(--s2) 0}
+    box-shadow:var(--shadow-m); padding:var(--s2) 0; font-weight:500}
   .burger[aria-expanded="true"] + .nav{display:flex}
-  .nav a{padding:.8rem clamp(1.125rem,4vw,2rem); white-space:normal}
+
+  /* Гасим десктоп-ордер/хэйрлайн: восстанавливаем DOM-порядок чтения в панели */
+  .nav .nav-login, .nav .btn--primary{order:0}
+  .nav .nav-login::before{display:none}
+
+  /* Строки панели ≥44px (тач-цель), на всю ширину, с хэйрлайн-сепараторами */
+  .nav a{padding:.85rem clamp(1.125rem,4vw,2rem); min-block-size:44px;
+    display:flex; align-items:center; white-space:normal}
   .nav a:not(.btn){color:var(--ink); border-block-start:1px solid var(--line)}
   .nav a:not(.btn):first-child{border-block-start:none}
-  .nav .btn{margin:.35rem clamp(1.125rem,4vw,2rem); padding:.7rem 1.05rem}
-  /* «Выбрать тариф» дублируется в бар отдельным элементом .top-cta (см. разметку) */
+  /* «Войти» в панели — обычная строка меню (без хэйрлайна и текст-стилей десктопа) */
+  .nav .nav-login{padding:.85rem clamp(1.125rem,4vw,2rem); color:var(--ink); font-weight:600;
+    border-block-start:1px solid var(--line)}
+  .nav .nav-login:hover{color:var(--primary)}
+  /* Дублирующий primary CTA внутри панели прячем — его роль в баре играет .top-cta (ровно один CTA) */
+  .nav .btn--primary{display:none}
+
+  /* В баре: brand слева + «Выбрать тариф» (.top-cta) + бургер справа */
+  .top-cta{display:inline-flex; align-items:center; justify-content:center;
+    order:2; margin-inline-start:auto; min-block-size:44px;
+    padding:.55rem 1rem; font-size:var(--fs-s); font-weight:600; white-space:nowrap}
 }
-.top-cta{display:none}
-@media (max-width:820px){
-  .top-cta{display:inline-flex; margin-inline-start:auto; padding:.55rem 1rem;
-    font-size:var(--fs-s); white-space:nowrap}
+
+/* ---- Средние/крупные телефоны: ≤520px — компактный бренд, чтобы бар дышал ---- */
+@media (max-width:520px){
+  .top .wrap{gap:.5rem}
+  .brand{font-size:1.0625rem; gap:.45rem}
+  .logo{inline-size:28px; block-size:28px; border-radius:8px}
+  .logo svg{inline-size:16px; block-size:16px}
+}
+
+/* ---- Узкие телефоны: ≤400px — на 320–400px brand+CTA+burger вместе не влезают ---- */
+@media (max-width:400px){
+  /* Убираем CTA из бара; бар = brand + burger (гарантированно влезает вплоть до 320px) */
+  .top-cta{display:none}
+  /* Единственный CTA возвращаем внутрь бургер-панели крупной тач-кнопкой */
+  .nav .btn--primary{display:flex; align-items:center; justify-content:center;
+    margin:.5rem clamp(1.125rem,4vw,2rem) .25rem; min-block-size:44px;
+    color:#fff; font-weight:600}
 }
 
 /* ---------- 5. Hero (светлый, центрированный + мокап кабинета) ---------- */
