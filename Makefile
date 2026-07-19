@@ -32,8 +32,11 @@ skeleton:
 	$(PG) -c "select count(*) as rows_in_raw from engine.raw_messages;"
 
 lint:
-	ruff check engine/ scripts/engine_rw_leads_isolation_smoke.py \
-	  scripts/engine_worker_smoke.py scripts/engine_transport_smoke.py
+	ruff check engine/ \
+	  scripts/engine_rw_leads_isolation_smoke.py \
+	  scripts/engine_worker_smoke.py scripts/engine_transport_smoke.py \
+	  scripts/engine_accounts_smoke.py scripts/engine_registry_smoke.py \
+	  scripts/engine_collector_tg_smoke.py scripts/engine_collector_vk_smoke.py
 
 # db-смоуки против эфемерного PG: engine_rw-изоляция на leads + RLS панели. Хост-python
 # без asyncpg → гоняем в python:3.12 на сети compose (postgres:5432). Панель-смоук — под
@@ -64,3 +67,21 @@ smoke:
 	  -e SMOKE_REDIS_URL="redis://redis:6379/1" \
 	  -e PYTHONPATH="." \
 	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 redis==5.2.1 && python scripts/engine_transport_smoke.py"
+	# S3-смоуки (спека §11 п.2–6). accounts/registry — лёгкий python:3.12-slim (asyncpg,
+	# +cryptography для vault-конверта). collector-tg/vk — через СОБРАННЫЙ engine-образ
+	# (Telethon/aiohttp уже внутри), а не голый slim: docker compose run на профильных
+	# сервисах с бинд-монтом репо (scripts/ в образ не COPY'ится) и изолированной Redis-БД №1.
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e ENGINE_ACCOUNTS_SMOKE_DSN="postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev" \
+	  -e VAULT_MASTER_KEY="0000000000000000000000000000000000000000000000000000000000000000" \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 cryptography==48.0.1 && python scripts/engine_accounts_smoke.py"
+	docker run --rm --network $(NET) -v "$(CURDIR)":/app -w /app \
+	  -e ENGINE_REGISTRY_SMOKE_DSN="postgresql://engine_rw:engine_rw_local@postgres:5432/risuy_dev" \
+	  -e PANEL_RW_SMOKE_DSN="postgresql://panel_rw:panel_rw_local@postgres:5432/risuy_dev" \
+	  python:3.12-slim sh -c "pip install -q asyncpg==0.30.0 && python scripts/engine_registry_smoke.py"
+	$(COMPOSE) run --rm --no-deps -v "$(CURDIR)":/app -w /app \
+	  -e SMOKE_REDIS_URL="redis://redis:6379/1" \
+	  engine-collector-tg python scripts/engine_collector_tg_smoke.py
+	$(COMPOSE) run --rm --no-deps -v "$(CURDIR)":/app -w /app \
+	  -e SMOKE_REDIS_URL="redis://redis:6379/1" \
+	  engine-collector-vk python scripts/engine_collector_vk_smoke.py
