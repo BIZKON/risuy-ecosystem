@@ -26,9 +26,10 @@ _PASSAGE_PREFIX = "passage: "      # обязательный префикс e5 
 _EMBED_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
-async def embed_query(text: str) -> list[float] | None:
-    """Эмбеддинг ПОЛЬЗОВАТЕЛЬСКОГО запроса через TEI. None — если эмбеддер не настроен
-    или недоступен (тогда retrieval пропускаем, бот отвечает без справки)."""
+async def _embed(text: str, prefix: str, label: str) -> list[float] | None:
+    """Общий вызов TEI /embed (единственная реализация — раньше query/passage были клонами).
+    None — если эмбеддер не настроен/недоступен: вызывающий путь молча деградирует
+    (retrieval пропускается / память не пишется), бот отвечает без справки."""
     base = (config.EMBEDDER_URL or "").strip().rstrip("/")
     if not base:
         return None
@@ -36,49 +37,33 @@ async def embed_query(text: str) -> list[float] | None:
     headers = {"content-type": "application/json"}
     if config.EMBEDDER_TOKEN:
         headers["authorization"] = f"Bearer {config.EMBEDDER_TOKEN}"
-    payload = {"inputs": [_QUERY_PREFIX + text], "normalize": True}
+    payload = {"inputs": [prefix + text], "normalize": True}
     try:
         async with aiohttp.ClientSession(timeout=_EMBED_TIMEOUT) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.warning("TEI embed HTTP %s: %s", resp.status, (await resp.text())[:200])
+                    logger.warning("TEI embed%s HTTP %s: %s",
+                                   label, resp.status, (await resp.text())[:200])
                     return None
                 data = await resp.json()
-    except Exception as e:  # таймаут, сеть, не-JSON — RAG молча отключается
-        logger.warning("TEI embed недоступен: %s", e)
+    except Exception as e:  # noqa: BLE001 — таймаут/сеть/не-JSON → путь молча деградирует
+        logger.warning("TEI embed%s недоступен: %s", label, e)
         return None
     # TEI /embed → [[float, …]] (список эмбеддингов по числу inputs)
     if isinstance(data, list) and data and isinstance(data[0], list):
         return data[0]
-    logger.warning("TEI embed неожиданный ответ: %s", str(data)[:200])
+    logger.warning("TEI embed%s неожиданный ответ: %s", label, str(data)[:200])
     return None
+
+
+async def embed_query(text: str) -> list[float] | None:
+    """Эмбеддинг ПОЛЬЗОВАТЕЛЬСКОГО запроса (префикс e5 «query: »)."""
+    return await _embed(text, _QUERY_PREFIX, "")
 
 
 async def embed_passage(text: str) -> list[float] | None:
-    """Эмбеддинг ХРАНИМОГО текста (сводка памяти, СП-2-память) через TEI с passage-префиксом e5.
-    None — если эмбеддер не настроен/недоступен (тогда запись памяти пропускаем)."""
-    base = (config.EMBEDDER_URL or "").strip().rstrip("/")
-    if not base:
-        return None
-    url = f"{base}/embed"
-    headers = {"content-type": "application/json"}
-    if config.EMBEDDER_TOKEN:
-        headers["authorization"] = f"Bearer {config.EMBEDDER_TOKEN}"
-    payload = {"inputs": [_PASSAGE_PREFIX + text], "normalize": True}
-    try:
-        async with aiohttp.ClientSession(timeout=_EMBED_TIMEOUT) as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    logger.warning("TEI embed(passage) HTTP %s: %s", resp.status, (await resp.text())[:200])
-                    return None
-                data = await resp.json()
-    except Exception as e:  # noqa: BLE001 — таймаут/сеть/не-JSON → память молча не пишется
-        logger.warning("TEI embed(passage) недоступен: %s", e)
-        return None
-    if isinstance(data, list) and data and isinstance(data[0], list):
-        return data[0]
-    logger.warning("TEI embed(passage) неожиданный ответ: %s", str(data)[:200])
-    return None
+    """Эмбеддинг ХРАНИМОГО текста (сводка памяти, СП-2-память; префикс e5 «passage: »)."""
+    return await _embed(text, _PASSAGE_PREFIX, "(passage)")
 
 
 async def retrieve_context(text: str, tenant_id, persona: str | None = None,

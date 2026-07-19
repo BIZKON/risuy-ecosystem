@@ -18,6 +18,7 @@ import db
 import escalation
 import triggers
 from shared import pii  # PII-маскировка перед внешним ИИ (152-ФЗ): mask → LLM → unmask
+from shared.ai_defaults import AI_DEFAULT_FALLBACK as _FALLBACK  # единый с панелью
 from shared.metering import charge_usage, get_tenant_plan
 from shared.money import ceil_mul
 
@@ -25,10 +26,6 @@ logger = logging.getLogger(__name__)
 
 _ENDPOINT = "https://api.timeweb.cloud/api/v1/cloud-ai/agents/{agent_id}/call"
 _TIMEOUT = aiohttp.ClientTimeout(total=60)  # reasoning-модели (DeepSeek v4) иногда думают >30с → не рубим
-_FALLBACK = (
-    "Ой, сейчас не получается ответить 🌷\n"
-    "Напиши, пожалуйста, менеджеру: lesovschool@yandex.ru"
-)
 
 
 async def ask_liya(

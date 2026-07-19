@@ -64,17 +64,7 @@ def _is_unsub(text: str | None) -> bool:
     return (text or "").strip().lower().lstrip("/") in _UNSUB_WORDS
 
 
-async def _lead_provenance(uid: int, *, messenger: str) -> str:
-    """152-ФЗ (SL §6, путь 6): провенанс лида для fail-closed гейта авто-диалога Лии в тенант-
-    каналах (TG/VK/MAX). Нет строки → 'inbound_optin' (инбаунд без изменений: аутбаунд-строку
-    B-FWD физически создаёт с provenance='outbound_signal'). Сбой БД пробрасывается → хендлер
-    прерывается ДО ask_ai (fail-closed на ошибке). tenant-scoped через contextvar tenant_id."""
-    col = db._user_col(messenger)
-    async with db.pool.acquire() as c:
-        prov = await c.fetchval(
-            f"select provenance from leads where {col} = $1 and tenant_id = $2",
-            uid, db.tenant_id())
-    return prov or "inbound_optin"
+# Провенанс-гейт — единственная реализация в db.lead_provenance (клон удалён).
 
 # ── Реестр живых канальных ботов (Слой C3) ────────────────────────────────────
 # VK/MAX-боты живут ТОЛЬКО в этом процессе (long-poll-таски). worker.py (тот же процесс,
@@ -222,7 +212,7 @@ async def t_text(message: Message, bot: Bot) -> None:
     # Аутбаунд-сигнал / раздача (provenance != 'inbound_optin') = субъект без согласия → авто-контакт
     # запрещён (152-ФЗ / ФЗ-38); не отвечаем и не шлём триггер-канед. Легальный выход (§7) — consent-funnel:
     # при захвате согласия provenance повышается до 'inbound_optin' и диалог разблокируется штатно. Инбаунд — no-op.
-    if await _lead_provenance(message.from_user.id, messenger="tg") != "inbound_optin":
+    if await db.lead_provenance(message.from_user.id, messenger="tg") != "inbound_optin":
         return
     # СП-1: выбор агента команды по слоям диалог>канал>дефолт (фолбэк на легаси внутри резолвера).
     _persona = await db.get_lead_persona(message.from_user.id)
@@ -620,7 +610,7 @@ async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, p
         # Авто-диалог Лии — ТОЛЬКО для инбаунд-лида; аутбаунд (provenance != 'inbound_optin') = без
         # согласия → не отвечаем и не шлём триггер-канед (не контактируем). Выход — consent-funnel (§7);
         # при согласии provenance → 'inbound_optin' → разблокировка. Инбаунд — no-op (upsert_start=opt-in).
-        if await _lead_provenance(from_id, messenger="vk") != "inbound_optin":
+        if await db.lead_provenance(from_id, messenger="vk") != "inbound_optin":
             return
         # Слой C: ответ КЛИЕНТУ в VK + лог source='trigger' (canned-ответ без LLM не тарифицируется
         # как 'liya'). Замыкание над peer_id/from_id — инкапсулирует канал для движка триггеров.
@@ -811,7 +801,7 @@ async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str)
         # Авто-диалог Лии — ТОЛЬКО для инбаунд-лида; аутбаунд (provenance != 'inbound_optin') = без
         # согласия → не отвечаем и не шлём триггер-канед (не контактируем). Выход — consent-funnel (§7);
         # при согласии provenance → 'inbound_optin' → разблокировка. Инбаунд — no-op (upsert_start=opt-in).
-        if await _lead_provenance(user_id, messenger="max") != "inbound_optin":
+        if await db.lead_provenance(user_id, messenger="max") != "inbound_optin":
             return
         # Ответ КЛИЕНТУ на chat_id (≠ user_id в личке) + лог source='trigger'. Замыкание над chat_id/
         # user_id инкапсулирует канал для движка триггеров.

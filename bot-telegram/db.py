@@ -653,6 +653,21 @@ async def note_max_chat_id(max_user_id: int, chat_id: int) -> None:
         logging.getLogger(__name__).warning("note_max_chat_id не записан (user=%s)", max_user_id)
 
 
+async def lead_provenance(uid: int, *, messenger: str = "tg") -> str:
+    """152-ФЗ (SL §6, путь 6): провенанс лида для fail-closed гейта авто-диалога Лии
+    (единственная реализация — раньше клонировалась в handlers.py и multiplex.py).
+    Нет строки лида → 'inbound_optin' (инбаунд-поведение без изменений: аутбаунд-строку
+    B-FWD физически создаёт с provenance='outbound_signal', фантомного лида гейтить нечем).
+    Сбой БД пробрасывается → хендлер прерывается ДО ask_ai (fail-closed на ошибке).
+    tenant-scoped через contextvar tenant_id."""
+    col = _user_col(messenger)
+    async with pool.acquire() as c:
+        prov = await c.fetchval(
+            f"select provenance from leads where {col} = $1 and tenant_id = $2",
+            uid, tenant_id())
+    return prov or "inbound_optin"
+
+
 async def outbox_recheck_address(tg_user_id: int) -> str | None:
     """Re-SELECT перед send: причина пропуска или None если слать можно.
 

@@ -438,12 +438,9 @@ ORDER_PAID_MESSAGE = (
 AI_ENABLED_SETTING_KEY = "ai_enabled"         # ""/"1": глобальный тумблер авто-ответов Лии
 AI_AGENT_ID_SETTING_KEY = "ai_agent_id"       # переопределяет env AGENT_ID бота
 AI_FALLBACK_SETTING_KEY = "ai_fallback_text"  # переопределяет хардкод-фолбэк бота
-# Дефолт фолбэка ДОЛЖЕН совпадать с bot-telegram/ai.py::_FALLBACK (показываем как
-# «эффективный», если своя строка не задана). Меняешь тут — поправь и там.
-AI_DEFAULT_FALLBACK = (
-    "Ой, сейчас не получается ответить 🌷\n"
-    "Напиши, пожалуйста, менеджеру: lesovschool@yandex.ru"
-)
+# Дефолт фолбэка — единый источник в shared/ (бот берёт ту же константу; раньше две копии
+# синхронизировались только комментарием). Показывается как «эффективный», если своя строка не задана.
+from shared.ai_defaults import AI_DEFAULT_FALLBACK  # noqa: E402,F401 — реэкспорт: app.py читает config.AI_DEFAULT_FALLBACK
 AI_AGENT_ID_MAX = 200   # потолок длины agent_id (UUID-подобный идентификатор Timeweb)
 AI_FALLBACK_MAX = 600   # потолок длины своего фолбэка
 AI_ACTIVITY_WINDOW_DAYS = _opt_int("AI_ACTIVITY_WINDOW_DAYS", 30)  # окно метрики «ответов Лии»

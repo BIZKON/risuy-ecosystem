@@ -880,19 +880,6 @@ async def on_buy(cb: CallbackQuery, bot: Bot):
     )
 
 
-async def _lead_provenance(uid: int, *, messenger: str = "tg") -> str:
-    """152-ФЗ (SL §6, путь 6): провенанс лида для fail-closed гейта авто-диалога Лии.
-    Нет строки лида → 'inbound_optin' (инбаунд-поведение без изменений: аутбаунд-строку
-    B-FWD физически создаёт с provenance='outbound_signal', фантомного лида гейтить нечем).
-    Сбой БД пробрасывается → хендлер прерывается ДО ask_ai (fail-closed на ошибке)."""
-    col = db._user_col(messenger)
-    async with db.pool.acquire() as c:
-        prov = await c.fetchval(
-            f"select provenance from leads where {col} = $1 and tenant_id = $2",
-            uid, db.tenant_id())
-    return prov or "inbound_optin"
-
-
 @router.message(StateFilter(None), F.text)
 async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     """Свободное сообщение ВНЕ воронки → отвечает AI-ассистент Лия.
@@ -914,7 +901,7 @@ async def on_free_text(message: Message, state: FSMContext, bot: Bot):
     # повышается до 'inbound_optin' и авто-диалог разблокируется штатно. На инбаунде — no-op.
     # NB: явный роутинг в funnel ОТСЮДА отложен (funnel.send_consent как единицы пока нет; голый
     # return — fail-closed; реактивный inbound входит в согласие через /start cmd_start). Подключить с B-FWD.
-    if await _lead_provenance(message.from_user.id) != "inbound_optin":
+    if await db.lead_provenance(message.from_user.id) != "inbound_optin":
         return
     # Глобальный тумблер Лии (раздел «ИИ-агенты» панели): выключена → молчим, как при
     # паузе (оператор ответит руками). agent_id/fallback берём поверх env из тех же настроек.

@@ -193,7 +193,6 @@ MANAGER_GROUP_ID_raw = os.environ.get("MANAGER_GROUP_ID", "")
 MANAGER_GROUP_ID = int(MANAGER_GROUP_ID_raw) if MANAGER_GROUP_ID_raw.lstrip("-").isdigit() else None
 MANAGER_TOPIC_ID_raw = os.environ.get("MANAGER_TOPIC_ID", "")
 MANAGER_TOPIC_ID = int(MANAGER_TOPIC_ID_raw) if MANAGER_TOPIC_ID_raw.isdigit() else None
-MANAGER_ESCALATION_ENABLED = MANAGER_GROUP_ID is not None
 # Единый сервис-бот-уведомитель (Слой B): ОДИН бот на платформу постит карточки эскалаций/
 # триггеров в группы менеджеров клиентов (клиент добавляет ЕГО в свою группу + вставляет id).
 # Пусто → фолбэк на разговорный бот тенанта (текущая эскалация Школы не ломается до провижининга).
