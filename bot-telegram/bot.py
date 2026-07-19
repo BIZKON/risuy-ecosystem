@@ -136,10 +136,15 @@ async def _redirect(request: web.Request) -> web.StreamResponse:
 
 
 def _client_ip(request: web.Request) -> str | None:
-    """Best-effort IP за прокси Timeweb (X-Forwarded-For), advisory — не security-контроль."""
+    """Best-effort IP за прокси Timeweb (X-Forwarded-For), advisory — не security-контроль.
+
+    Берём ПОСЛЕДНИЙ (правый) токен XFF: его дописывает НАШ LB и подделать его клиент не
+    может; левый токен — клиентский заголовок, тривиально спуфится (случайный «IP» на
+    каждый запрос обнулял бы per-IP rate-limit). За одним доверенным LB правый токен =
+    реальный peer клиента."""
     xff = request.headers.get("X-Forwarded-For")
     if xff:
-        return xff.split(",")[0].strip()[:64]
+        return xff.rsplit(",", 1)[-1].strip()[:64]
     peer = request.remote
     return peer[:64] if peer else None
 
@@ -166,16 +171,27 @@ async def _health(_request: web.Request) -> web.Response:
 _DEMO_CHAT_ORIGIN = "https://info.pro-agent-ai.ru"
 _CHAT_RL_WINDOW = 60.0       # окно rate-limit, сек
 _CHAT_RL_MAX = 20            # макс. сообщений с одного IP за окно
+_CHAT_RL_GLOBAL_MAX = 120    # общий потолок эндпоинта за окно: анти-спуф XFF — распределённый
+                             # перебор «IP» упирается в общий бюджет (паттерн _GLOBAL_KEY auth панели)
+_CHAT_RL_GLOBAL_KEY = "\x00global"  # непечатаемый префикс — не пересечётся с реальным IP
 _CHAT_MAX_MESSAGES = 24      # кап длины присланной истории
 _CHAT_MAX_LEN = 2000         # кап длины одного сообщения
 _chat_rl_hits: dict[str, list[float]] = {}
 
 
 def _rl_allow_chat(ip: str | None) -> bool:
-    """True, если запрос чата с этого IP в пределах лимита окна (single-instance, in-memory)."""
+    """True, если запрос чата в пределах лимитов окна (single-instance, in-memory):
+    сначала ОБЩИЙ бюджет эндпоинта (защита платного LLM от распределённого спуфа XFF),
+    затем per-IP."""
+    now = time.monotonic()
+    g = [t for t in _chat_rl_hits.get(_CHAT_RL_GLOBAL_KEY, ()) if now - t < _CHAT_RL_WINDOW]
+    if len(g) >= _CHAT_RL_GLOBAL_MAX:
+        _chat_rl_hits[_CHAT_RL_GLOBAL_KEY] = g
+        return False
+    g.append(now)
+    _chat_rl_hits[_CHAT_RL_GLOBAL_KEY] = g
     if not ip:
         return True
-    now = time.monotonic()
     hits = [t for t in _chat_rl_hits.get(ip, ()) if now - t < _CHAT_RL_WINDOW]
     if len(hits) >= _CHAT_RL_MAX:
         _chat_rl_hits[ip] = hits
@@ -184,7 +200,7 @@ def _rl_allow_chat(ip: str | None) -> bool:
     _chat_rl_hits[ip] = hits
     if len(_chat_rl_hits) > 10000:
         for k in list(_chat_rl_hits.keys()):
-            if all(now - t >= _CHAT_RL_WINDOW for t in _chat_rl_hits[k]):
+            if k != _CHAT_RL_GLOBAL_KEY and all(now - t >= _CHAT_RL_WINDOW for t in _chat_rl_hits[k]):
                 _chat_rl_hits.pop(k, None)
     return True
 

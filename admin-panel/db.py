@@ -968,7 +968,8 @@ async def create_broadcast_with_audit(
             product_ref: int | None = None
             if product_id is not None:
                 ok = await c.fetchval(
-                    "select 1 from products where id = $1 and status = 'active'", product_id
+                    f"select 1 from products where id = $1 and status = 'active' "
+                    f"and {_PRODUCTS_TENANT_SQL}", product_id
                 )
                 product_ref = product_id if ok else None
             bid = await c.fetchval(
@@ -1325,6 +1326,13 @@ async def cancel_broadcast_with_audit(
 #     product_archive), detail без ПДн (это контент-офер, ПДн субъектов не несёт).
 # =========================================================================== #
 
+# Defence-in-depth (аудит: products — единственная tenant-scoped таблица БЕЗ RLS): тот же
+# предикат, что политика tenant_isolation (db/migrate_rls_products.sql). app.tenant_id ставит
+# pool-хук (init выше) из contextvar активного тенанта; до наката RLS-миграции этот WHERE —
+# единственная изоляция каталога оферов между тенантами. НЕ убирать после наката (оборона в глубину).
+_PRODUCTS_TENANT_SQL = "tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid"
+
+
 async def list_products(*, include_archived: bool = True) -> list[asyncpg.Record]:
     """Список оферов для раздела «Продукты» (карточки). НЕ селектит сырые байты file —
     только наличие файла (file is not null OR file_tg_id is not null) и метаданные.
@@ -1332,7 +1340,7 @@ async def list_products(*, include_archived: bool = True) -> list[asyncpg.Record
     include_archived=True показывает и архивные (с бейджем). Сортировка: активные
     раньше архивных, внутри — свежие сверху (products_created_idx).
     """
-    where = "" if include_archived else "where status = 'active'"
+    where = f"where {_PRODUCTS_TENANT_SQL}" + ("" if include_archived else " and status = 'active'")
     q = f"""
         select
             id, name, kind, price, currency, caption, link,
@@ -1351,7 +1359,7 @@ async def get_product(product_id: int) -> asyncpg.Record | None:
     """Карточка/конструктор офера. НЕ селектит сырые байты file (могут быть мегабайты) —
     только наличие/готовность файла + метаданные. id типизирован int в хендлере.
     """
-    q = """
+    q = f"""
         select
             id, name, kind, price, currency, caption, link,
             (file is not null or file_tg_id is not null) as has_file,
@@ -1360,7 +1368,7 @@ async def get_product(product_id: int) -> asyncpg.Record | None:
             length(file) as file_size,
             file_name, file_mime, status, created_by, created_at, updated_at
         from products
-        where id = $1
+        where id = $1 and {_PRODUCTS_TENANT_SQL}
     """
     async with pool.acquire() as c:
         return await c.fetchrow(q, product_id)
@@ -1372,13 +1380,13 @@ async def list_products_for_select() -> list[asyncpg.Record]:
     Только active (архивные нельзя привязать к новой рассылке). Метаданные для
     предпросмотра выбранного офера прямо в форме (название/вид/цена/файл/ссылка).
     """
-    q = """
+    q = f"""
         select
             id, name, kind, price, currency, caption, link,
             (file is not null or file_tg_id is not null) as has_file,
             file_name, file_mime
         from products
-        where status = 'active'
+        where status = 'active' and {_PRODUCTS_TENANT_SQL}
         order by kind, created_at desc
     """
     async with pool.acquire() as c:
@@ -1494,7 +1502,8 @@ async def update_product_with_audit(
     async with pool.acquire() as c:
         async with c.transaction():
             old = await c.fetchrow(
-                "select id, status from products where id = $1 for update", product_id
+                f"select id, status from products where id = $1 and {_PRODUCTS_TENANT_SQL} "
+                "for update", product_id
             )
             if old is None:
                 return None
@@ -1571,7 +1580,8 @@ async def archive_product_with_audit(
     async with pool.acquire() as c:
         async with c.transaction():
             exists = await c.fetchrow(
-                "select status from products where id = $1 for update", product_id
+                f"select status from products where id = $1 and {_PRODUCTS_TENANT_SQL} "
+                "for update", product_id
             )
             if exists is None:
                 return None
@@ -1620,7 +1630,8 @@ async def set_broadcast_product_with_audit(
                 return "conflict"
             if product_id is not None:
                 ok = await c.fetchval(
-                    "select 1 from products where id = $1 and status = 'active'", product_id
+                    f"select 1 from products where id = $1 and status = 'active' "
+                    f"and {_PRODUCTS_TENANT_SQL}", product_id
                 )
                 if not ok:
                     return "bad_product"
@@ -1676,12 +1687,12 @@ async def get_active_lead_magnet() -> asyncpg.Record | None:
         return None
     async with pool.acquire() as c:
         return await c.fetchrow(
-            """
+            f"""
             select id, name, kind, status,
                    (file is not null or file_tg_id is not null) as has_file,
                    file_tg_id is not null as file_ready, link
             from products
-            where id = $1
+            where id = $1 and {_PRODUCTS_TENANT_SQL}
             """,
             product_id,
         )
@@ -1725,10 +1736,11 @@ async def set_active_lead_magnet_with_audit(
                 return "cleared"
             # Назначение: подтверждаем lead_magnet+active+есть-чем-выдавать в той же транзакции.
             ok = await c.fetchrow(
-                """
+                f"""
                 select (file is not null or file_tg_id is not null) as has_file, link
                 from products
                 where id = $1 and kind = 'lead_magnet' and status = 'active'
+                  and {_PRODUCTS_TENANT_SQL}
                 """,
                 product_id,
             )
@@ -1754,13 +1766,14 @@ async def set_active_lead_magnet_with_audit(
 async def list_lead_magnet_products() -> list[asyncpg.Record]:
     """Активные лид-магнит-оферы, ГОДНЫЕ в выдачу воронки (есть файл ИЛИ ссылка) — для
     селектора «Выдавать в воронке» на /products. Узкая выборка (без байт)."""
-    q = """
+    q = f"""
         select id, name,
                (file is not null or file_tg_id is not null) as has_file,
                file_tg_id is not null as file_ready, link
         from products
         where kind = 'lead_magnet' and status = 'active'
           and (file is not null or file_tg_id is not null or link is not null)
+          and {_PRODUCTS_TENANT_SQL}
         order by created_at desc
     """
     async with pool.acquire() as c:
@@ -3236,10 +3249,11 @@ async def set_online_payments_with_audit(
 
 async def list_priced_products_for_invoice() -> list[asyncpg.Record]:
     """Активные оферы с рублёвой ценой — селектор «выставить счёт» в диалоге."""
-    q = """
+    q = f"""
         select id, name, price, currency
         from products
         where status = 'active' and price is not null and price > 0 and currency = 'RUB'
+          and {_PRODUCTS_TENANT_SQL}
         order by kind desc, created_at desc
     """
     async with pool.acquire() as c:

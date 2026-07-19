@@ -279,6 +279,16 @@ grant select, insert, update on account_identities to panel_rw;
 -- usage_ledger/model_prices/agent_token_snapshots/account_identities — identity-PK → грант на sequence не нужен.
 -- Остальные новые таблицы — uuid-PK (gen_random_uuid), секвенсов нет.
 
+-- ── Зеркало миграций, шедших мимо этого файла (ревизия: инвариант «полный реестр») ──
+-- Гранты этих таблиц жили ТОЛЬКО в своих migrate_*.sql → штатное переприменение этого
+-- файла (revoke all выше) молча отбирало их: падали /partners, /forgot-password,
+-- бриф-центр и enqueue_platform_notify (уведомления владельцу/партнёрам).
+grant select, insert, update on platform_notify       to panel_rw;  -- очередь ТГ-уведомлений; статусы ведёт бот, панель ставит queued (зеркало migrate_platform_notify.sql)
+grant usage, select on sequence platform_notify_id_seq to panel_rw; -- bigserial: без него INSERT падает (выдаём ПОСЛЕ массового revoke sequences)
+grant select, insert, update on partners              to panel_rw;  -- реферальные партнёры, /partners (зеркало migrate_partners.sql; uuid-PK)
+grant select, insert, update on password_reset_tokens to panel_rw;  -- сброс пароля по email; update=used_at (зеркало migrate_password_reset_tokens.sql; text-PK)
+grant select, insert, update on tenant_brief          to panel_rw;  -- бриф-центр платформы (зеркало migrate_tenant_brief.sql; uuid-PK)
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ВЫДАЧА ПАРОЛЯ РОЛИ (НЕ в git, НЕ в этом файле, НЕ в shell-истории):
 --
