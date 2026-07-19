@@ -16,14 +16,33 @@
       <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l2.1 5.9L20 11l-5.9 2.1L12 19l-2.1-5.9L4 11l5.9-2.1z"/></svg></span>
       ИИ-Агент&nbsp;Про
     </a>
-    <nav class="nav" aria-label="Основная навигация">
-      <a class="btn nav-login" href="https://bizkon-risuy-ecosystem-a48b.twc1.net/login" target="_blank" rel="noopener">Войти в кабинет</a>
+    <a class="btn btn--primary top-cta" href="index.html#tarify">Выбрать тариф</a>
+    <button class="burger" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Меню">
+      <span></span><span></span><span></span>
+    </button>
+    <nav class="nav" id="site-nav" aria-label="Основная навигация">
+      <a href="index.html#vozmozhnosti">Возможности</a>
+      <a href="index.html#klienty">Клиенты</a>
+      <a href="index.html#komanda">ИИ-команда</a>
       <a href="index.html#tarify">Тарифы</a>
-      <a href="oferta.html">Оферта</a>
       <a href="contacts.html">Контакты</a>
+      <a class="btn btn--primary" href="index.html#tarify">Выбрать тариф</a>
+      <a class="btn nav-login" href="https://bizkon-risuy-ecosystem-a48b.twc1.net/login" target="_blank" rel="noopener">Войти</a>
     </nav>
   </div>
 </header>
+<script>
+(function(){
+  var b=document.querySelector('.burger');
+  if(!b)return;
+  b.addEventListener('click',function(){
+    b.setAttribute('aria-expanded',String(b.getAttribute('aria-expanded')!=='true'));
+  });
+  document.querySelectorAll('#site-nav a').forEach(function(a){
+    a.addEventListener('click',function(){b.setAttribute('aria-expanded','false');});
+  });
+})();
+</script>
 
 <main class="legal">
   <div class="wrap">
@@ -126,6 +145,13 @@
   });
 })();
 </script>
+
+
+<!-- Плавающая кнопка Telegram: прямой контакт с владельцем, всегда на экране при скролле -->
+<a class="tg-float" href="https://t.me/profysales" target="_blank" rel="noopener" aria-label="Написать нам в Telegram">
+  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>
+  <span class="tg-float__label">Задать вопрос</span>
+</a>
 
 </body>
 </html>

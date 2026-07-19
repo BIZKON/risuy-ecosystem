@@ -20,18 +20,33 @@
       <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l2.1 5.9L20 11l-5.9 2.1L12 19l-2.1-5.9L4 11l5.9-2.1z"/></svg></span>
       ИИ-Агент&nbsp;Про
     </a>
-    <nav class="nav" aria-label="Основная навигация">
-      <a class="btn nav-login" href="https://bizkon-risuy-ecosystem-a48b.twc1.net/login" target="_blank" rel="noopener">Войти в кабинет</a>
-      <a href="#vozmozhnosti">Возможности</a>
-      <a href="#komanda">ИИ-команда</a>
-      <a href="#keis">Кейс</a>
-      <a href="#tarify">Тарифы</a>
-      <a href="#faq">Вопросы</a>
-      <a class="btn btn--outline" href="https://t.me/profysales" target="_blank" rel="noopener">Задать вопрос</a>
-      <a class="btn btn--primary" href="#tarify">Выбрать тариф</a>
+    <a class="btn btn--primary top-cta" href="index.html#tarify">Выбрать тариф</a>
+    <button class="burger" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Меню">
+      <span></span><span></span><span></span>
+    </button>
+    <nav class="nav" id="site-nav" aria-label="Основная навигация">
+      <a href="index.html#vozmozhnosti">Возможности</a>
+      <a href="index.html#klienty">Клиенты</a>
+      <a href="index.html#komanda">ИИ-команда</a>
+      <a href="index.html#tarify">Тарифы</a>
+      <a href="contacts.html">Контакты</a>
+      <a class="btn btn--primary" href="index.html#tarify">Выбрать тариф</a>
+      <a class="btn nav-login" href="https://bizkon-risuy-ecosystem-a48b.twc1.net/login" target="_blank" rel="noopener">Войти</a>
     </nav>
   </div>
 </header>
+<script>
+(function(){
+  var b=document.querySelector('.burger');
+  if(!b)return;
+  b.addEventListener('click',function(){
+    b.setAttribute('aria-expanded',String(b.getAttribute('aria-expanded')!=='true'));
+  });
+  document.querySelectorAll('#site-nav a').forEach(function(a){
+    a.addEventListener('click',function(){b.setAttribute('aria-expanded','false');});
+  });
+})();
+</script>
 
 <main>
   <!-- ============ HERO ============ -->
@@ -248,8 +263,42 @@
     </div>
   </section>
 
+  <!-- ============ КЛИЕНТЫ И КОМПАНИИ ============ -->
+  <section class="section section--soft" id="klienty">
+    <div class="wrap">
+      <div class="section__head reveal">
+        <p class="kicker">Клиенты и компании</p>
+        <h2>Проверяйте компании и знайте, с кем говорите</h2>
+        <p>Встроенная база компаний: официальные данные ЕГРЮЛ/ЕГРИП по каждому клиенту — прямо в кабинете, рядом с диалогом.</p>
+      </div>
+      <div class="features" data-stagger>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8.5 11l1.8 1.8 3.2-3.6"/></svg></div>
+          <h3>Проверка по ИНН или ОГРН</h3>
+          <p>Введите ИНН или ОГРН — получите карточку из ЕГРЮЛ/ЕГРИП: название, форма, ОКВЭД, адрес, руководитель, дата регистрации и статус: действует, ликвидируется или банкрот.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M4 6h16M4 12h10M4 18h7"/><circle cx="18" cy="16" r="3.2"/><path d="M20.4 18.4L23 21"/></svg></div>
+          <h3>Поиск по названию</h3>
+          <p>Не помните ИНН — ищите по названию: панель покажет подсказки с ИНН и городом, полная карточка сохраняется в один клик.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 12a8.4 8.4 0 0 1-9 8.4L5 22l1.1-3.4A8.4 8.4 0 1 1 21 12z"/><path d="M9 4.5h11v7"/><path d="M12 8.5h5M12 11h3"/></svg></div>
+          <h3>Компания — в диалоге лида</h3>
+          <p>Привяжите карточку к клиенту прямо из переписки: менеджер видит, с каким бизнесом говорит — форма, отрасль, статус юрлица.</p>
+        </div>
+        <div class="feature reveal">
+          <div class="feature__ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="9" r="3"/><circle cx="16.5" cy="9" r="2.5"/><path d="M2.5 20c0-3 2.4-5 5.5-5s5.5 2 5.5 5"/><path d="M14.5 15.4c2.7.3 4.5 2 4.5 4.6"/></svg></div>
+          <h3>База компаний и Клуб</h3>
+          <p>Сохранённые компании работают дальше: фильтры по городу и ОКВЭД в «Клубе предпринимателей» и рекомендации, с кем познакомиться, — по цепочке потребления.</p>
+        </div>
+      </div>
+      <p class="feat-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 22s8-3.6 8-9V5l-8-3-8 3v8c0 5.4 8 9 8 9z"/></svg> Источник — официальные реестры (сервис DaData). Контакты компаний не собираются и не хранятся: это аналитика и обогащение карточек клиентов, а не база для обзвона (152-ФЗ).</p>
+    </div>
+  </section>
+
   <!-- ============ КОМАНДА ИИ-СОТРУДНИКОВ ============ -->
-  <section class="section section--soft" id="komanda">
+  <section class="section" id="komanda">
     <div class="wrap">
       <div class="section__head reveal">
         <p class="kicker">ИИ-команда</p>
@@ -377,7 +426,7 @@
   </section>
 
   <!-- ============ КЕЙС ============ -->
-  <section class="section" id="keis">
+  <section class="section section--soft" id="keis">
     <div class="wrap">
       <div class="case">
         <div class="reveal">
@@ -397,7 +446,7 @@
   </section>
 
   <!-- ============ ПОДКЛЮЧЕНИЕ ============ -->
-  <section class="section section--soft" id="kak">
+  <section class="section" id="kak">
     <div class="wrap">
       <div class="section__head reveal">
         <p class="kicker">Подключение</p>
@@ -414,7 +463,7 @@
   </section>
 
   <!-- ============ ТАРИФЫ ============ -->
-  <section class="section" id="tarify">
+  <section class="section section--soft" id="tarify">
     <div class="wrap">
       <div class="section__head reveal">
         <p class="kicker">Тарифы</p>
@@ -462,7 +511,7 @@
   </section>
 
   <!-- ============ СКОРО: ПОИСК ГОРЯЧИХ ЛИДОВ ============ -->
-  <section class="section section--soft" id="soon">
+  <section class="section" id="soon">
     <div class="wrap">
       <div class="soon reveal">
         <div class="soon__body">
@@ -481,7 +530,7 @@
   </section>
 
   <!-- ============ FAQ ============ -->
-  <section class="section" id="faq">
+  <section class="section section--soft" id="faq">
     <div class="wrap">
       <div class="section__head reveal">
         <p class="kicker">Вопросы и ответы</p>
