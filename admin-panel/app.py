@@ -3844,18 +3844,29 @@ async def yookassa_webhook(request: Request):
             # (vault не найдёт → фолбэк env). НЕ перебиваем env-магазин Школы её же vault-кассой.
             # mark_order_paid_by_payment сам ставит app.tenant_id из заказа (конвертация/«спасибо»).
             payment = None
+            # Транзиент vs терминал: HTTP 404 = «платёж не в этом магазине» (норма, пробуем
+            # другие креды); сеть/таймаут/5xx/vault = транзиент — верификация НЕ ДОКАЗАНА,
+            # событие нельзя помечать processed (иначе ретраи ЮKassa дедупятся и оплаченный
+            # заказ навсегда зависает pending → mark_stale переведёт его в failed).
+            verify_transient = False
             creds = await db.get_tenant_shop_creds(order_tenant)
             if creds is not None:
                 try:
                     payment = await yookassa.get_payment(payment_id, creds=creds)
-                except yookassa.YooKassaError:
-                    payment = None  # платёж не в магазине тенанта → пробуем магазин Школы
+                except yookassa.YooKassaError as e:
+                    payment = None  # 404: платёж не в магазине тенанта → пробуем магазин Школы
+                    if e.http_status != 404:
+                        verify_transient = True
             if not (payment and payment.get("status") == "succeeded" and payment.get("paid")) \
                     and config.SHOP_PAYMENTS_CONFIGURED:
                 try:
                     payment = await yookassa.get_shop_payment(payment_id)
-                except yookassa.YooKassaError:
-                    pass  # не подтвердился ни тенант-, ни школа-кредами → заказ останется pending
+                except yookassa.YooKassaError as e:
+                    # 404 обеими кассами — терминально (платёж не наш), заказ остаётся pending.
+                    if e.http_status != 404:
+                        verify_transient = True
+            if payment is None and verify_transient:
+                processed_ok = False  # событие → 'failed', ретрай ЮKassa переобработается
             if payment is not None and payment.get("status") == "succeeded" and payment.get("paid"):
                 # #9: матч по id платежа (норма) ИЛИ по metadata.order_id (фолбэк, +бэкфилл payment_id).
                 if fallback_order_id is not None:

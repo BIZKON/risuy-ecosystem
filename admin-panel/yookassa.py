@@ -27,7 +27,16 @@ import config
 
 
 class YooKassaError(Exception):
-    """Сбой обращения к ЮKassa (выключено / сеть / не-2xx / битый ответ)."""
+    """Сбой обращения к ЮKassa (выключено / сеть / не-2xx / битый ответ).
+
+    http_status — код HTTP-ответа ЮKassa (404 = «платёж не в этом магазине», терминально
+    для данного набора кредов), None — сетевой/локальный сбой. Вебхук по этому полю
+    отличает терминальное от транзиентного: транзиент НЕ помечается processed, чтобы
+    ретрай ЮKassa переобработался."""
+
+    def __init__(self, message: str, http_status: int | None = None):
+        super().__init__(message)
+        self.http_status = http_status
 
 
 def amount_str(value) -> str:
@@ -68,7 +77,7 @@ def _request(method: str, path: str, *, body: dict | None = None,
             detail = e.read().decode()[:500]
         except Exception:
             pass
-        raise YooKassaError(f"ЮKassa HTTP {e.code}: {detail}") from e
+        raise YooKassaError(f"ЮKassa HTTP {e.code}: {detail}", http_status=e.code) from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise YooKassaError(f"ЮKassa недоступна: {e}") from e
     except (ValueError, json.JSONDecodeError) as e:
