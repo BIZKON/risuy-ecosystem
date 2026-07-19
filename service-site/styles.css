@@ -92,6 +92,9 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
   transform:translateY(-1px); box-shadow:var(--shadow-m)}
 .btn--ghost{background:transparent; color:var(--ink); border-color:var(--line)}
 .btn--ghost:hover{border-color:var(--primary); color:var(--primary); text-decoration:none}
+/* контурная кнопка на светлом фоне (шапка/hero) */
+.btn--outline{background:transparent; color:var(--ink); border-color:var(--line)}
+.btn--outline:hover{border-color:var(--primary); color:var(--primary); text-decoration:none}
 /* на тёмном фоне */
 .btn--light{background:#fff; color:var(--ink)}
 .btn--light:hover{background:var(--bg-soft); text-decoration:none; transform:translateY(-1px)}
@@ -151,53 +154,73 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 .top--dark .nav .nav-login{color:var(--on-dark); border-color:var(--line-dark)}
 .top--dark .nav .nav-login:hover{border-color:var(--on-dark); color:var(--on-dark); text-decoration:none}
 
-/* ---------- 5. Hero (тёмный) ---------- */
+/* ---------- 5. Hero (светлый, центрированный + мокап кабинета) ---------- */
 .hero{
   background:
-    radial-gradient(110% 90% at 85% -20%, rgba(59,111,232,.32) 0%, rgba(59,111,232,0) 55%),
-    radial-gradient(80% 70% at -10% 110%, rgba(29,78,216,.22) 0%, rgba(29,78,216,0) 50%),
-    var(--ink);
-  color:var(--on-dark);
-  padding-block:clamp(3.5rem,8vw,6rem) clamp(3rem,7vw,5rem);
+    radial-gradient(120% 80% at 50% -30%, var(--primary-soft) 0%, rgba(238,243,254,0) 60%),
+    var(--bg);
+  padding-block:clamp(3rem,7vw,5rem) clamp(2.5rem,6vw,4rem);
+  text-align:center;
+  border-block-end:1px solid var(--line);
 }
-.hero .wrap{display:grid; gap:clamp(2rem,5vw,4rem); align-items:center;
-  grid-template-columns:1fr}
-@media (min-width:920px){ .hero .wrap{grid-template-columns:1.08fr .92fr} }
-.hero h1{font-size:var(--fs-h1); font-weight:800; color:#fff;
-  text-wrap:balance; margin-block-end:var(--s5)}
-.hero .lead{font-size:var(--fs-l); color:var(--on-dark-muted);
-  max-inline-size:34rem; margin:0 0 var(--s6)}
-.hero .lead b{color:var(--on-dark); font-weight:600}
-.hero .cta{display:flex; flex-wrap:wrap; gap:var(--s3); margin-block-end:var(--s6)}
-.hero .kicker{color:#9DB6F5}
+.hero .wrap{display:flex; flex-direction:column; align-items:center}
+.hero h1{font-size:var(--fs-h1); font-weight:800; color:var(--ink);
+  text-wrap:balance; max-inline-size:19ch; margin-block-end:var(--s4)}
+.hero .lead{font-size:var(--fs-l); color:var(--muted);
+  max-inline-size:44rem; margin:0 0 var(--s5)}
+.hero .lead b{color:var(--ink); font-weight:700}
+.hero .cta{display:flex; flex-wrap:wrap; gap:var(--s3); justify-content:center;
+  margin-block-end:var(--s5)}
 
-.trust{display:flex; flex-wrap:wrap; gap:var(--s2)}
-.trust .pill{background:rgba(255,255,255,.07); color:var(--on-dark-muted);
-  border:1px solid var(--line-dark)}
-.trust .pill svg{color:#86B0F8}
+/* Чип «уже работает …» */
+.chip{display:inline-flex; align-items:center; gap:.5rem;
+  background:var(--bg); border:1px solid var(--line); border-radius:var(--r-pill);
+  padding:.42rem .95rem; font-size:var(--fs-xs); font-weight:600; color:var(--muted);
+  box-shadow:var(--shadow-s); margin-block-end:var(--s4)}
+.chip__dot{inline-size:8px; block-size:8px; border-radius:50%; background:var(--ok); flex:none}
 
-/* Чат-мокап продукта (CSS-визуал вместо стоковых картинок) */
-.chatcard{
-  background:#0F1A2E; border:1px solid var(--line-dark); border-radius:var(--r-l);
-  box-shadow:var(--shadow-l); padding:var(--s5); display:grid; gap:var(--s4);
+.trust{display:flex; flex-wrap:wrap; gap:var(--s2); justify-content:center}
+.trust .pill{background:var(--bg-soft); color:var(--faint); border:1px solid var(--line)}
+.trust .pill svg{color:var(--primary)}
+
+/* Мокап кабинета (CSS-визуал вместо стоковых картинок) */
+.dash{
+  inline-size:100%; max-inline-size:960px; margin-block-start:clamp(2rem,5vw,3.25rem);
+  background:#0E1A30; border:1px solid rgba(255,255,255,.08); border-radius:var(--r-l) var(--r-l) 0 0;
+  box-shadow:var(--shadow-l); overflow:hidden; text-align:start;
 }
-.chatcard__head{display:flex; align-items:center; gap:.7rem;
-  padding-block-end:var(--s4); border-block-end:1px solid var(--line-dark)}
-.chatcard__dot{inline-size:9px; block-size:9px; border-radius:50%; background:#34D399; flex:none}
-.chatcard__title{font-size:var(--fs-s); font-weight:700; color:var(--on-dark)}
-.chatcard__sub{font-size:var(--fs-xs); color:var(--on-dark-muted)}
-.msg{max-inline-size:88%; padding:.7rem .95rem; border-radius:14px;
-  font-size:var(--fs-s); line-height:1.5}
-.msg--in{background:rgba(255,255,255,.08); color:var(--on-dark);
-  border-start-start-radius:4px; justify-self:start}
-.msg--out{background:var(--primary); color:#fff;
-  border-start-end-radius:4px; justify-self:end}
-.msg__meta{display:block; margin-block-start:.35rem; font-size:.71rem; opacity:.72}
-.msg--note{justify-self:center; background:transparent; color:var(--on-dark-muted);
-  font-size:var(--fs-xs); padding:.1rem 0}
-.msg__btn{display:block; inline-size:max-content; margin-block-start:.6rem;
-  padding:.42rem .8rem; background:#fff; color:var(--primary); font-weight:700;
-  font-size:var(--fs-xs); border-radius:8px}
+.dash__bar{display:flex; align-items:center; gap:.4rem; padding:.7rem 1rem;
+  border-block-end:1px solid rgba(255,255,255,.07)}
+.dash__cir{inline-size:10px; block-size:10px; border-radius:50%; background:#2A3852; flex:none}
+.dash__url{margin-inline-start:.6rem; font-size:var(--fs-xs); color:var(--on-dark-muted)}
+.dash__body{display:grid; grid-template-columns:1fr; background:#fff}
+@media (min-width:760px){ .dash__body{grid-template-columns:200px 1fr 250px} }
+.dash__side{background:#FBFCFE; border-inline-end:1px solid var(--line);
+  padding:.9rem; display:none}
+@media (min-width:760px){ .dash__side{display:block} }
+.dash__nav{display:block; padding:.5rem .65rem; border-radius:9px;
+  font-size:var(--fs-xs); color:var(--muted); margin-block-end:.15rem}
+.dash__nav--on{background:var(--primary-soft); color:var(--primary); font-weight:700}
+.dash__feed{padding:1.05rem 1.15rem; border-inline-end:1px solid var(--line)}
+.dash__crm{padding:1.05rem 1.15rem; background:#FBFCFE; display:none}
+@media (min-width:760px){ .dash__crm{display:block} }
+.dash__cap{font-size:.7rem; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--faint); font-weight:700; margin-block-end:.8rem}
+.dmsg{max-inline-size:90%; padding:.6rem .85rem; border-radius:13px;
+  font-size:var(--fs-s); line-height:1.5; margin-block-end:.55rem}
+.dmsg--in{background:var(--bg-soft); color:var(--ink); border-start-start-radius:4px}
+.dmsg--out{background:var(--primary); color:#fff; border-start-end-radius:4px;
+  margin-inline-start:auto}
+.dmsg__meta{display:block; margin-block-start:.35rem; font-size:.7rem; opacity:.75}
+.dmsg--note{background:transparent; color:var(--faint); font-size:var(--fs-xs);
+  text-align:center; margin:.4rem 0 0}
+.dash__crm .kv{display:flex; justify-content:space-between; gap:.6rem;
+  padding:.5rem 0; border-block-end:1px solid var(--line); font-size:var(--fs-xs);
+  color:var(--muted)}
+.dash__crm .kv:last-child{border-block-end:none}
+.dash__crm .kv b{color:var(--ink); font-weight:600; text-align:end}
+.dash__crm .tag-hot{background:var(--amber-soft); color:var(--amber);
+  border-radius:var(--r-pill); padding:.1rem .55rem; font-size:.72rem}
 
 /* ---------- 6. Секции ---------- */
 .section{padding-block:clamp(3rem,7vw,5.5rem)}
@@ -228,6 +251,27 @@ h1,h2,h3,h4{line-height:1.15; letter-spacing:-.022em; margin:0}
 .feature__ic svg{inline-size:22px; block-size:22px}
 .feature h3{font-size:var(--fs-h3); font-weight:700; margin-block-end:var(--s2)}
 .feature p{margin:0; color:var(--muted); font-size:var(--fs-s)}
+.feat-note{display:flex; align-items:flex-start; gap:.5rem; margin-block-start:var(--s5);
+  color:var(--faint); font-size:var(--fs-s); max-inline-size:52rem}
+.feat-note svg{color:var(--primary); flex:none; margin-block-start:.25rem}
+
+/* Блок «Скоро»: движок горячих лидов (в разработке) */
+.soon{display:grid; gap:clamp(1.5rem,4vw,3rem); align-items:center;
+  background:var(--bg); border:1px solid var(--line); border-radius:var(--r-l);
+  padding:clamp(1.75rem,4vw,2.75rem); box-shadow:var(--shadow-s)}
+@media (min-width:820px){ .soon{grid-template-columns:1.3fr 1fr} }
+.soon__badge{display:inline-block; font-size:var(--fs-xs); font-weight:800;
+  letter-spacing:.06em; color:var(--amber); background:var(--amber-soft);
+  padding:.3rem .8rem; border-radius:var(--r-pill); margin-block-end:var(--s3)}
+.soon__body h2{font-size:var(--fs-h2); font-weight:800; margin-block-end:var(--s3);
+  text-wrap:balance}
+.soon__body p{color:var(--muted); margin:0 0 var(--s5); font-size:var(--fs-base)}
+.soon__list{list-style:none; margin:0; padding:0; display:grid; gap:var(--s3)}
+.soon__list li{display:flex; align-items:center; gap:.7rem;
+  background:var(--bg-soft); border:1px solid var(--line); border-radius:var(--r-m);
+  padding:var(--s3) var(--s4); font-size:var(--fs-s); font-weight:600; color:var(--ink-2)}
+.soon__dot{inline-size:9px; block-size:9px; border-radius:50%; flex:none;
+  background:var(--amber); box-shadow:0 0 0 4px var(--amber-soft)}
 
 /* Кейс */
 .case{display:grid; gap:clamp(1.5rem,4vw,3rem); align-items:start}
