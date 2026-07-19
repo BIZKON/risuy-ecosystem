@@ -3,10 +3,22 @@
 клавиатуры (поведение Telegram сохраняется); VK/MAX — драйверы (Задачи 4/5). aiogram/messaging —
 ленивый импорт (адаптер VK/MAX тестируем без них)."""
 import logging
-import db
 import funnel
 
 logger = logging.getLogger(__name__)
+
+
+def _as_int_id(raw) -> int | None:
+    """Числовой id канала-гейта (VK group_id / MAX chat_id) из свободно-текстовой настройки
+    или None, если это не целое. Надёжнее lstrip('-').isdigit() (пропускал «--123» → ValueError):
+    единственный источник истины для fail-closed гейтов обоих каналов."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
 
 
 class TgFunnelChannel:
@@ -97,10 +109,10 @@ class VkFunnelChannel:
         """Проверка членства в VK-сообществе-гейте. Fail-closed: нет group_id → держим гейт.
         Мусор в настройке (поле свободного текста, напр. «vk.com/club123») — тоже fail-closed
         False, а не ValueError: краш здесь молча вешал бы воронку на гейте для всех лидов."""
-        gid_s = str((gate_cfg or {}).get("vk_gate_group_id") or "").strip()
-        if not gid_s or not gid_s.lstrip("-").isdigit():
+        gid = _as_int_id((gate_cfg or {}).get("vk_gate_group_id"))
+        if gid is None:
             return False
-        return await self.bot.is_member(int(gid_s), uid)
+        return await self.bot.is_member(gid, uid)
 
     async def deliver_text(self, text: str) -> None:
         await self.bot.send(self.peer_id, text)
@@ -157,10 +169,10 @@ class MaxFunnelChannel:
     async def check_subscription(self, gate_cfg: dict, uid: int) -> bool:
         """Проверка членства в MAX-канале-гейте. Fail-closed: нет chat_id → держим гейт.
         Мусор в настройке — fail-closed False, не ValueError (симметрия с VK-адаптером)."""
-        cid_s = str((gate_cfg or {}).get("max_gate_chat_id") or "").strip()
-        if not cid_s or not cid_s.lstrip("-").isdigit():
+        cid = _as_int_id((gate_cfg or {}).get("max_gate_chat_id"))
+        if cid is None:
             return False
-        return await self.bot.is_channel_member(int(cid_s), uid)
+        return await self.bot.is_channel_member(cid, uid)
 
     async def deliver_text(self, text: str) -> None:
         await self.bot.send(self.chat_id, text)

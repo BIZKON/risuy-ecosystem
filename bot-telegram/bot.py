@@ -182,22 +182,26 @@ _chat_rl_hits: dict[str, list[float]] = {}
 def _rl_allow_chat(ip: str | None) -> bool:
     """True, если запрос чата в пределах лимитов окна (single-instance, in-memory):
     сначала ОБЩИЙ бюджет эндпоинта (защита платного LLM от распределённого спуфа XFF),
-    затем per-IP."""
+    затем per-IP. Порядок проверок: сначала per-IP, и только ПРОШЕДШИЙ per-IP запрос
+    засчитывается в общий бюджет — иначе один IP своими же per-IP-отказами исчерпал бы
+    общий счётчик и закрыл эндпоинт всем (per-IP-отказы не доходят до LLM, тратить на
+    них общий бюджет незачем)."""
     now = time.monotonic()
+    # Общий бюджет — проверяем (но НЕ инкрементируем) первым: если исчерпан, дальше не идём.
     g = [t for t in _chat_rl_hits.get(_CHAT_RL_GLOBAL_KEY, ()) if now - t < _CHAT_RL_WINDOW]
     if len(g) >= _CHAT_RL_GLOBAL_MAX:
         _chat_rl_hits[_CHAT_RL_GLOBAL_KEY] = g
         return False
+    if ip:
+        hits = [t for t in _chat_rl_hits.get(ip, ()) if now - t < _CHAT_RL_WINDOW]
+        if len(hits) >= _CHAT_RL_MAX:
+            _chat_rl_hits[ip] = hits
+            return False
+        hits.append(now)
+        _chat_rl_hits[ip] = hits
+    # Дошли сюда → запрос реально уйдёт в LLM: теперь засчитываем в общий бюджет.
     g.append(now)
     _chat_rl_hits[_CHAT_RL_GLOBAL_KEY] = g
-    if not ip:
-        return True
-    hits = [t for t in _chat_rl_hits.get(ip, ()) if now - t < _CHAT_RL_WINDOW]
-    if len(hits) >= _CHAT_RL_MAX:
-        _chat_rl_hits[ip] = hits
-        return False
-    hits.append(now)
-    _chat_rl_hits[ip] = hits
     if len(_chat_rl_hits) > 10000:
         for k in list(_chat_rl_hits.keys()):
             if k != _CHAT_RL_GLOBAL_KEY and all(now - t >= _CHAT_RL_WINDOW for t in _chat_rl_hits[k]):

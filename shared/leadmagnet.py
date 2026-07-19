@@ -286,7 +286,10 @@ def validate_funnel_fields(d: dict) -> list[str]:
     for key, label in (("vk_gate_group_id", "ID VK-сообщества для гейта"),
                        ("max_gate_chat_id", "ID MAX-канала для гейта")):
         val = str(d.get(key) or "").strip()
-        if val and not val.lstrip("-").isdigit():
-            errs.append(f"{label} должен быть числом (например -123456789), а не ссылкой/именем.")
+        if val:
+            try:
+                int(val)  # надёжнее lstrip('-').isdigit() (тот пропускал «--123» → ValueError в боте)
+            except ValueError:
+                errs.append(f"{label} должен быть числом (например -123456789), а не ссылкой/именем.")
 
     return errs

@@ -851,6 +851,19 @@ async def release_outbox(item_id: int, error: str, max_attempts: int, max_age_ho
         )
 
 
+async def requeue_outbox_no_penalty(item_id: int) -> None:
+    """Вернуть строку в queued БЕЗ штрафа attempts (откатывает инкремент клейма). Для случая
+    «канал/бот тенанта не поднят»: send даже не пытались, поэтому недоступность бота не должна
+    жечь потолок попыток и превращать восстановимый операторский ответ в 'failed' за ~50с.
+    Возврат восстановимой строки страхует 24-часовой age-потолок в release_outbox (обычный путь)."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update outbox set status = 'queued', claimed_at = null, "
+            "attempts = greatest(attempts - 1, 0) where id = $1",
+            item_id,
+        )
+
+
 async def reclaim_stuck_outbox(after_seconds: int) -> int:
     """Возврат застрявших 'sending' (краш/редеплой) в 'queued'. Возвращает число строк."""
     async with pool.acquire() as c:

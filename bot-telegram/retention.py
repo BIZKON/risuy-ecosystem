@@ -41,8 +41,11 @@ async def _tick() -> None:
     все выборки ниже tenant-scoped через contextvar, без обхода лиды тенант-ботов после
     /revoke не обезличивались бы никогда. Дефолт-тенант (Школа) идёт без контекста —
     как раньше; один сбойный тенант не валит остальных."""
-    await _tick_tenant()  # Школа (дефолт-контекст)
     default = db.default_tenant_id()
+    try:
+        await _tick_tenant()  # Школа (дефолт-контекст)
+    except Exception as e:  # noqa: BLE001 — сбой Школы не должен блокировать остальных
+        logger.exception("Retention: тик дефолт-тенанта (Школа) упал: %s", e)
     for tid in await db.list_tenant_ids():
         if tid == default:
             continue

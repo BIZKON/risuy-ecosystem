@@ -5206,10 +5206,11 @@ async def mark_brief_applied(brief_id: str, applied: dict, *, actor: str,
                                 detail={"brief_id": brief_id, "sections": applied.get("sections", [])})
 
 
-# (Мёртвые зеркала get_brief_by_token/submit_brief удалены: публичную форму /brief/{token}
+# (Зеркала get_brief_by_token/submit_brief удалены: публичную форму /brief/{token} в ПРОДЕ
 # обслуживает ТОЛЬКО бот (bot-telegram/db.py — живые копии, включая Critical-фикс сессии 11
-# «enqueue вне транзакции»). Панельные копии нигде не вызывались и маскировали, какая
-# версия исполняется.)
+# «enqueue вне транзакции»). Панельные копии не вызывались прод-кодом панели и маскировали,
+# какая версия исполняется. Dev-смоук scripts/brief_db_smoke.py их использовал — переведён
+# на ботовые копии (bot-telegram/db.py).)
 
 
 async def list_tenants_min() -> list[dict]:

@@ -159,9 +159,11 @@ async def _drain_outbox(bot: Bot) -> None:
         else:
             sbot = multiplex.get_channel_bot(tid, "tg")
             if sbot is None:
-                # Канал тенанта не поднят (не настроен / рестарт) — возврат в очередь с потолком.
-                await db.release_outbox(item_id, "tg-бот тенанта не поднят",
-                                        config.OUTBOX_MAX_ATTEMPTS, config.OUTBOX_MAX_AGE_HOURS)
+                # Канал тенанта не поднят (не настроен / рестарт мультиплекса) — возврат БЕЗ
+                # штрафа attempts: send не пытались, недоступность бота ≠ неудачная попытка,
+                # иначе ~50с отсутствия бота в реестре молча превратили бы ответ в 'failed'
+                # (потолок 10×5с < окна пустого реестра до _reconcile). 24ч age-потолок держит.
+                await db.requeue_outbox_no_penalty(item_id)
                 continue
         ctx = db.current_tenant_id.set(tid)
         try:
