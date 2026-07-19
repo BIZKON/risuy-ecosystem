@@ -49,7 +49,9 @@ class VKClient:
         """Вызов VK API. Ошибка в теле (HTTP 200) → VKError. `response` — наружу.
 
         Фейк-путь: инжектированный `api(method, params)` (может сам бросить VKError).
-        Боевой путь: GET {VK_API_BASE}/{method} с access_token+v; ошибка → VKError(code).
+        Боевой путь: POST {VK_API_BASE}/{method}, access_token+v в ТЕЛЕ (data), НЕ в query-URL:
+        так токен не попадает в URL и не может утечь в логи aiohttp/прокси/трейсбек ([critic-fix
+        I1], риск §2/§13). Не-JSON тело (5xx/HTML/капча) → своя ошибка БЕЗ текста тела и URL.
         """
         if self._api is not None:
             return await self._api(method, params)
@@ -58,11 +60,18 @@ class VKClient:
 
         if self._session is None:
             self._session = aiohttp.ClientSession()
-        query = dict(params)
-        query["access_token"] = self._token
-        query["v"] = config.VK_API_VERSION
-        async with self._session.get(f"{config.VK_API_BASE}/{method}", params=query) as resp:
-            data = await resp.json()
+        # Токен — в data-body POST, а не в query-URL: URL несёт лишь имя метода (без секрета).
+        body = dict(params)
+        body["access_token"] = self._token
+        body["v"] = config.VK_API_VERSION
+        async with self._session.post(f"{config.VK_API_BASE}/{method}", data=body) as resp:
+            try:
+                # content_type=None: VK иногда отдаёт JSON как text/plain (канон vk_driver._upload).
+                data = await resp.json(content_type=None)
+            except (aiohttp.ClientError, ValueError):
+                # Не-JSON тело: НЕ прокидываем оригинал наружу — его текст/URL могут нести
+                # фрагмент запроса. Своя ошибка лишь с HTTP-кодом (from None рвёт цепочку).
+                raise VKError(-1, f"не-JSON ответ VK, HTTP {resp.status}") from None
         if isinstance(data, dict) and "error" in data:
             err = data["error"] if isinstance(data["error"], dict) else {}
             # error_msg НЕ содержит наш токен (VK его не эхоит) — логировать сообщение можно.

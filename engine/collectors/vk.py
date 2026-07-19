@@ -236,6 +236,12 @@ class VKCollector(common.SourcePollingWorker):
         next_from = resp.get("next_from")
         if next_from:
             source.cursor = str(next_from)  # каркас персистит ПОСЛЕ подтверждённой доставки
+        else:
+            # Пагинация исчерпана (нет next_from) → сбрасываем курсор, чтобы следующий цикл
+            # начал со свежей верхушки, а не залипал на глубине ([critic-fix M5]). Полный фикс
+            # «монотонно вглубь» (периодический/по времени сброс даже В процессе пагинации) —
+            # S16e/S17, спека §8/§12: свежие посты на верхушке до исчерпания страниц пропускаются.
+            source.cursor = None
         return [VKItem("post", it, it.get("owner_id"), it.get("id")) for it in items]
 
     async def _poll_wall(self, source: common.PolledSource) -> list[VKItem]:

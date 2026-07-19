@@ -8,7 +8,9 @@
   (4) banned: mark_account_banned → claim=None; last_error БЕЗ session (только класс ошибки);
   (5) нет живого: claim пустого канала → None без исключения;
   (6) регресс изоляции: panel_rw НЕ имеет select/insert/update/delete на engine.accounts;
-  (7) SKIP LOCKED: строка, залоченная параллельной tx, пропускается — claim берёт другую.
+  (7) SKIP LOCKED: строка, залоченная параллельной tx, пропускается — claim берёт другую;
+  (8) floodwait авто-истёк: floodwait_until в прошлом → claim возвращает аккаунт + status→active;
+  (9) decrypt-fail: битый конверт → claim демотирует (status≠active) + last_error='decrypt_failed'.
 
 Гард DSN: только эфемерный risuy_dev. Самоочистка (channel уникален на прогон + подчистка префикса).
 ENV: ENGINE_ACCOUNTS_SMOKE_DSN (engine_rw), VAULT_MASTER_KEY (hex-64).
@@ -143,6 +145,38 @@ async def main() -> None:
         finally:
             await pool.release(lock_conn)
 
+        # (8) floodwait авто-истёк ([critic-fix I2]): floodwait_until в ПРОШЛОМ → claim
+        #     сам возвращает аккаунт в пул И переводит его обратно в active (самовосстановление;
+        #     раньше status='floodwait' навсегда выпадал из выборки, floodwait_until было мёртвым).
+        await _cleanup(pool)
+        secret_fw = "SESSION-FW-" + uuid.uuid4().hex
+        id_fw = await _insert_account(pool, vault, LABEL_PREFIX + "fw", secret_fw, status="active")
+        past = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await accounts.mark_account_floodwait(pool, id_fw, past)
+        acc = await accounts.claim_account(pool, CH)
+        assert acc is not None and acc.id == id_fw, "(8) истёкший floodwait не авто-возвращён claim'ом"
+        assert acc.session_string == secret_fw, "(8) session истёкшего floodwait не расшифрован"
+        async with pool.acquire() as c:
+            st, fw = await c.fetchrow(
+                "select status, floodwait_until from engine.accounts where id=$1", id_fw)
+        assert st == "active" and fw is None, \
+            f"(8) claim не вернул истёкший floodwait в active (status={st}, floodwait_until={fw})"
+
+        # (9) битый vault-конверт ([critic-fix I2]): claim демотирует аккаунт (не крутит в цикле)
+        #     — status≠active, last_error='decrypt_failed' (БЕЗ session) — и возвращает None.
+        await _cleanup(pool)
+        secret_bad = "SESSION-DECFAIL-" + uuid.uuid4().hex
+        id_bad = await _insert_account(pool, vault, LABEL_PREFIX + "bad", secret_bad, status="active")
+        async with pool.acquire() as c:  # портим ciphertext (GCM-тег не сойдётся → decrypt бросит)
+            await c.execute("update engine.accounts set ciphertext=$2 where id=$1", id_bad, b"\x00" * 48)
+        assert await accounts.claim_account(pool, CH) is None, "(9) битый конверт: claim не вернул None"
+        async with pool.acquire() as c:
+            st, err = await c.fetchrow(
+                "select status, last_error from engine.accounts where id=$1", id_bad)
+        assert st != "active", f"(9) битый аккаунт не демотирован (status={st}) — будет крутиться в цикле"
+        assert err == "decrypt_failed", f"(9) last_error={err!r} (ждали decrypt_failed)"
+        assert secret_bad not in (err or ""), "(9) session/секрет утёк в last_error!"
+
         await _cleanup(pool)
     finally:
         try:
@@ -150,7 +184,7 @@ async def main() -> None:
         finally:
             await pool.close()
     print("engine_accounts_smoke: OK (round-trip + ротация(id-стабильна) + floodwait/banned/active + "
-          "нет-живого + panel_rw-изоляция + SKIP LOCKED)")
+          "нет-живого + panel_rw-изоляция + SKIP LOCKED + floodwait-авто-возврат + decrypt-fail-демотация)")
 
 
 asyncio.run(main())

@@ -45,6 +45,10 @@ THROTTLE_MAX_S = _env_float("THROTTLE_MAX_S", 2.0)
 # сюда НЕ выносим и НЕ оборачиваем в req() на импорте: коллектор проверяет наличие
 # ключа через vault.enabled() на старте (fail-fast только в боевом, не в фейке).
 SOURCES_POLL_INTERVAL_S = _env_int("SOURCES_POLL_INTERVAL_S", 30)
+# Потолок push-буфера TG на источник (collections.deque(maxlen)): при недоступном Redis
+# collect_once не зовётся (см. base_worker.run) → буфер не дренируется. maxlen отсекает
+# старейшие, чтобы память не росла неограниченно (push-модель at-most-once на переполнении).
+TG_BUFFER_MAXLEN = _env_int("TG_BUFFER_MAXLEN", 10_000)
 TG_COLLECTOR_NAME = os.environ.get("TG_COLLECTOR_NAME", socket.gethostname())
 VK_COLLECTOR_NAME = os.environ.get("VK_COLLECTOR_NAME", socket.gethostname())
 VK_API_VERSION = os.environ.get("VK_API_VERSION", "5.199")

@@ -188,9 +188,13 @@ async def test_graceful(pool, r) -> None:
     after = await r.xlen(config.INGEST_STREAM)
     assert after - before >= 2, f"(5) стрим вырос на {after - before} (ждали ≥2 события фикстуры)"
 
-    # last_polled_at источника проставлен на следующем витке персиста? В fake-один-проход
-    # deferred-курсор не персистится (нет второго collect_once) — это ОК для TG (push, cursor=None);
-    # проверяем главное: события реально эмитнуты (см. дельту стрима выше).
+    # last_polled_at теперь пишется СРАЗУ в collect_once (пульс, [critic-fix I3]) — не ждёт
+    # второго витка. Курсор в fake-один-проход остаётся в _deferred (нет второго collect_once) —
+    # это ОК для TG (push, cursor=None; на рестарте максимум дубль). Проверяем и пульс, и эмит.
+    last_polled = await pool.fetchval(
+        "select last_polled_at from engine.sources where source_kind='telegram' and external_ref=$1",
+        SOURCE_REF)
+    assert last_polled is not None, "(5) last_polled_at не проставлен в текущем collect_once (пульс I3)"
 
 
 async def _cleanup(pool, r) -> None:

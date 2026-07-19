@@ -22,7 +22,9 @@ from engine.common import db
 async def create_source(pool, tenant_id, source_kind, kind, external_ref, enabled=True):
     """Создать/обновить источник (идемпотентно по unique (tenant_id, source_kind, external_ref)).
 
-    on conflict → обновляем kind/enabled (ротация конфигурации источника). Возвращает id.
+    on conflict → kind обновляем через coalesce ([critic-fix M1], канон engine_account_add:
+    повторный seed с kind=None НЕ обнуляет ранее заданный kind); enabled — полный replace
+    (не-NULL с дефолтом True: seed выражает целевое состояние тумблера). Возвращает id.
     """
     async with pool.acquire() as conn:
         await db.set_tenant(conn, tenant_id)
@@ -31,7 +33,8 @@ async def create_source(pool, tenant_id, source_kind, kind, external_ref, enable
             insert into engine.sources (tenant_id, source_kind, kind, external_ref, enabled)
             values ($1, $2, $3, $4, $5)
             on conflict (tenant_id, source_kind, external_ref) do update
-              set kind = excluded.kind, enabled = excluded.enabled, updated_at = now()
+              set kind = coalesce(excluded.kind, engine.sources.kind),
+                  enabled = excluded.enabled, updated_at = now()
             returning id
             """,
             tenant_id, source_kind, kind, external_ref, enabled,
@@ -74,6 +77,11 @@ async def create_profile(pool, tenant_id, name, intent_keywords=None, industry=N
     intent_keywords (list) и geo (dict|None) → jsonb; min_*-пороги (numeric) → передаём
     как текст с ::numeric-кастом (asyncpg numeric ждёт Decimal — текстовый каст надёжнее
     и принимает int/float/str/None единообразно). Возвращает id.
+
+    on conflict ([critic-fix M1]): опц. поля industry/geo/min_intent_score/min_urgency —
+    coalesce (повторный seed без них НЕ обнуляет ранее заданные; канон engine_account_add).
+    intent_keywords и enabled — полный replace (профиль-seed всегда несёт свои ключевые слова
+    и целевой enabled; для точечного clear нужен явный пустой список/флаг, не пропуск аргумента).
     """
     async with pool.acquire() as conn:
         await db.set_tenant(conn, tenant_id)
@@ -84,10 +92,14 @@ async def create_profile(pool, tenant_id, name, intent_keywords=None, industry=N
                min_intent_score, min_urgency, enabled)
             values ($1, $2, $3::jsonb, $4, $5::jsonb, $6::numeric, $7::numeric, $8)
             on conflict (tenant_id, name) do update
-              set intent_keywords = excluded.intent_keywords, industry = excluded.industry,
-                  geo = excluded.geo, min_intent_score = excluded.min_intent_score,
-                  min_urgency = excluded.min_urgency, enabled = excluded.enabled,
-                  updated_at = now()
+              set intent_keywords = excluded.intent_keywords,
+                  industry = coalesce(excluded.industry, engine.search_profiles.industry),
+                  geo = coalesce(excluded.geo, engine.search_profiles.geo),
+                  min_intent_score = coalesce(excluded.min_intent_score,
+                                              engine.search_profiles.min_intent_score),
+                  min_urgency = coalesce(excluded.min_urgency,
+                                         engine.search_profiles.min_urgency),
+                  enabled = excluded.enabled, updated_at = now()
             returning id
             """,
             tenant_id, name,
