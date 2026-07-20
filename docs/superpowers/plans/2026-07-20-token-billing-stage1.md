@@ -1,0 +1,188 @@
+# Токен-биллинг · Этап 1 (бэкенд-ядро) — план реализации
+
+> **Для агентов-исполнителей:** ОБЯЗАТЕЛЬНЫЙ СУБ-СКИЛЛ — используй superpowers:subagent-driven-development (рекоменд.) или superpowers:executing-plans, задача-за-задачей. Шаги в формате чек-боксов (`- [ ]`).
+
+**Цель:** перевести биллинг «ИИ-Агент Про» на единый токен-пул (per-resource прайс + 2 бакета кошелька + схлопнуть два счётчика + закрыть утечки + двухчековая фискализация + proration), не сломав Школу Лесова и не допустив двойного списания.
+
+**Архитектура:** переиспользуем `credit_wallets`/`usage_ledger`/`charge_usage()` (единая точка списания); расширяем кошелёк на 2 бакета; курс токена + наценки выносим в `resource_pricing`; старый счётчик «сообщений» депрекейтим через идемпотентную процедуру разреза. Всё expand-first, тесты — смоуки на `risuy_dev`.
+
+**Стек:** Python 3.12 · asyncpg · Postgres (Neon-совместимый на Timeweb) · ЮKassa · смоук-скрипты (не pytest).
+
+**Спека:** `docs/superpowers/specs/2026-07-20-token-billing-tariffs-design.md` (v2).
+
+## Global Constraints (неявно входят в КАЖДУЮ задачу)
+- Деньги — ТОЛЬКО целые µRUB (1 ₽ = 1 000 000 µRUB); единственная точка округления — `shared/money.py::ceil_mul` (всегда вверх); никаких float.
+- `charge_usage()` — ЕДИНСТВЕННАЯ точка списания; три гвоздя незыблемы: `unique(idempotence_key)`, `SELECT … FOR UPDATE` кошелька, целые µRUB. Рабочие списания — постфактум (`allow_negative=True`).
+- Курс/наценка/цена — ТОЛЬКО с сервера (`resource_pricing`/`plans`/`config`), НИКОГДА из клиентского запроса.
+- Школа Лесова (`db.default_tenant_id()`) не блокируется при любом балансе (§8.7); переходник без плана не ломается при balance<0.
+- `usage_ledger` — append-only: грант panel_rw ТОЛЬКО select+insert (update/delete не выдавать); новые kind — через `'embedding'`/`'other'` + `meta.resource`, без ALTER CHECK.
+- Все DDL — **expand-first**, СНАЧАЛА `risuy_dev`, потом прод: `~/.claude/scripts/twc-migrate.sh 4171827 81.31.246.136 {risuy_dev|risuy} gen_user <file.sql>`; expand ПЕРЕД деплоем кода, CONTRACT (unique/drop/NOT NULL) — ПОСЛЕ; **каждый прод-DDL и прод-запуск скрипта — за явным «да» владельца**.
+- Гранты новых таблиц/колонок зеркалить И в `schema_*.sql`, И в `db/panel_role.sql`.
+- Тесты — смоуки `scripts/*_smoke.py`: своя `*_SMOKE_DSN`, жёсткий гард `'/risuy_dev'` (SystemExit иначе), `check(name,cond,detail)`/`FAILS[]`/`sys.exit`, тест-тенанты `slug 'smoke-%'` create+cleanup. Запуск `X_SMOKE_DSN=… PYTHONPATH=. python3 scripts/x_smoke.py` или `make smoke`.
+- E2E платежей/чеков — на ТЕСТ-магазине ЮKassa **1379463** (фискальный прод — 1378536); `SERVICE_RECEIPT_ENABLED=1` только после прогона на тесте; `SERVICE_RENEWAL_ENABLED=0` (D3).
+- Всё на русском. Push в main — за явным «да» (классификатор гейтит каждый коммит).
+
+## Порядок под-этапов
+**1A прайс-слой** и **1B бакеты** — фундамент (независимы друг от друга, делать первыми). Затем **1C разрез** (зависит 1A+1B), **1D утечки** (зависит 1A+1B), **1E фискализация** (зависит 1B), **1F жизненный цикл** (зависит 1B). **T-1F-1 (снять автосписания, D3) можно катить ПЕРВЫМ** — независим.
+
+## ⚠️ Открытые решения владельца (нужны до/во время задач)
+1. **Курс токена** (1500 µRUB/1k): const в `shared/metering.py` или строка в БД? *(предложено const — подтвердить)* — блокирует T-1A-1.
+2. **Калибровка** «~5000 ток/ответ» + `AI_OUT_TOKENS_SHARE` — снять baseline из боевого `usage_ledger` (V4 Pro Thinking жжёт больше); маржа 76,5% — приёмка на реальных данных.
+3. **Эмбеддинг-модель** в `model_prices`: провайдер/model + закупочная цена — **сверить в ЛК Timeweb** (не выдумывать) — блокирует T-1D-1.
+4. **Второй чек (зачёт аванса)**: на каждое списание или батч (день/сессия)? Есть ли ОФД/ЮKassa receipt-API для отгрузки без нового платежа? — блокирует T-1E-2.
+5. **B2B-гейт**: где хранить ИНН/ОГРНИП + чек-бокс (subscriptions/отдельная таблица)? Валидация формата? — влияет на T-1F-3.
+6. **Pre-tenant провижининг**: черновик тенанта до платежа vs провижининг из вебхука по email? — влияет на T-1F-3.
+7. **Даунгрейд-proration**: возврат переплаты в аванс (topup) или сгорает? Должно совпасть с офертой (D1) — влияет на T-1F-2.
+
+---
+
+## Под-этап 1A — Прайс-слой (курс отдельно + per-resource наценки)
+
+### T-1A-1 · DDL: таблица `resource_pricing` + грант ⚠️ ПРОД-DDL
+**Files:** create `db/schema_billing_v2_pricing.sql`; modify `db/panel_role.sql`
+**Interfaces (produces):** `resource_pricing(resource text pk, markup_multiplier numeric(6,3) not null, note text)`; seed `llm=1.000, dadata=3.000, voice=2.000, embedding=3.000`. Инвариант §7.1: курс × наценка = целевая (LLM 4,26; DaData ×3=66,7%; голос ×2=50%). Курс `TOKEN_RATE_MICRORUB_PER_1K=1_500_000` объявляется в T-1A-2 (см. Открытое решение №1).
+**Migration:** `create table if not exists resource_pricing (…); insert … on conflict do nothing; grant select,insert,update on resource_pricing to panel_rw;` (платформенный справочник, без RLS — как `model_prices`).
+- [ ] Написать `scripts/pricing_smoke.py` (гард `/risuy_dev`): падает, что таблицы нет.
+- [ ] Прогнать смоук → RED (нет таблицы).
+- [ ] Написать `db/schema_billing_v2_pricing.sql` + зеркалить грант в `db/panel_role.sql`.
+- [ ] ⚠️ Применить на `risuy_dev` (`twc-migrate.sh … risuy_dev …`), по «да» — на `risuy`.
+- [ ] Смоук: 4 seed-строки на месте, panel_rw делает select → GREEN.
+- [ ] Коммит.
+
+### T-1A-2 · `charge_usage`: per-resource расчёт `charged`
+**Files:** modify `shared/metering.py`
+**Interfaces:** тело `charge_usage(conn, tenant_id, cost_microrub:int, meta:dict, idempotence_key:str, *, allow_negative=False)->asyncpg.Record` (сигнатура СОХРАНЯЕТСЯ). Вместо `ceil_mul(cost, plan['markup_multiplier'])` (строки 135-138): `resource = meta.get('resource') or meta['kind']`; `kind=='llm'` → `charged = ceil(units['tokens_total'] × TOKEN_RATE_MICRORUB_PER_1K / 1000)`; иначе `ceil_mul(cost_microrub, resource_pricing[resource])`. Ветку `per_message` ПОКА оставить (снимется в T-1C-1). `multiplier` в леджер = наценка ресурса (llm=1.00). Потребляет `resource_pricing` (T-1A-1).
+- [ ] Расширить `scripts/metering_smoke.py`: кейс LLM 5000 ток → `charged==7_500_000` (7,5₽); DaData 7_500_000×3 → `22_500_000`; маржа `charged/cost` ≥ полов (LLM 76,5% / DaData 66,7%).
+- [ ] Прогнать → RED.
+- [ ] Реализовать per-resource логику + `TOKEN_RATE_MICRORUB_PER_1K` + загрузку наценок.
+- [ ] Смоук зелёный; кейсы идемпотентности/FOR-UPDATE-гонки (2/3) не регрессируют → GREEN.
+- [ ] Коммит.
+
+## Под-этап 1B — Два бакета кошелька
+
+### T-1B-1 · DDL: `credit_wallets` → 2 бакета + бэкфилл ⚠️ ПРОД-DDL
+**Files:** create `db/schema_metering_v2_buckets.sql`; modify `db/panel_role.sql`
+**Interfaces (produces):** `credit_wallets.included_microrub bigint not null default 0`, `included_period_end timestamptz`, `topup_microrub bigint not null default 0`. `balance_microrub` оставляем (депрекейт позже). Наследует RLS `tenant_isolation`.
+**Migration (expand-safe):** `alter table credit_wallets add column if not exists …; update credit_wallets set topup_microrub = balance_microrub where balance_microrub <> 0 and topup_microrub = 0;`
+- [ ] `scripts/wallet_buckets_smoke.py` (гард `/risuy_dev`): падает — колонок нет.
+- [ ] RED.
+- [ ] Написать DDL, зеркалить комментарий-грант в `panel_role.sql`.
+- [ ] ⚠️ `risuy_dev` → по «да» `risuy`.
+- [ ] Смоук: колонки есть, бэкфилл перенёс `balance→topup` → GREEN. Коммит.
+
+### T-1B-2 · `charge_usage`: списание пул→кошелёк, сгорание по `period_end`
+**Files:** modify `shared/metering.py`
+**Interfaces:** секция списания (строки 129-149): `SELECT included_microrub, included_period_end, topup_microrub … FOR UPDATE`; доступный пул = `included_microrub` если `period_end>now()` иначе 0 (лениво обнуляем сгоревший); гасим сперва пул, остаток — `topup`. `balance_after` = сумма остатков. `not allow_negative и (пул+аванс)<charged` → `InsufficientCreditsError` (бакеты не тронуты); `allow_negative=True` → минус на ПОСЛЕДНЕМ бакете. Три гвоздя сохраняются. Потребляет T-1B-1, T-1A-2.
+- [ ] `wallet_buckets_smoke.py`: (1) пул1000+аванс500, charged1200 → пул0/аванс300; (2) `period_end` в прошлом → пул игнор; (3) оба≤0 при `allow_negative=False` → ошибка, бакеты целы; (4) `allow_negative=True` → минус на авансе.
+- [ ] RED → реализовать → GREEN (+ регресс `metering_smoke`). Коммит.
+
+### T-1B-3 · Начисление: топап→аванс; activate/renew→пул с `period_end` (сгорание)
+**Files:** modify `admin-panel/db.py`
+**Interfaces:** `mark_topup_succeeded(tenant_id, yookassa_payment_id:str, raw:dict)->bool` (db.py:4262): `balance_microrub +=` → `topup_microrub +=`. `activate_subscription_from_payment(…)->bool` (db.py:4439) и `renew_subscription(…)->bool` (db.py:4365): `included_credits_microrub` → `included_microrub` c `SET included_period_end=current_period_end`; на renew пул **ПЕРЕЗАПИСЫВАТЬ** (сгорание остатка), не прибавлять. Снятие `ai_wallet_blocked` (db.py:4296/4402/4492) по сумме бакетов. Потребляет T-1B-1.
+- [ ] `scripts/billing_tenant_smoke.py`: топап→`topup` (included не тронут); activate→`included`+`period_end`; renew при непустом пуле → пул=новый (сгорание, не сумма); блок снимается при пополнении.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+### T-1B-4 · Хард-стоп по ОБОИМ бакетам (Школа исключена)
+**Files:** modify `bot-telegram/metering_worker.py`, `bot-telegram/ai.py`
+**Interfaces:** `_maybe_block_wallet(conn, tenant, plan:dict)->tuple|None` (metering_worker.py:344) и gateway-ветка (ai.py:351-359): условие `balance_microrub<=0` → `(included_available + topup_microrub) <= 0` (учёт истёкшего `period_end`). Сохранить исключение `tenant == db.default_tenant_id()` (§8.7) и prepaid-гейт.
+- [ ] `scripts/metering_worker_smoke.py`: оба≤0 → блок; пул>0 при аванс≤0 → НЕ блок; дефолт-тенант → ops-алерт, не блок.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+## Под-этап 1C — Схлопнуть два счётчика + разрез
+
+### T-1C-1 · Депрекейт `billing_mode='per_message'` ⚠️ ПРОД-DDL
+**Files:** create `db/migrate_plans_drop_per_message.sql`; modify `shared/metering.py`, `bot-telegram/metering_worker.py`
+**Interfaces:** `charge_usage` — удалить ветку `per_message` (остаётся per-resource из T-1A-2). `metering_worker`: убрать `_scan_per_message` из `_tick`, заморозить `metering_msg_hwm`. DDL: планы econom/start → `cost_multiplier`, `per_message_microrub=null`.
+**Migration:** `update plans set billing_mode='cost_multiplier', per_message_microrub=null where code in ('econom','start'); alter table plans drop constraint if exists plans_per_message_chk;` (expand на dev; CONTRACT-ужесточение CHECK — после деплоя кода).
+- [ ] `metering_smoke.py`: переписать кейс 4 (per_message 7,5₽) на `cost_multiplier econom` → charged по per-resource; `_scan_per_message` не пишет `'msg:%'`.
+- [ ] RED → ⚠️ DDL dev→прод по «да» → реализовать → GREEN (+ регресс `metering_worker_smoke`). Коммит.
+
+### T-1C-2 · Депрекейт quota/overage на витрине `/subscription`
+**Files:** modify `admin-panel/app.py`, `admin-panel/db.py`
+**Interfaces:** `subscription_select` (app.py:3664-3689): убрать блок `prev_used=count_ai_messages(…)→overage`. `count_ai_messages(period_start, period_end=None)->int` (db.py:3278) → пометить legacy (исторический показатель, не биллинг). ⚠️ `bot-telegram/db.py:1605 count_ai_messages(tg_user_id)` — ОМОНИМ (порог суммаризации), НЕ трогать. Колонки `service_invoices.quota/overage_*` остаются как фискально-легаси.
+- [ ] `billing_tenant_smoke.py`: оплата тарифа не создаёт overage-строку; `usage_ledger` — единственный счётчик.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+### T-1C-3 · Процедура разреза (cutover) + shadow-diff смоук
+**Files:** create `scripts/cut_over_metering.py`, `scripts/cutover_shadow_diff_smoke.py`
+**Interfaces:** `cut_over_metering.py` (ops, гард окружения): per-тенант на границе периода — (1) заморозить `metering_msg_hwm`, (2) финальный overage-счёт СТАРОЙ единицей (`count_ai_messages`+`service_invoices`), (3) перенести теневой минус в `topup_microrub`, (4) выставить `included_microrub`+`period_end` (T-1B-3). Маркер `tenant_settings key='billing_cutover_done'`; запрет пересечения окон. Потребляет T-1B-3, T-1C-1.
+- [ ] `cutover_shadow_diff_smoke.py` (гард `/risuy_dev`): на окне разреза `shadow-diff(старый счётчик, сумма usage_ledger) == 0` (приёмка §15); повтор `cut_over_metering` по маркеру = no-op; теневой минус перенесён без потери.
+- [ ] RED → реализовать → GREEN (dev-прогон; прод-запуск — за «да»). Коммит.
+
+## Под-этап 1D — Закрыть утечки (§7.5)
+
+### T-1D-1 · Добить `model_prices` (эмбеддер + все модели в обороте)
+**Files:** create `db/migrate_model_prices_leaks.sql`
+**Interfaces:** строки `model_prices(provider, model, price_in_microrub_per_1k, price_out_microrub_per_1k)` для эмбеддера и всех LLM provider `timeweb-ai-gateway`/`timeweb-cloud-ai` на проде (иначе `_capture` пропускает списание — ai.py:323, metering_worker.py:215). **Guardrail (Открытое решение №3):** цены сверить в ЛК Timeweb, не выдумывать.
+- [ ] `pricing_smoke.py`: для каждой активной пары provider/model в usage-путях есть строка; эмбеддинг не пропускается.
+- [ ] RED → вписать цены (по данным из ЛК) → dev→прод по «да» → GREEN. Коммит.
+
+### T-1D-2 · Тарифицировать эмбеддинги/RAG (`kind='embedding'`)
+**Files:** modify `bot-telegram/kb.py`, `bot-telegram/multiplex.py`, `bot-telegram/memory.py`, `bot-telegram/handlers.py`, `admin-panel/kb.py`, `admin-panel/app.py`
+**Interfaces:** обернуть точки эмбеддинга `charge_usage(conn, tenant_id, cost_microrub, {kind:'embedding', resource:'embedding', provider, model, units:{tokens}}, idempotence_key='emb:{tenant}:{kind}:{hash}', allow_negative=True)`: `kb.py:59/64` (multiplex.py:254-257, handlers.py:942, memory.py:56/117), `admin-panel/kb.py:110` (app.py:4838). `cost_microrub` из `model_prices` эмбеддера × токены. Потребляет T-1D-1, T-1B-2.
+- [ ] `scripts/embeddings_metering_smoke.py`: RAG-путь пишет `usage_ledger kind='embedding'` с ненулевым charged; индексация БЗ списывает; повтор idem = одно списание.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+### T-1D-3 · Тарифицировать DaData (`resource='dadata'`, 7,5₽×3)
+**Files:** modify `admin-panel/app.py`, `admin-panel/dadata.py`, `admin-panel/db.py`
+**Interfaces:** после `find_party(q)` (app.py:4645) и `suggest_party(q)` (app.py:4666) — `charge_usage(conn, session.active_tenant_id, cost_microrub=7_500_000, {kind:'other', resource:'dadata', provider:'dadata', units:{requests:1}}, idempotence_key='dadata:{tenant}:{inn|q}:{date}', allow_negative=True)` → charged `ceil(7,5₽×3)=22,5₽`. Глобальный `dadata_quota_take` (db.py:5127) остаётся как rate-limit. Потребляет T-1A-2, T-1B-2. *(Открытое решение №6: гранулярность списания.)*
+- [ ] `scripts/dadata_metering_smoke.py`: вызов пишет `usage_ledger kind='other' resource='dadata' charged==22_500_000`; per-tenant; суточная квота дополняется, не заменяется.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+## Под-этап 1E — Двухчековая фискализация 54-ФЗ
+
+### T-1E-1 · Параметризовать чеки: топап→«Аванс», тариф→«услуга»
+**Files:** modify `admin-panel/app.py`, `admin-panel/renewal.py`
+**Interfaces:** `_service_receipt(email, description, amount, *, mode:str='service')->dict|None` (app.py:3505): `mode='advance'` → `payment_mode='advance'`, `payment_subject='payment'`; `mode='service'` → текущие. `/wallet/topup` (app.py:6816) → `mode='advance'`; оплата тарифа (app.py:3707) → `mode='service'`. `vat_code=config.SERVICE_VAT_CODE` сохраняется.
+- [ ] `scripts/kassa_smoke.py`: `mode='advance'` даёт advance/payment; `mode='service'` — full_payment/service; None при `SERVICE_RECEIPT_ENABLED=0`.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+### T-1E-2 · Отгрузочный чек при списании (зачёт аванса) + номенклатура
+**Files:** create `admin-panel/receipts.py`; modify `shared/metering.py`, `admin-panel/app.py`
+**Interfaces:** `KIND_TO_RECEIPT_NAME = {'llm':'Использование ИИ','embedding':'Индексация/поиск по базе знаний','message':'Сообщение ИИ','other':'Сервисная операция'}`. При списании из аванса — отгрузочный чек `payment_mode='full_payment'` с зачётом, позиция из `meta.kind`. *(Открытое решение №4: на каждое списание vs батч; нужен ОФД/ЮKassa receipt-API.)* Потребляет T-1E-1, T-1B-2.
+- [ ] `kassa_smoke.py`: маппинг kind→номенклатура; структура отгрузочного чека валидна; прогон на тест-магазине 1379463.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+### T-1E-3 · Включить `SERVICE_RECEIPT_ENABLED=1` в проде ⚠️ конфиг-прод
+**Files:** modify `admin-panel/config.py` (+ .env панели 205025)
+**Interfaces:** флаг (config.py:410, дефолт OFF) → 1 после верификации двухчековой схемы. Не код-задача.
+- [ ] E2E на тест-магазине 1379463: топап→чек «Аванс», списание→чек зачёта.
+- [ ] По «да» — включить в проде (фискальный 1378536). Коммит конфига.
+
+## Под-этап 1F — Жизненный цикл подписки
+
+### T-1F-1 · D3: снять автосписания (можно ПЕРВЫМ)
+**Files:** modify `admin-panel/app.py`, `admin-panel/config.py`
+**Interfaces:** убрать `save_payment_method=True` из `subscription_select` (app.py:3709 — единственное место). Держать `SERVICE_RENEWAL_ENABLED=0` (config.py:300, дефолт False; `renewal.run()` ранний выход renewal.py:63). Тогда `yookassa_payment_method_id` не заполняется → `list_due_renewals` пуст → claim «без автосписаний» честен.
+- [ ] `scripts/b5_payments_smoke.py`/ручная: тело запроса ЮKassa без `save_payment_method`; `list_due_renewals` пуст.
+- [ ] RED → реализовать → GREEN. Коммит.
+
+### T-1F-2 · Proration + ровно одна живая подписка ⚠️ ПРОД-DDL (CONTRACT)
+**Files:** modify `admin-panel/db.py`; create `db/migrate_subscriptions_one_live.sql`
+**Interfaces:** `activate_subscription_from_payment(…)->bool` (db.py:4439): вместо INSERT новой active (4473-4478) — найти живую (`trialing/active/past_due`), деактивировать (`status='canceled'`), UPDATE/создать ОДНУ; смена тарифа → пропорция цены по остатку периода + корректировка `included_microrub` на разницу (не полный пул). Образец UPDATE — `renew_subscription` (db.py:4365). Инвариант: `list_due_renewals`/`get_tenant_plan` видят ОДНУ живую. Потребляет T-1B-3. *(Открытое решение №7: даунгрейд-политика.)*
+**Migration (CONTRACT):** сперва дедуп живых строк (ops), затем `create unique index … subscriptions_one_live_idx on subscriptions (tenant_id) where status in ('trialing','active','past_due');` — ПОСЛЕ деплоя кода.
+- [ ] `billing_tenant_smoke.py`: две activate → одна active (пул не удвоен); смена тарифа → пропорциональный `included`; `list_due_renewals` = одна; повтор по yk_payment_id идемпотентен.
+- [ ] RED → реализовать → ⚠️ дедуп+index dev→прод по «да» → GREEN. Коммит.
+
+### T-1F-3 · Починить `/service/subscribe`: tenant_id + вебхук + B2B-гейт ⚠️ ПРОД-DDL
+**Files:** modify `admin-panel/app.py`, `admin-panel/db.py`; create `db/migrate_subscriptions_b2b.sql`
+**Interfaces:** `service_subscribe` (app.py:3743): форма собирает ИНН/ОГРНИП + чек-бокс «предпринимательская деятельность» (D2); metadata (app.py:3777) вместо `{'kind':'service_landing','plan'}` несёт `tenant_id`(pre-tenant) + email + inn; детерминированный idem-key. Вебхук `yookassa_webhook` (app.py:3884-3937): ветка `kind=='service_landing'` → провижининг тенанта/подписки/кошелька (образец platform_subscription + `activate_subscription_from_payment` из T-1F-2). *(Открытые решения №5, №6.)*
+**Migration (expand):** `alter table subscriptions add column if not exists buyer_inn text, buyer_ogrnip text, is_entrepreneur boolean;` (место B2B-полей уточнить).
+- [ ] `scripts/subscribe_provision_smoke.py`: эмуляция succeeded-вебхука `service_landing` → тенант + одна subscription + wallet с included; без ИНН/чек-бокса оплата не стартует; повтор идемпотентен.
+- [ ] RED → реализовать → ⚠️ DDL dev→прод по «да» → GREEN. Коммит.
+
+### T-1F-4 · Реконсиляция осиротевших платежей (F13)
+**Files:** create `scripts/reconcile_yookassa.py`; modify `admin-panel/yookassa.py`
+**Interfaces:** `reconcile_yookassa.py` (ops): по succeeded-платежам магазина за окно (`yookassa.list_payments` — добавить) восстановить `payments`+провижининг для платежей без записи (образец `mark_topup_succeeded`/`activate_subscription_from_payment`/ветка service_landing T-1F-3). Идемпотентно по `yookassa_payment_id`.
+- [ ] `scripts/reconcile_smoke.py`: засеять succeeded без provision → восстановлена одна строка payments + провижининг; повтор = no-op.
+- [ ] RED → реализовать → GREEN (прод-запуск за «да»). Коммит.
+
+---
+
+## Self-review (покрытие спеки)
+- §7.1 per-resource прайс → 1A. §7.2 бакеты → 1B. §7.3 разрез → 1C. §7.5 утечки → 1D. §8 фискализация → 1E. §9 proration + §7.4 subscribe/реконсиляция → 1F. §6 сгорание/аванс → 1B. D2 B2B-гейт → T-1F-3. D3 автосписания → T-1F-1. D4 маржа → 1A. D5 фискализация → 1E.
+- Приёмка §15: shadow-diff=0 → T-1C-3; 2 бакета → T-1B-2/3; маржа-полы → T-1A-2; одна подписка → T-1F-2; эмбеддинги/DaData → 1D; аванс+зачёт → 1E; Школа не встаёт → T-1B-4.
+- Открытые решения (7) требуют ответа владельца до соответствующих задач (см. блок выше).
+
+## Дальше
+Этапы 2 (кабинет) и 3 (лендинг+оферта) — отдельные планы после Этапа 1.
