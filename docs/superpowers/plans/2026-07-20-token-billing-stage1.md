@@ -69,11 +69,11 @@
 **Files:** create `db/schema_metering_v2_buckets.sql`; modify `db/panel_role.sql`
 **Interfaces (produces):** `credit_wallets.included_microrub bigint not null default 0`, `included_period_end timestamptz`, `topup_microrub bigint not null default 0`. `balance_microrub` оставляем (депрекейт позже). Наследует RLS `tenant_isolation`.
 **Migration (expand-safe):** `alter table credit_wallets add column if not exists …; update credit_wallets set topup_microrub = balance_microrub where balance_microrub <> 0 and topup_microrub = 0;`
-- [ ] `scripts/wallet_buckets_smoke.py` (гард `/risuy_dev`): падает — колонок нет.
-- [ ] RED.
-- [ ] Написать DDL, зеркалить комментарий-грант в `panel_role.sql`.
-- [ ] ⚠️ `risuy_dev` → по «да» `risuy`.
-- [ ] Смоук: колонки есть, бэкфилл перенёс `balance→topup` → GREEN. Коммит.
+- [x] `scripts/wallet_buckets_smoke.py` (гард `/risuy_dev`).
+- [x] RED (3 колонки нет + бэкфилл падает UndefinedColumn). ✅
+- [x] Написать DDL. `panel_role.sql` НЕ нужен: грант credit_wallets table-level (select,insert,update) — новые колонки покрыты. ✅
+- [x] Применить на `risuy_dev`. ✅ ⚠️ прод `risuy` — за отдельным «да».
+- [x] Смоук GREEN на `risuy_dev`: 3 колонки/типы/дефолты + бэкфилл balance→topup + идемпотентность. Коммит (локально).
 
 ### T-1B-2 · `charge_usage`: списание пул→кошелёк, сгорание по `period_end`
 **Files:** modify `shared/metering.py`
