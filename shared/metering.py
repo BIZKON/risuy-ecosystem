@@ -90,6 +90,28 @@ def blended_price_per_token(price_in_per_1k: int, price_out_per_1k: int, out_sha
     return (Decimal(price_in_per_1k) * (1 - share) + Decimal(price_out_per_1k) * share) / 1000
 
 
+async def _current_token_rate(conn: asyncpg.Connection) -> int:
+    """Текущий курс продажи токена (µRUB за 1k) из billing_token_rate — версионируемый
+    (решение #1: курс = цена оферты, читается снимком в транзакции списания). Допускает
+    будущий курс (effective_from <= now). Пустая таблица = конфиг-ошибка, не молча 0."""
+    rate = await conn.fetchval(
+        "select rate_microrub_per_1k from billing_token_rate "
+        "where effective_from <= now() order by effective_from desc limit 1"
+    )
+    if rate is None:
+        raise RuntimeError("billing_token_rate пуст — курс продажи токена не задан")
+    return int(rate)
+
+
+async def _resource_markup(conn: asyncpg.Connection, resource: str, *, default) -> Decimal:
+    """Наценка ресурса из resource_pricing (per-resource прайс, §7.1). Неизвестный
+    ресурс → default (множитель плана; для llm — 1.00, наценка вшита в курс)."""
+    mk = await conn.fetchval(
+        "select markup_multiplier from resource_pricing where resource = $1", resource
+    )
+    return Decimal(mk) if mk is not None else Decimal(str(default))
+
+
 async def charge_usage(
     conn: asyncpg.Connection,
     tenant_id,
@@ -132,10 +154,24 @@ async def charge_usage(
             )
 
             plan = await get_tenant_plan(conn, tenant_id)
+            # T-1A-2: per-resource прайс + курс из БД (решение #1). resource определяет ставку.
+            resource = meta.get("resource") or meta.get("kind") or "other"
+            token_rate = None  # снимок курса в usage_ledger — заполняется только для LLM
             if plan["billing_mode"] == "per_message" and meta.get("kind") == "message":
                 charged = int(plan["per_message_microrub"])
+                multiplier = plan["markup_multiplier"]
+            elif resource == "llm":
+                # LLM тарифицируется по КУРСУ продажи токена из БД (billing_token_rate,
+                # версионируемый); наценка вшита в курс → множитель-снимок = 1.00.
+                token_rate = await _current_token_rate(conn)
+                multiplier = await _resource_markup(conn, "llm", default=Decimal("1.00"))
+                tokens_total = int((meta.get("units") or {}).get("tokens_total") or 0)
+                charged = ceil_mul(tokens_total, Decimal(token_rate) / 1000)
             else:
-                charged = ceil_mul(cost_microrub, plan["markup_multiplier"])
+                # Не-LLM (dadata/voice/embedding/…): себестоимость × наценка РЕСУРСА
+                # (per-resource, не единый множитель плана). Неизвестный ресурс → множитель плана.
+                multiplier = await _resource_markup(conn, resource, default=plan["markup_multiplier"])
+                charged = ceil_mul(cost_microrub, multiplier)
 
             balance = int(wallet["balance_microrub"])
             if not allow_negative and balance < charged:
@@ -152,14 +188,14 @@ async def charge_usage(
                 insert into usage_ledger
                     (tenant_id, kind, provider, model, units, cost_microrub,
                      multiplier, charged_microrub, balance_after_microrub,
-                     request_id, idempotence_key)
-                values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)
+                     request_id, idempotence_key, token_rate_microrub_per_1k)
+                values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12)
                 returning *
                 """,
                 tenant_id, meta.get("kind", "other"), meta.get("provider"),
                 meta.get("model"), json.dumps(meta.get("units") or {}),
-                cost_microrub, plan["markup_multiplier"], charged, balance_after,
-                meta.get("request_id"), idempotence_key,
+                cost_microrub, multiplier, charged, balance_after,
+                meta.get("request_id"), idempotence_key, token_rate,
             )
     except asyncpg.UniqueViolationError:
         # Гонка двух списаний с одним ключом: проигравшая транзакция откатилась

@@ -38,7 +38,7 @@
 
 ---
 
-## Под-этап 1A — Прайс-слой (курс отдельно + per-resource наценки)
+## Под-этап 1A — Прайс-слой (курс отдельно + per-resource наценки) — ✅ ЗАВЕРШЁН на risuy_dev (сессия 17; прод-DDL risuy — за «да»)
 
 ### T-1A-1 · DDL: `resource_pricing` (наценки) + `billing_token_rate` (курс, версионируемый) + снимок курса в `usage_ledger` ⚠️ ПРОД-DDL
 **Files:** create `db/schema_billing_v2_pricing.sql` ✅ написан; modify `db/panel_role.sql` ✅
@@ -59,9 +59,9 @@
 ### T-1A-2 · `charge_usage`: per-resource расчёт `charged` + курс из БД
 **Files:** modify `shared/metering.py`
 **Interfaces:** сигнатура `charge_usage(conn, tenant_id, cost_microrub:int, meta:dict, idempotence_key:str, *, allow_negative=False)->asyncpg.Record` СОХРАНЯЕТСЯ. В транзакции (metering.py:116) загрузить: наценки `resource_pricing` + текущий курс `select rate_microrub_per_1k from billing_token_rate where effective_from <= now() order by effective_from desc limit 1`. Вместо `ceil_mul(cost, plan['markup_multiplier'])` (строки 135-138): `resource = meta.get('resource') or meta.get('kind')`; `kind=='llm'` → `charged = ceil(units['tokens_total'] × rate / 1000)`, снимок `token_rate_microrub_per_1k=rate`, `multiplier=resource_pricing['llm']` (1.00); иначе → `ceil_mul(cost_microrub, resource_pricing[resource])`, `token_rate=NULL`. INSERT usage_ledger добавляет колонку `token_rate_microrub_per_1k`. Ветку `per_message` ПОКА оставить (снимется в T-1C-1). Потребляет T-1A-1. ⚠️ реализовывать после применения DDL на risuy_dev (иначе metering_smoke не прогнать RED→GREEN — нужен dev-DSN).
-- [ ] Расширить `scripts/metering_smoke.py`: LLM 5000 ток при курсе 1_500_000 → `charged==7_500_000` (7,5₽) + снимок курса записан; DaData 7_500_000×3 → `22_500_000`; маржа `charged/cost` ≥ полов (LLM 76,5% / DaData 66,7%).
-- [ ] RED → реализовать per-resource + загрузку курса/наценок → GREEN (идемпотентность/FOR-UPDATE 2/3 не регрессируют).
-- [ ] Коммит.
+- [x] Расширить `scripts/metering_smoke.py`: LLM 5000 ток × курс → `charged==7_500_000` + снимок курса; DaData `cost×3`→`22_500_000`; Voice `×2` (доказывает чтение resource_pricing, не плана); маржа ≥ полов.
+- [x] RED (8 провалов на старом cost×3) → реализовать per-resource + курс из БД + снимок → GREEN (24/24; идемпотентность/FOR-UPDATE не регрессируют). ✅ на risuy_dev.
+- [x] Коммит (локально).
 
 ## Под-этап 1B — Два бакета кошелька
 
