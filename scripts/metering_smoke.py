@@ -66,9 +66,12 @@ async def make_tenant(conn: asyncpg.Connection, slug: str, plan_code: str | None
 
 
 async def set_wallet(conn: asyncpg.Connection, tid: uuid.UUID, micro: int) -> None:
+    # T-1B-2: средства тенанта живут в кошельке-авансе (topup); пул included=0.
+    # balance_microrub держим зеркалом суммы бакетов (депрекейт в T-1C).
     await conn.execute(
-        "insert into credit_wallets (tenant_id, balance_microrub) values ($1, $2) "
-        "on conflict (tenant_id) do update set balance_microrub = $2",
+        "insert into credit_wallets (tenant_id, topup_microrub, balance_microrub) values ($1, $2, $2) "
+        "on conflict (tenant_id) do update set topup_microrub = $2, balance_microrub = $2, "
+        "included_microrub = 0, included_period_end = null",
         tid, micro,
     )
 

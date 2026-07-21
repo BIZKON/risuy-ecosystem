@@ -78,8 +78,8 @@
 ### T-1B-2 · `charge_usage`: списание пул→кошелёк, сгорание по `period_end`
 **Files:** modify `shared/metering.py`
 **Interfaces:** секция списания (строки 129-149): `SELECT included_microrub, included_period_end, topup_microrub … FOR UPDATE`; доступный пул = `included_microrub` если `period_end>now()` иначе 0 (лениво обнуляем сгоревший); гасим сперва пул, остаток — `topup`. `balance_after` = сумма остатков. `not allow_negative и (пул+аванс)<charged` → `InsufficientCreditsError` (бакеты не тронуты); `allow_negative=True` → минус на ПОСЛЕДНЕМ бакете. Три гвоздя сохраняются. Потребляет T-1B-1, T-1A-2.
-- [ ] `wallet_buckets_smoke.py`: (1) пул1000+аванс500, charged1200 → пул0/аванс300; (2) `period_end` в прошлом → пул игнор; (3) оба≤0 при `allow_negative=False` → ошибка, бакеты целы; (4) `allow_negative=True` → минус на авансе.
-- [ ] RED → реализовать → GREEN (+ регресс `metering_smoke`). Коммит.
+- [x] `wallet_buckets_smoke.py` секция 3: (1) пул1000+аванс500,charged1200→пул0/аванс300; (2) period_end в прошлом→пул игнор+обнулён; (3) оба≤0 allow_negative=False→ошибка+бакеты целы+леджер пуст; (4) allow_negative=True→минус на авансе.
+- [x] RED (5 провалов) → реализовать (SELECT бакетов FOR UPDATE, expiry в SQL, списание пул→аванс, balance зеркало) → GREEN (+ регресс metering_smoke 24/24). ✅ на risuy_dev. Коммит (локально).
 
 ### T-1B-3 · Начисление: топап→аванс; activate/renew→пул с `period_end` (сгорание)
 **Files:** modify `admin-panel/db.py`

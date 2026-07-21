@@ -149,7 +149,10 @@ async def charge_usage(
                 tenant_id,
             )
             wallet = await conn.fetchrow(
-                "select balance_microrub from credit_wallets where tenant_id = $1 for update",
+                "select case when included_period_end > now() then included_microrub else 0 end "
+                "         as available_pool, "
+                "       topup_microrub "
+                "from credit_wallets where tenant_id = $1 for update",
                 tenant_id,
             )
 
@@ -173,15 +176,23 @@ async def charge_usage(
                 multiplier = await _resource_markup(conn, resource, default=plan["markup_multiplier"])
                 charged = ceil_mul(cost_microrub, multiplier)
 
-            balance = int(wallet["balance_microrub"])
-            if not allow_negative and balance < charged:
-                raise InsufficientCreditsError(tenant_id, balance, charged)
+            # T-1B-2: два бакета. Доступный пул = included, если период не истёк, иначе 0
+            # (сгоревший пул лениво обнуляется). Списание: пул тарифа → кошелёк-аванс.
+            available_pool = int(wallet["available_pool"])
+            topup = int(wallet["topup_microrub"])
+            total_available = available_pool + topup
+            if not allow_negative and total_available < charged:
+                raise InsufficientCreditsError(tenant_id, total_available, charged)
 
-            balance_after = balance - charged
+            pool_spent = min(available_pool, charged)
+            new_included = available_pool - pool_spent      # ≥0; сгоревший пул → 0
+            new_topup = topup - (charged - pool_spent)      # минус на авансе при allow_negative
+            balance_after = new_included + new_topup        # сумма остатков бакетов
+            # balance_microrub — зеркало суммы бакетов (депрекейт в T-1C, пока читают старые пути).
             await conn.execute(
-                "update credit_wallets set balance_microrub = $2, updated_at = now() "
-                "where tenant_id = $1",
-                tenant_id, balance_after,
+                "update credit_wallets set included_microrub = $2, topup_microrub = $3, "
+                "balance_microrub = $4, updated_at = now() where tenant_id = $1",
+                tenant_id, new_included, new_topup, balance_after,
             )
             return await conn.fetchrow(
                 """
