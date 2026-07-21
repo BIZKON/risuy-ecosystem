@@ -3705,8 +3705,9 @@ async def subscription_select(
                       "tenant_id": str(session.active_tenant_id) if session.active_tenant_id else "",
                       "email": email},
             receipt=_service_receipt(email, description, amount),
-            # Wave 2b: сохранить способ оплаты для автопродления (рекуррент включён).
-            save_payment_method=True,
+            # D3 (спека токен-биллинга v2, «без автосписаний»): способ оплаты НЕ сохраняем
+            # (save_payment_method опущен → дефолт False). Без сохранённой карты
+            # list_due_renewals пуст → безакцептных автосписаний нет; лендинг-claim честен.
         )
     except yookassa.YooKassaError:
         import logging
