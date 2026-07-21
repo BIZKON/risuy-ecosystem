@@ -349,8 +349,10 @@ async def _capture_gateway_usage(meta: dict) -> None:
             # финдинг №3), на том же conn (без второго acquire — финдинг №6). Тенант по
             # умолчанию (Школа) не блокируется никогда (§8.7, финдинг №8).
             if plan["prepaid"] and tid != db.default_tenant_id():
+                # T-1B-4: доступные средства = доступный пул (учёт period_end) + аванс.
                 bal = await conn.fetchval(
-                    "select balance_microrub from credit_wallets where tenant_id = $1", tid)
+                    "select (case when included_period_end > now() then included_microrub else 0 end) "
+                    "       + topup_microrub from credit_wallets where tenant_id = $1", tid)
                 if bal is not None and int(bal) <= 0:
                     await db.set_ai_wallet_blocked(tid, True, conn=conn)
                     logger.error(

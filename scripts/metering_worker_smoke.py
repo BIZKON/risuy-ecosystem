@@ -99,8 +99,9 @@ async def main() -> None:
             "insert into model_prices (provider, model, price_in_microrub_per_1k, "
             "price_out_microrub_per_1k) values ('timeweb-cloud-ai','smoke-model',234900,469800)")
         await c.execute(
-            "insert into credit_wallets (tenant_id, balance_microrub) values ($1, 100000000) "
-            "on conflict (tenant_id) do update set balance_microrub=100000000", t_mult)
+            "insert into credit_wallets (tenant_id, topup_microrub, balance_microrub) "
+            "values ($1, 100000000, 100000000) on conflict (tenant_id) do update "
+            "set topup_microrub=100000000, balance_microrub=100000000", t_mult)  # средства в бакет-аванс (T-1B-2)
 
     agent = {"id": AGENT, "model_id": 0, "used_tokens": 0}
 
@@ -111,18 +112,21 @@ async def main() -> None:
         check("снапшот = 1000", await last_snapshot(c, AGENT) == 1000)
         check("леджер пуст", await ledger_count(c, t_mult) == 0)
 
-    # B. дельта → списание. Себестоимость blended @0.5: (234900+469800)/2/1000 =
-    # 352.35 µRUB/ткн → cost(1000)=352350; charged = cost × markup 3.00 = 1057050.
-    print("B. дельта 1000 токенов → списание (cost×3):")
+    # B. дельта → списание. T-1A-2: LLM тарифицируется tokens×курс (НЕ cost×наценка).
+    # Себестоимость blended @0.5 = 352.35 µRUB/ткн → cost(1000)=352350 (пишется как есть);
+    # charged = 1000 ток × курс 1500 µRUB/1k = 1_500_000; снимок курса 1_500_000; маржа 76,5%.
+    print("B. дельта 1000 токенов → списание (tokens×курс):")
     await mw._process_agent_delta(AGENT, t_mult, 2000, "smoke-model")
     async with pool.acquire() as c:
         row = await c.fetchrow(
-            "select cost_microrub, charged_microrub from usage_ledger where tenant_id=$1", t_mult)
+            "select cost_microrub, charged_microrub, token_rate_microrub_per_1k "
+            "from usage_ledger where tenant_id=$1", t_mult)
         check("одна строка леджера", await ledger_count(c, t_mult) == 1)
         check("cost == 352350 (себестоимость)", row and row["cost_microrub"] == 352350,
               f"факт {row['cost_microrub'] if row else None}")
-        check("charged == 352350×3 == 1057050", row and row["charged_microrub"] == 1057050,
+        check("charged == 1000×1500 == 1_500_000 (tokens×курс)", row and row["charged_microrub"] == 1_500_000,
               f"факт {row['charged_microrub'] if row else None}")
+        check("снимок курса == 1_500_000", row and row["token_rate_microrub_per_1k"] == 1_500_000)
         check("снапшот = 2000", await last_snapshot(c, AGENT) == 2000)
 
     # C. glitch used=0 при prev>0 → НЕ baseline, НЕ списание (финдинг №1)
@@ -140,7 +144,7 @@ async def main() -> None:
         row = await c.fetchrow(
             "select charged_microrub from usage_ledger where tenant_id=$1 "
             "order by id desc limit 1", t_mult)
-        check("charged == ceil(500×352.35)×3 == 528525", row["charged_microrub"] == 528525,
+        check("charged == 500×1500 == 750_000 (tokens×курс)", row["charged_microrub"] == 750_000,
               f"факт {row['charged_microrub']}")
 
     # E. реальный сброс (ненулевое уменьшение) → новый baseline
@@ -162,7 +166,8 @@ async def main() -> None:
             "select $1, p.id, 'active', now(), now()+interval '30 days' "
             "from plans p where p.code='econom'", t_msg)  # per_message 7,5 ₽
         await c.execute(
-            "insert into credit_wallets (tenant_id, balance_microrub) values ($1, 100000000)", t_msg)
+            "insert into credit_wallets (tenant_id, topup_microrub, balance_microrub) "
+            "values ($1, 100000000, 100000000)", t_msg)  # средства в бакет-аванс (T-1B-2)
         # 3 ИСТОРИЧЕСКИХ сообщения Лии (created_at старше grace) — НЕ должны списаться
         for i in range(3):
             await c.execute(
@@ -187,6 +192,48 @@ async def main() -> None:
         check("одно списание", await ledger_count(c, t_msg) == 1)
         check("charged == 7_500_000 (цена econom)", row and row["charged_microrub"] == 7_500_000,
               f"факт {row['charged_microrub'] if row else None}")
+
+    # H. T-1B-4: хард-стоп по ОБОИМ бакетам (пул с учётом period_end + аванс)
+    print("H. T-1B-4 хард-стоп по бакетам:")
+    async with pool.acquire() as c:
+        t_blk = await c.fetchval(
+            "insert into tenants(slug,name,status) values('smoke-w-blk','Смоук блок','active') returning id")
+        PP = {"prepaid": True}
+
+        # H1: оба бакета 0 → блок + флаг
+        await c.execute(
+            "insert into credit_wallets(tenant_id, included_microrub, included_period_end, "
+            "topup_microrub, balance_microrub) values ($1, 0, null, 0, 0)", t_blk)
+        r1 = await mw._maybe_block_wallet(c, t_blk, PP)
+        blk1 = await c.fetchval(
+            "select value from tenant_settings where tenant_id=$1 and key='ai_wallet_blocked'", t_blk)
+        check("H1 оба≤0 → блок-алерт", r1 is not None and r1[0].startswith("blocked:"), repr(r1))
+        check("H1 флаг ai_wallet_blocked поставлен", blk1 is not None)
+
+        # H2: пул>0 (период в будущем), аванс 0 → НЕ блок (доступный пул > 0)
+        await c.execute("delete from tenant_settings where tenant_id=$1 and key='ai_wallet_blocked'", t_blk)
+        await c.execute(
+            "update credit_wallets set included_microrub=1000, "
+            "included_period_end=now()+interval '30 days', topup_microrub=0, balance_microrub=1000 "
+            "where tenant_id=$1", t_blk)
+        r2 = await mw._maybe_block_wallet(c, t_blk, PP)
+        blk2 = await c.fetchval(
+            "select value from tenant_settings where tenant_id=$1 and key='ai_wallet_blocked'", t_blk)
+        check("H2 пул>0 при аванс≤0 → НЕ блок (None)", r2 is None, repr(r2))
+        check("H2 флаг не поставлен", blk2 is None)
+
+        # H3: пул истёк (период в прошлом), аванс 0 → блок (истёкший пул игнорируется)
+        await c.execute(
+            "update credit_wallets set included_microrub=1000, "
+            "included_period_end=now()-interval '1 day', topup_microrub=0, balance_microrub=1000 "
+            "where tenant_id=$1", t_blk)
+        r3 = await mw._maybe_block_wallet(c, t_blk, PP)
+        check("H3 истёкший пул игнор → блок", r3 is not None and r3[0].startswith("blocked:"), repr(r3))
+
+        # H4: дефолт-тенант (Школа) → ops-алерт school-plan, НЕ блок (§8.7)
+        r4 = await mw._maybe_block_wallet(c, db.default_tenant_id(), PP)
+        check("H4 Школа → ops-алерт school-plan (не блок)",
+              r4 is not None and r4[0].startswith("school-plan:"), repr(r4))
 
     async with pool.acquire() as c:
         await c.execute("delete from model_prices where model='smoke-model'")

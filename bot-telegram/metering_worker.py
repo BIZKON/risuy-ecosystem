@@ -354,8 +354,10 @@ async def _maybe_block_wallet(conn, tenant, plan: dict) -> tuple[str, str] | Non
         return (f"school-plan:{tenant}",
                 "⚠️ У тенанта по умолчанию (Школа) появился платный план — метеринг "
                 "НЕ блокирует ИИ Школы (§8.7). Проверьте, что это намеренно (Wave 4).")
+    # T-1B-4: доступные средства = доступный пул (истёкший период игнорируется) + аванс.
     bal = await conn.fetchval(
-        "select balance_microrub from credit_wallets where tenant_id = $1", tenant)
+        "select (case when included_period_end > now() then included_microrub else 0 end) "
+        "       + topup_microrub from credit_wallets where tenant_id = $1", tenant)
     if bal is None or int(bal) > 0:
         return None
     await db.set_ai_wallet_blocked(tenant, True, conn=conn)

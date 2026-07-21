@@ -63,7 +63,7 @@
 - [x] RED (8 провалов на старом cost×3) → реализовать per-resource + курс из БД + снимок → GREEN (24/24; идемпотентность/FOR-UPDATE не регрессируют). ✅ на risuy_dev.
 - [x] Коммит (локально).
 
-## Под-этап 1B — Два бакета кошелька
+## Под-этап 1B — Два бакета кошелька — ✅ ЗАВЕРШЁН на risuy_dev (сессия 17; прод-DDL/деплой — за «да»)
 
 ### T-1B-1 · DDL: `credit_wallets` → 2 бакета + бэкфилл ⚠️ ПРОД-DDL
 **Files:** create `db/schema_metering_v2_buckets.sql`; modify `db/panel_role.sql`
@@ -90,8 +90,9 @@
 ### T-1B-4 · Хард-стоп по ОБОИМ бакетам (Школа исключена)
 **Files:** modify `bot-telegram/metering_worker.py`, `bot-telegram/ai.py`
 **Interfaces:** `_maybe_block_wallet(conn, tenant, plan:dict)->tuple|None` (metering_worker.py:344) и gateway-ветка (ai.py:351-359): условие `balance_microrub<=0` → `(included_available + topup_microrub) <= 0` (учёт истёкшего `period_end`). Сохранить исключение `tenant == db.default_tenant_id()` (§8.7) и prepaid-гейт.
-- [ ] `scripts/metering_worker_smoke.py`: оба≤0 → блок; пул>0 при аванс≤0 → НЕ блок; дефолт-тенант → ops-алерт, не блок.
-- [ ] RED → реализовать → GREEN. Коммит.
+- [x] `scripts/metering_worker_smoke.py` секция H: оба≤0→блок; пул>0 при аванс≤0→НЕ блок; истёкший пул→блок; Школа→ops-алерт не блок.
+- [x] RED (H3 истёкший пул) → реализовать (условие `(доступный_пул+аванс)<=0` в metering_worker.py + ai.py) → GREEN A–H. ✅ на risuy_dev. Коммит (локально).
+- [x] ⚠️ ПОБОЧНО поймано: B/D смоука кодировали старую LLM-цену cost×3 → обновлены на tokens×курс (T-1A-2 корректно распространился на cloud-ai путь; metering_worker_smoke не гонялся в T-1A-2).
 
 ## Под-этап 1C — Схлопнуть два счётчика + разрез
 
