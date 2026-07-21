@@ -84,8 +84,8 @@
 ### T-1B-3 · Начисление: топап→аванс; activate/renew→пул с `period_end` (сгорание)
 **Files:** modify `admin-panel/db.py`
 **Interfaces:** `mark_topup_succeeded(tenant_id, yookassa_payment_id:str, raw:dict)->bool` (db.py:4262): `balance_microrub +=` → `topup_microrub +=`. `activate_subscription_from_payment(…)->bool` (db.py:4439) и `renew_subscription(…)->bool` (db.py:4365): `included_credits_microrub` → `included_microrub` c `SET included_period_end=current_period_end`; на renew пул **ПЕРЕЗАПИСЫВАТЬ** (сгорание остатка), не прибавлять. Снятие `ai_wallet_blocked` (db.py:4296/4402/4492) по сумме бакетов. Потребляет T-1B-1.
-- [ ] `scripts/billing_tenant_smoke.py`: топап→`topup` (included не тронут); activate→`included`+`period_end`; renew при непустом пуле → пул=новый (сгорание, не сумма); блок снимается при пополнении.
-- [ ] RED → реализовать → GREEN. Коммит.
+- [x] `scripts/billing_tenant_smoke.py` секция 9: топап→topup (пул цел); activate→included+period_end (аванс цел); renew при непустом пуле→пул=новый (сгорание, не сумма); блок ИИ снят.
+- [x] RED (6 провалов) → реализовать mark_topup/activate/renew (пул перезаписывается, аванс цел, balance зеркало) → GREEN (секции 1–8 регресс целы). ✅ на risuy_dev. Коммит (локально).
 
 ### T-1B-4 · Хард-стоп по ОБОИМ бакетам (Школа исключена)
 **Files:** modify `bot-telegram/metering_worker.py`, `bot-telegram/ai.py`

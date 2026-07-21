@@ -51,9 +51,10 @@ def check(name: str, cond: bool, detail="") -> None:
 
 
 async def _cleanup(c):
-    await c.execute(
-        "delete from service_invoices where tenant_id in "
-        "(select id from tenants where slug like 'smoke-bill-%')")
+    sub = "(select id from tenants where slug like 'smoke-bill-%')"
+    for tbl in ("service_invoices", "usage_ledger", "credit_wallets",
+                "payments", "subscriptions", "tenant_settings"):
+        await c.execute(f"delete from {tbl} where tenant_id in {sub}")
     await c.execute("delete from app_settings where key like $1",
                     f"{db.config.SERVICE_CANCEL_SETTING_KEY}:%")
     await c.execute("delete from tenants where slug like 'smoke-bill-%'")
@@ -169,6 +170,62 @@ async def main() -> None:
         check("panel_rw может INSERT service_invoices.tenant_id", si_tid is True,
               "грант db/panel_role.sql не накатан на этот dev?" if not si_tid else "")
         check("panel_rw может INSERT orders.tenant_id (смежный фикс)", ord_tid is True)
+
+        # ── 9. T-1B-3: начисление в бакеты (топап→аванс; activate/renew→пул+period_end) ──
+        print("9. T-1B-3 начисление в бакеты кошелька:")
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            tc = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-c','C','active') returning id")
+            # исходно: пул 500 (period_end NULL), аванс 200, флаг блокировки ИИ
+            await c.execute(
+                "insert into credit_wallets(tenant_id, included_microrub, included_period_end, "
+                "topup_microrub, balance_microrub) values ($1, 500, null, 200, 700)", tc)
+            await c.execute(
+                "insert into tenant_settings(tenant_id,key,value) values ($1,'ai_wallet_blocked','1') "
+                "on conflict (tenant_id,key) do nothing", tc)
+            await c.execute(
+                "insert into payments(tenant_id, type, yookassa_payment_id, idempotence_key, "
+                "amount_microrub, status) "
+                "values ($1,'topup','pay-topup-C','topup:pay-topup-C',1000000,'pending')", tc)
+
+        # топап → аванс += 1_000_000, пул не тронут, флаг ИИ снят
+        ok_t = await db.mark_topup_succeeded(tc, "pay-topup-C", {"event": "smoke"})
+        async with db.pool.acquire() as c:
+            w = await c.fetchrow(
+                "select included_microrub, topup_microrub from credit_wallets where tenant_id=$1", tc)
+            blk = await c.fetchval(
+                "select count(*) from tenant_settings where tenant_id=$1 and key='ai_wallet_blocked'", tc)
+        check("топап вернул True", ok_t is True)
+        check("топап → аванс 200+1_000_000 = 1_000_200", w["topup_microrub"] == 1_000_200, str(w["topup_microrub"]))
+        check("топап: пул не тронут (500)", w["included_microrub"] == 500, str(w["included_microrub"]))
+        check("топап: блок ИИ снят", blk == 0)
+
+        # activate econom → пул = 3_750_000_000, period_end в будущем, аванс не тронут
+        ok_a = await db.activate_subscription_from_payment(tc, "econom", "pay-sub-C", 3_750_000_000, 30)
+        async with db.pool.acquire() as c:
+            w = await c.fetchrow(
+                "select included_microrub, topup_microrub, (included_period_end > now()) as pe_future "
+                "from credit_wallets where tenant_id=$1", tc)
+        check("activate вернул True", ok_a is True)
+        check("activate → пул = econom.included (3_750_000_000)",
+              w["included_microrub"] == 3_750_000_000, str(w["included_microrub"]))
+        check("activate → included_period_end в будущем", w["pe_future"] is True)
+        check("activate: аванс не тронут (1_000_200)", w["topup_microrub"] == 1_000_200)
+
+        # renew при НЕПУСТОМ пуле (сгорание): уменьшим пул → renew ПЕРЕЗАПИШЕТ, не суммирует
+        async with db.pool.acquire() as c:
+            await c.execute("update credit_wallets set included_microrub=1000000 where tenant_id=$1", tc)
+            sub_id = await c.fetchval(
+                "select id from subscriptions where tenant_id=$1 order by created_at desc limit 1", tc)
+        ok_r = await db.renew_subscription(tc, sub_id, "pay-renew-C", 3_750_000_000, 30)
+        async with db.pool.acquire() as c:
+            w = await c.fetchrow(
+                "select included_microrub, topup_microrub from credit_wallets where tenant_id=$1", tc)
+        check("renew вернул True", ok_r is True)
+        check("renew → пул ПЕРЕЗАПИСАН 3_750_000_000 (сгорание, не 1M+3.75B)",
+              w["included_microrub"] == 3_750_000_000, str(w["included_microrub"]))
+        check("renew: аванс не тронут (1_000_200)", w["topup_microrub"] == 1_000_200)
 
     finally:
         async with db.pool.acquire() as c:

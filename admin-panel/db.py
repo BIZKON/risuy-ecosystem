@@ -4281,10 +4281,11 @@ async def mark_topup_succeeded(tenant_id, yookassa_payment_id: str, raw: dict) -
             await c.execute("select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
             await c.execute(
                 """
-                insert into credit_wallets (tenant_id, balance_microrub, updated_at)
-                values ($1, $2, now())
+                insert into credit_wallets (tenant_id, topup_microrub, balance_microrub, updated_at)
+                values ($1, $2, $2, now())
                 on conflict (tenant_id) do update
-                set balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub,
+                set topup_microrub   = credit_wallets.topup_microrub + excluded.topup_microrub,
+                    balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub,
                     updated_at = now()
                 """,
                 tenant_id, int(row["amount_microrub"]),
@@ -4385,19 +4386,23 @@ async def renew_subscription(tenant_id, subscription_id, yk_payment_id: str,
                 "  current_period_start = now(), "
                 "  current_period_end = greatest(current_period_end, now()) "
                 "                       + make_interval(days => $2) "
-                "where id = $1 returning plan_id", subscription_id, period_days)
+                "where id = $1 returning plan_id, current_period_end", subscription_id, period_days)
             if sub is None:
                 return False
             inc = int(await c.fetchval(
                 "select included_credits_microrub from plans where id = $1", sub["plan_id"]) or 0)
-            if inc > 0:
-                await c.execute(
-                    "select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
-                await c.execute(
-                    "insert into credit_wallets (tenant_id, balance_microrub, updated_at) "
-                    "values ($1, $2, now()) on conflict (tenant_id) do update "
-                    "set balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub, "
-                    "    updated_at = now()", tenant_id, inc)
+            # T-1B-3: пул тарифа (included) ПЕРЕЗАПИСЫВАЕТСЯ (сгорание остатка прошлого периода —
+            # абонплата D1), НЕ прибавляется; period_end = конец нового периода. Аванс (topup) не тронут.
+            await c.execute(
+                "select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
+            await c.execute(
+                "insert into credit_wallets (tenant_id, included_microrub, included_period_end, "
+                "                            balance_microrub, updated_at) "
+                "values ($1, $2, $3, $2, now()) on conflict (tenant_id) do update "
+                "set included_microrub    = excluded.included_microrub, "
+                "    included_period_end  = excluded.included_period_end, "
+                "    balance_microrub     = excluded.included_microrub + credit_wallets.topup_microrub, "
+                "    updated_at = now()", tenant_id, inc, sub["current_period_end"])
             await c.execute(
                 "delete from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
                 tenant_id)
@@ -4479,15 +4484,21 @@ async def activate_subscription_from_payment(
             await c.execute("update tenants set plan_id = $2 where id = $1", tenant_id, plan["id"])
             inc = int(plan["included_credits_microrub"])
             if inc > 0:
+                # T-1B-3: пул тарифа (included) + period_end = конец нового периода (та же
+                # транзакционная now(), что current_period_end подписки). Активация ЗАДАЁТ пул
+                # (перезапись — сгорание прошлого). Аванс (topup) не тронут.
                 await c.execute(
                     "select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
                 await c.execute(
-                    "insert into credit_wallets (tenant_id, balance_microrub, updated_at) "
-                    "values ($1, $2, now()) "
+                    "insert into credit_wallets (tenant_id, included_microrub, included_period_end, "
+                    "                            balance_microrub, updated_at) "
+                    "values ($1, $2, now() + make_interval(days => $3), $2, now()) "
                     "on conflict (tenant_id) do update "
-                    "set balance_microrub = credit_wallets.balance_microrub + excluded.balance_microrub, "
+                    "set included_microrub    = excluded.included_microrub, "
+                    "    included_period_end  = excluded.included_period_end, "
+                    "    balance_microrub     = excluded.included_microrub + credit_wallets.topup_microrub, "
                     "    updated_at = now()",
-                    tenant_id, inc)
+                    tenant_id, inc, period_days)
             await c.execute(
                 "delete from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
                 tenant_id)
