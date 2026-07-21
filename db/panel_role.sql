@@ -243,6 +243,8 @@ grant select, insert, update, delete on agent_memory to panel_rw;
 --   usage_ledger       SELECT, INSERT — APPEND-ONLY: update/delete НЕ выдавать НИКОГДА
 --   model_prices       SELECT, INSERT — себестоимость: цены добавляются новой строкой, не правятся
 --   agent_token_snapshots SELECT, INSERT — снимает воркер бота; панель читает для сверки
+--   resource_pricing   SELECT, INSERT, UPDATE — наценки per-resource (1A токен-биллинг): правятся UPDATE
+--   billing_token_rate SELECT, INSERT — курс продажи токена: append-only (revoke update/delete), смена = новой строкой
 --   consent_events     SELECT, INSERT — APPEND-ONLY (152-ФЗ ст.9 реестр согласий): update/delete НЕ выдаём
 --   tenant_secrets     CRUD — write-only UI ключей (значение наружу не отдаётся)
 grant select, insert, update         on tenants               to panel_rw;
@@ -256,6 +258,9 @@ grant select, insert, update         on credit_wallets        to panel_rw;
 grant select, insert                 on usage_ledger          to panel_rw;
 grant select, insert                 on model_prices          to panel_rw;
 grant select, insert                 on agent_token_snapshots to panel_rw;
+grant select, insert, update         on resource_pricing      to panel_rw;  -- 1A: наценки per-resource (правятся UPDATE)
+grant select, insert                 on billing_token_rate    to panel_rw;  -- 1A: курс продажи токена — новой строкой (версионируется, не правится)
+revoke update, delete                on billing_token_rate    from panel_rw; -- append-only курс: смена цены = новая строка (иначе Timeweb default-priv вернёт update/delete)
 grant select, insert, update, delete on tenant_secrets        to panel_rw;
 grant select, insert, update, delete on tenant_agents         to panel_rw;  -- Wave 3: реестр агент→тенант
 grant select, insert, update, delete on tenant_triggers       to panel_rw;  -- Слой B: CRUD триггеров клиента
@@ -276,7 +281,7 @@ grant select, insert, update on club_intros   to panel_rw;  -- update: status/de
 -- Self-serve регистрация (за флагом PUBLIC_SIGNUP_ENABLED) пишет identity + создаёт tenant/
 -- membership (insert на них уже выдан выше). Резолв логина (email/ВК/ТГ→username) — select.
 grant select, insert, update on account_identities to panel_rw;
--- usage_ledger/model_prices/agent_token_snapshots/account_identities — identity-PK → грант на sequence не нужен.
+-- usage_ledger/model_prices/agent_token_snapshots/account_identities/billing_token_rate — identity-PK → грант на sequence не нужен.
 -- Остальные новые таблицы — uuid-PK (gen_random_uuid), секвенсов нет.
 
 -- ── Зеркало миграций, шедших мимо этого файла (ревизия: инвариант «полный реестр») ──

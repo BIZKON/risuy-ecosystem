@@ -40,24 +40,27 @@
 
 ## Под-этап 1A — Прайс-слой (курс отдельно + per-resource наценки)
 
-### T-1A-1 · DDL: таблица `resource_pricing` + грант ⚠️ ПРОД-DDL
-**Files:** create `db/schema_billing_v2_pricing.sql`; modify `db/panel_role.sql`
-**Interfaces (produces):** `resource_pricing(resource text pk, markup_multiplier numeric(6,3) not null, note text)`; seed `llm=1.000, dadata=3.000, voice=2.000, embedding=3.000`. Инвариант §7.1: курс × наценка = целевая (LLM 4,26; DaData ×3=66,7%; голос ×2=50%). Курс `TOKEN_RATE_MICRORUB_PER_1K=1_500_000` объявляется в T-1A-2 (см. Открытое решение №1).
-**Migration:** `create table if not exists resource_pricing (…); insert … on conflict do nothing; grant select,insert,update on resource_pricing to panel_rw;` (платформенный справочник, без RLS — как `model_prices`).
-- [ ] Написать `scripts/pricing_smoke.py` (гард `/risuy_dev`): падает, что таблицы нет.
-- [ ] Прогнать смоук → RED (нет таблицы).
-- [ ] Написать `db/schema_billing_v2_pricing.sql` + зеркалить грант в `db/panel_role.sql`.
-- [ ] ⚠️ Применить на `risuy_dev` (`twc-migrate.sh … risuy_dev …`), по «да» — на `risuy`.
-- [ ] Смоук: 4 seed-строки на месте, panel_rw делает select → GREEN.
-- [ ] Коммит.
+### T-1A-1 · DDL: `resource_pricing` (наценки) + `billing_token_rate` (курс, версионируемый) + снимок курса в `usage_ledger` ⚠️ ПРОД-DDL
+**Files:** create `db/schema_billing_v2_pricing.sql` ✅ написан; modify `db/panel_role.sql` ✅
+**Решение #1 (курс в БД):** курс продажи токена — ВЕРСИОНИРУЕМАЯ строка `billing_token_rate` (НЕ const), читается `where effective_from <= now() order by effective_from desc limit 1`; снимок курса пишется в `usage_ledger.token_rate_microrub_per_1k` на LLM-списании (аудит смены цены оферты).
+**Interfaces (produces):**
+- `resource_pricing(resource text pk, markup_multiplier numeric(6,3) not null, note text)`; seed `llm=1.000, dadata=3.000, voice=2.000, embedding=3.000`.
+- `billing_token_rate(id identity pk, effective_from timestamptz default now(), rate_microrub_per_1k bigint not null, note, unique(effective_from))`; seed `1_500_000` (0,0015 ₽/ток).
+- `usage_ledger.token_rate_microrub_per_1k bigint` (nullable; заполняется только для `kind='llm'`).
+Инвариант §7.1: курс × наценка = целевая (LLM 4,26 — вшит в курс, множитель=1; DaData ×3=66,7%; голос ×2=50%).
+**Migration (expand):** идемпотентно `create table if not exists …` + seed (`on conflict do nothing` / `where not exists`) + `alter table usage_ledger add column if not exists token_rate_microrub_per_1k bigint` + гранты panel_rw (resource_pricing: select,insert,update; billing_token_rate: select,insert). Платформенные справочники — без RLS (как `model_prices`).
+- [x] Написать `scripts/pricing_smoke.py` (гард `/risuy_dev`).
+- [x] Прогнать смоук на `risuy_dev` → RED (5 провалов — таблиц/колонки/грантов нет). ✅
+- [x] Написать `db/schema_billing_v2_pricing.sql` + зеркалить гранты в `db/panel_role.sql`.
+- [x] Применить на `risuy_dev` (`twc-migrate.sh`). ✅ ⚠️ прод `risuy` — за ОТДЕЛЬНЫМ «да» (expand-first, ещё НЕ применено).
+- [x] Смоук GREEN на `risuy_dev`. ✅ Тест поймал Timeweb default-priv (panel_rw авто-получил update/delete) → добавлен `revoke update,delete on billing_token_rate` (как consent_events).
+- [x] Коммит (локально, после GREEN на dev). ⚠️ Побочно: `usage_ledger` тоже имеет update/delete у panel_rw (append-only не защищён revoke) — отдельная задача.
 
-### T-1A-2 · `charge_usage`: per-resource расчёт `charged`
+### T-1A-2 · `charge_usage`: per-resource расчёт `charged` + курс из БД
 **Files:** modify `shared/metering.py`
-**Interfaces:** тело `charge_usage(conn, tenant_id, cost_microrub:int, meta:dict, idempotence_key:str, *, allow_negative=False)->asyncpg.Record` (сигнатура СОХРАНЯЕТСЯ). Вместо `ceil_mul(cost, plan['markup_multiplier'])` (строки 135-138): `resource = meta.get('resource') or meta['kind']`; `kind=='llm'` → `charged = ceil(units['tokens_total'] × TOKEN_RATE_MICRORUB_PER_1K / 1000)`; иначе `ceil_mul(cost_microrub, resource_pricing[resource])`. Ветку `per_message` ПОКА оставить (снимется в T-1C-1). `multiplier` в леджер = наценка ресурса (llm=1.00). Потребляет `resource_pricing` (T-1A-1).
-- [ ] Расширить `scripts/metering_smoke.py`: кейс LLM 5000 ток → `charged==7_500_000` (7,5₽); DaData 7_500_000×3 → `22_500_000`; маржа `charged/cost` ≥ полов (LLM 76,5% / DaData 66,7%).
-- [ ] Прогнать → RED.
-- [ ] Реализовать per-resource логику + `TOKEN_RATE_MICRORUB_PER_1K` + загрузку наценок.
-- [ ] Смоук зелёный; кейсы идемпотентности/FOR-UPDATE-гонки (2/3) не регрессируют → GREEN.
+**Interfaces:** сигнатура `charge_usage(conn, tenant_id, cost_microrub:int, meta:dict, idempotence_key:str, *, allow_negative=False)->asyncpg.Record` СОХРАНЯЕТСЯ. В транзакции (metering.py:116) загрузить: наценки `resource_pricing` + текущий курс `select rate_microrub_per_1k from billing_token_rate where effective_from <= now() order by effective_from desc limit 1`. Вместо `ceil_mul(cost, plan['markup_multiplier'])` (строки 135-138): `resource = meta.get('resource') or meta.get('kind')`; `kind=='llm'` → `charged = ceil(units['tokens_total'] × rate / 1000)`, снимок `token_rate_microrub_per_1k=rate`, `multiplier=resource_pricing['llm']` (1.00); иначе → `ceil_mul(cost_microrub, resource_pricing[resource])`, `token_rate=NULL`. INSERT usage_ledger добавляет колонку `token_rate_microrub_per_1k`. Ветку `per_message` ПОКА оставить (снимется в T-1C-1). Потребляет T-1A-1. ⚠️ реализовывать после применения DDL на risuy_dev (иначе metering_smoke не прогнать RED→GREEN — нужен dev-DSN).
+- [ ] Расширить `scripts/metering_smoke.py`: LLM 5000 ток при курсе 1_500_000 → `charged==7_500_000` (7,5₽) + снимок курса записан; DaData 7_500_000×3 → `22_500_000`; маржа `charged/cost` ≥ полов (LLM 76,5% / DaData 66,7%).
+- [ ] RED → реализовать per-resource + загрузку курса/наценок → GREEN (идемпотентность/FOR-UPDATE 2/3 не регрессируют).
 - [ ] Коммит.
 
 ## Под-этап 1B — Два бакета кошелька
