@@ -19,18 +19,9 @@
         "ca:{agent_id}:{prev_taken_at}" — повтор после краха безопасен;
       • дельта > 0, но цены модели нет в model_prices → снапшот НЕ пишется
         (дельта копится до вписывания цены из ЛК), алерт рейт-лимитирован;
-      • план per_message → снапшот пишется как СВЕРКА, без списания;
     агент аккаунта БЕЗ строки в реестре пропускается (никому не списывается);
- 3) ⚠️ ЗАМОРОЖЕНО (T-1C-1, депрекейт per_message): шаг ОТВЯЗАН от _tick,
-    _scan_per_message больше не вызывается (планы econom/start мигрированы на
-    cost_multiplier). Ниже — историческое поведение до полного удаления в cutover
-    T-1C-3. per_message-планы: списание за каждое исходящее сообщение Лии
-    (messages: source='liya', direction='out'), idempotence_key = "msg:{id}".
-    Первый скан тенанта = baseline (hwm = max(id) истории Лии БЕЗ списания —
-    иначе вся история затарифицировалась бы задним числом, финдинг №2);
-    cost=0 в v1 (DECISIONS п.17). Скан + продвижение hwm — ОДНА транзакция
-    (атомарность: краш не оставит списания без hwm → нет ложного рескана).
-    Граница created_at < now()−grace отсекает гонку bigserial-коммитов.
+ 3) per_message-модель УДАЛЕНА в T-1C-3 (cutover-разрез, shadow-diff=0 подтверждён):
+    _tick больше не сканирует сообщения Лии — единица биллинга только токен-пул.
 
 Все списания — ПОСТФАКТУМ (токены у Timeweb уже потрачены) → allow_negative=True.
 prepaid-тенант с балансом ≤ 0 получает флаг ai_wallet_blocked (Лия — мягкая пауза,
@@ -60,8 +51,6 @@ logger = logging.getLogger(__name__)
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30)
 _MODELS_TTL = 3600.0          # кэш каталога моделей (id → public_name), сек
 _ALERT_INTERVAL = 3600.0      # рейт-лимит повторных алертов (нет цены / минус), сек
-_MSG_SCAN_BATCH = 500         # сообщений per_message-скана за тик на тенанта
-_MSG_GRACE_SECONDS = 60       # не тарифицируем сообщения моложе grace (гонка bigserial-коммитов)
 _ADVISORY_NS = 719            # namespace advisory-локов метеринга (произвольный, см. _process_agent_delta)
 
 _models_cache: dict[int, str] = {}
@@ -95,11 +84,8 @@ async def run(bot: Bot, interval: int | None = None) -> None:
 
 
 async def _tick(bot: Bot) -> None:
+    # per_message-скан удалён в T-1C-3 (cutover): _tick = только снапшот-дельты агентов.
     await _snapshot_agents(bot)
-    # T-1C-1: per_message-скан ОТВЯЗАН от тика (депрекейт). Планы econom/start
-    # мигрированы на cost_multiplier, live per_message-тенантов нет. _scan_per_message
-    # и _scan_tenant_messages ниже ЗАМОРОЖЕНЫ (не вызываются) — полное удаление после
-    # cutover-разреза T-1C-3 (когда shadow-diff=0 подтверждён).
 
 
 # ── Шаги 1–2: снапшоты used_tokens и дельта-списания ─────────────────────────
@@ -203,15 +189,6 @@ async def _process_agent_delta(
                 return None
 
             plan = await get_tenant_plan(conn, tenant)
-            if plan["billing_mode"] == "per_message":
-                # Сверка себестоимости per_message-тенанта: снапшот пишем, не списываем.
-                await conn.execute(
-                    "insert into agent_token_snapshots (agent_id, tenant_id, used_tokens) "
-                    "values ($1, $2, $3)",
-                    agent_id, tenant, used_now,
-                )
-                return None
-
             price = await conn.fetchrow(
                 "select price_in_microrub_per_1k as pin, price_out_microrub_per_1k as pout "
                 "from model_prices where provider = 'timeweb-cloud-ai' and model = $1 "
@@ -256,95 +233,6 @@ async def _process_agent_delta(
                 micro_to_rub_str(int(row["charged_microrub"])),
                 micro_to_rub_str(int(row["balance_after_microrub"])),
             )
-            return await _maybe_block_wallet(conn, tenant, plan)
-
-
-# ── Шаг 3: per_message-планы — списание за исходящие сообщения Лии ────────────
-# ⚠️ ЗАМОРОЖЕНО (T-1C-1, депрекейт per_message): НЕ вызывается из _tick. Оставлено до
-# cutover T-1C-3; на cost_multiplier-плане _scan_tenant_messages выходит no-op (гейт ниже).
-async def _scan_per_message(bot: Bot) -> None:
-    async with db.pool.acquire() as c:
-        tenants = await c.fetch(
-            """
-            select distinct s.tenant_id
-            from subscriptions s join plans p on p.id = s.plan_id
-            where p.billing_mode = 'per_message'
-              and s.status in ('trialing', 'active', 'past_due')
-            """
-        )
-    for t in tenants:
-        try:
-            alert = await _scan_tenant_messages(t["tenant_id"])
-            if alert and _alert_due(alert[0]):
-                await _ops_alert(bot, alert[1])
-        except Exception:  # noqa: BLE001 — один тенант не валит остальных
-            logger.exception("Метеринг: сбой per_message-скана тенанта %s", t["tenant_id"])
-
-
-async def _scan_tenant_messages(tenant) -> tuple[str, str] | None:
-    """Списывает per_message-тенанту за новые исходящие сообщения Лии. Скан +
-    продвижение hwm — ОДНА транзакция (атомарность против ложного рескана, финдинг №3).
-    Возвращает (key, text) для ops-алерта либо None."""
-    async with db.pool.acquire() as conn:
-        async with conn.transaction():
-            plan = await get_tenant_plan(conn, tenant)
-            # Финдинг minor: тенант мог попасть в выборку по старой per_message-подписке,
-            # но НОВЕЙШИЙ его план — уже cost_multiplier. Не тарифицируем за сообщения и
-            # НЕ трогаем hwm (иначе сообщения «съелись» бы по 0 ₽ навсегда).
-            if plan["billing_mode"] != "per_message":
-                return None
-
-            hwm_raw = await conn.fetchval(
-                "select value from tenant_settings "
-                "where tenant_id = $1 and key = 'metering_msg_hwm'",
-                tenant,
-            )
-            if hwm_raw is None:
-                # Финдинг №2: первый скан = baseline. Отсекаем ВСЮ существующую
-                # историю Лии (её токены либо уже учтены снапшотами на прошлом
-                # плане, либо относятся к до-подписочному периоду) — без списания.
-                baseline = int(await conn.fetchval(
-                    "select coalesce(max(id), 0) from messages "
-                    "where tenant_id = $1 and source = 'liya' and direction = 'out'",
-                    tenant,
-                ) or 0)
-                await conn.execute(
-                    "insert into tenant_settings (tenant_id, key, value) "
-                    "values ($1, 'metering_msg_hwm', $2) "
-                    "on conflict (tenant_id, key) do update set value = $2, updated_at = now()",
-                    tenant, str(baseline),
-                )
-                logger.info("Метеринг: per_message baseline тенанта %s = msg.id %s (без списания)",
-                            tenant, baseline)
-                return None
-
-            hwm = int(hwm_raw)
-            msgs = await conn.fetch(
-                "select id from messages "
-                "where tenant_id = $1 and source = 'liya' and direction = 'out' "
-                "  and id > $2 and created_at < now() - make_interval(secs => $3) "
-                "order by id limit $4",
-                tenant, hwm, _MSG_GRACE_SECONDS, _MSG_SCAN_BATCH,
-            )
-            if not msgs:
-                return None
-            for m in msgs:
-                await charge_usage(
-                    conn, tenant, 0,
-                    {
-                        "kind": "message", "provider": None, "model": None,
-                        "units": {"messages": 1}, "request_id": f"message:{m['id']}",
-                    },
-                    f"msg:{m['id']}",
-                    allow_negative=True,
-                )
-            await conn.execute(
-                "insert into tenant_settings (tenant_id, key, value) "
-                "values ($1, 'metering_msg_hwm', $2) "
-                "on conflict (tenant_id, key) do update set value = $2, updated_at = now()",
-                tenant, str(msgs[-1]["id"]),
-            )
-            logger.info("Метеринг: тенант %s — списано %s сообщений Лии", tenant, len(msgs))
             return await _maybe_block_wallet(conn, tenant, plan)
 
 

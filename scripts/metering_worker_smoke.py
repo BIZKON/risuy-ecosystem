@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Смоук логики снапшот-воркера (Wave 3) на DEV-базе — проверка фиксов ревью №1/№2/№4.
 
-Гоняет РЕАЛЬНЫЕ транзакции _process_agent_delta / _scan_tenant_messages против
-risuy_dev (никаких моков леджера/снапшотов):
+Гоняет РЕАЛЬНЫЕ транзакции _process_agent_delta против risuy_dev (никаких моков
+леджера/снапшотов):
   A. baseline агента:    первый снапшот, БЕЗ списания;
   B. дельта→списание:    used растёт → одна строка леджера, charged по смешанной цене;
   C. glitch used=0:      при prev>0 НЕ сбрасывает baseline и НЕ списывает (финдинг №1);
   D. recovery:           следующая дельта считается от СОХРАНЁННОГО baseline (не от 0);
   E. реальный сброс:     ненулевое уменьшение → новый baseline, без списания;
-  F. per_message заморожен (T-1C-1): econom→cost_multiplier → _scan_tenant_messages = no-op
-     (не списывает, hwm не трогает); _tick отвязан от _scan_per_message.
+  F. per_message-машинерия УДАЛЕНА (T-1C-3 cutover): _scan_per_message/_scan_tenant_messages
+     отсутствуют; _tick сводится к _snapshot_agents.
 
 Тестовые сущности smoke-* создаются и УДАЛЯЮТСЯ в конце. На прод не запускать.
 
@@ -152,60 +152,23 @@ async def main() -> None:
         check("снапшот = 100 (новый baseline)", await last_snapshot(c, AGENT) == 100)
         check("леджер не вырос (2 строки)", await ledger_count(c, t_mult) == 2)
 
-    # F. per_message ЗАМОРОЖЕН (T-1C-1): econom→cost_multiplier → _scan_tenant_messages = no-op.
-    print("F. per_message заморожен (econom→cost_multiplier, скан не списывает):")
-    async with pool.acquire() as c:
-        t_msg = await c.fetchval(
-            "insert into tenants (slug, name, status) values "
-            "('smoke-w-msg', 'Смоук сообщения', 'active') returning id")
-        await c.execute(
-            "insert into subscriptions (tenant_id, plan_id, status, "
-            "current_period_start, current_period_end) "
-            "select $1, p.id, 'active', now(), now()+interval '30 days' "
-            "from plans p where p.code='econom'", t_msg)  # econom — после 1C cost_multiplier
-        await c.execute(
-            "insert into credit_wallets (tenant_id, topup_microrub, balance_microrub) "
-            "values ($1, 100000000, 100000000)", t_msg)  # средства в бакет-аванс (T-1B-2)
-        for i in range(3):
-            await c.execute(
-                "insert into messages (tg_user_id, direction, kind, source, tenant_id, created_at) "
-                "values ($1, 'out', 'text', 'liya', $2, now()-interval '10 min')", 5000+i, t_msg)
-    # Два скана: в старом per_message-мире второй списал бы новое сообщение (по 7,5₽).
-    await mw._scan_tenant_messages(t_msg)
-    async with pool.acquire() as c:
-        await c.execute(
-            "insert into messages (tg_user_id, direction, kind, source, tenant_id, created_at) "
-            "values ($1, 'out', 'text', 'liya', $2, now()-interval '5 min')", 6000, t_msg)
-    await mw._scan_tenant_messages(t_msg)
-    async with pool.acquire() as c:
-        n_msg_keys = await c.fetchval(
-            "select count(*) from usage_ledger "
-            "where tenant_id=$1 and idempotence_key like 'msg:%'", t_msg)
-        hwm = await c.fetchval(
-            "select value from tenant_settings where tenant_id=$1 and key='metering_msg_hwm'", t_msg)
-        n_led = await ledger_count(c, t_msg)
-        check("per_message скан не списывает (леджер пуст)", n_led == 0, f"факт {n_led}")
-        check("нет idempotence_key 'msg:%'", n_msg_keys == 0, f"факт {n_msg_keys}")
-        check("hwm не выставлен (скан вышел на cost_multiplier-плане)", hwm is None, f"факт {hwm}")
+    # F. per_message-машинерия УДАЛЕНА (T-1C-3 cutover): регресс-гард, что функций больше
+    # нет, а _tick сводится к снапшоту агентов (скан сообщений Лии удалён полностью).
+    print("F. per_message-машинерия удалена (T-1C-3):")
+    check("нет _scan_per_message", not hasattr(mw, "_scan_per_message"))
+    check("нет _scan_tenant_messages", not hasattr(mw, "_scan_tenant_messages"))
+    snap_called: list[bool] = []
+    orig_snap = mw._snapshot_agents
 
-    print("F2. _tick отвязан от _scan_per_message (заморозка T-1C-1):")
-    # Поведенческая проверка: подменяем _snapshot_agents (no-op) и _scan_per_message (шпион),
-    # прогоняем _tick и убеждаемся, что шпион НЕ вызван (надёжнее разбора исходника).
-    scan_called: list[bool] = []
-    orig_snap, orig_scan = mw._snapshot_agents, mw._scan_per_message
+    async def _spy_snap(_bot):
+        snap_called.append(True)
 
-    async def _noop_snap(_bot):
-        return None
-
-    async def _spy_scan(_bot):
-        scan_called.append(True)
-
-    mw._snapshot_agents, mw._scan_per_message = _noop_snap, _spy_scan
+    mw._snapshot_agents = _spy_snap
     try:
         await mw._tick(None)
     finally:
-        mw._snapshot_agents, mw._scan_per_message = orig_snap, orig_scan
-    check("_tick НЕ вызывает _scan_per_message", not scan_called, f"вызван={len(scan_called)}")
+        mw._snapshot_agents = orig_snap
+    check("_tick зовёт только _snapshot_agents", snap_called == [True], f"вызовов={len(snap_called)}")
 
     # H. T-1B-4: хард-стоп по ОБОИМ бакетам (пул с учётом period_end + аванс)
     print("H. T-1B-4 хард-стоп по бакетам:")
