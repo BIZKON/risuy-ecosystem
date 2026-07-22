@@ -40,6 +40,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import StreamingResponse
 
 import auth
+import inn_checksum
 import brief_apply
 import club_match
 import config
@@ -76,6 +77,23 @@ class CSRFError(Exception):
 # --------------------------------------------------------------------------- #
 # Lifespan: поднимаем/гасим asyncpg pool (как бот в init/close).
 # --------------------------------------------------------------------------- #
+async def _pending_purge_loop():
+    """T-1F-3b: периодическая очистка брошенных корзин pending_service_purchase (152-ФЗ
+    минимизация ПДн email/ИНН; ревью MED). Раз в 6 ч удаляет незавершённые старше TTL."""
+    import logging
+    log = logging.getLogger("admin-panel")
+    while True:
+        try:
+            n = await db.purge_pending_service_purchase(config.PENDING_PURCHASE_TTL_HOURS)
+            if n:
+                log.info("purge_pending_service_purchase: удалено %s брошенных корзин", n)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("pending purge loop error")
+        await asyncio.sleep(6 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await db.init()
@@ -83,10 +101,12 @@ async def lifespan(_: FastAPI):
     # при OFF — таска сразу завершается). Один процесс uvicorn → без дублей.
     import renewal
     renewal_task = asyncio.create_task(renewal.run())
+    purge_task = asyncio.create_task(_pending_purge_loop())   # T-1F-3b purge брошенных корзин
     try:
         yield
     finally:
         renewal_task.cancel()
+        purge_task.cancel()
         await db.close()
 
 
@@ -3766,6 +3786,8 @@ async def service_subscribe(
     agree_oferta: str = Form(""),
     agree_pdn: str = Form(""),
     persona: str = Form(""),
+    inn: str = Form(""),
+    agree_entrepreneur: str = Form(""),
 ):
     """Публичная форма оплаты с info.pro-agent-ai.ru/pay.html (БЕЗ сессии/CSRF — внешний
     источник, как вебхук). Сумму берём С СЕРВЕРА (из тарифа), НЕ из формы — защита от подмены.
@@ -3784,24 +3806,45 @@ async def service_subscribe(
         return _back("bad_email")
     if agree_oferta not in _CHECKBOX_ON or agree_pdn not in _CHECKBOX_ON:
         return _back("no_consent")
+    # T-1F-3b B2B-гейт (решение #5, чистый B2B): чек-бокс «предпринимательская деятельность» +
+    # ИНН/ОГРНИП с КОНТРОЛЬНОЙ СУММОЙ. Правовое основание B2B — чек-бокс, НЕ длина ИНН (ревью M-20).
+    if agree_entrepreneur not in _CHECKBOX_ON:
+        return _back("no_entrepreneur")
+    inn = (inn or "").strip()
+    cls = inn_checksum.classify(inn)
+    if cls is None:
+        return _back("bad_inn")
+    kind, subject_type = cls
     if not config.YOOKASSA_ENABLED:
         return _back("no_yookassa")
 
     amount = _plan_amount(plan_obj)
     description = f"Подписка «ИИ-Агент Про» — {plan_obj['name']}"
-    # Метка «ИИ-сотрудника» с витрины (опциональна): только из белого списка персон —
-    # уходит в metadata платежа, чтобы видеть, какой образ реально продаёт.
+    # Метка «ИИ-сотрудника» с витрины (опциональна): только из белого списка персон.
     persona = persona.strip() if persona.strip() in config.PERSONA_PRESETS else ""
-    metadata = {"kind": "service_landing", "plan": plan}
-    if persona:
-        metadata["persona"] = persona
     import logging
     lg = logging.getLogger("admin-panel")
+    # Серверная pre-tenant покупка: ПДн (email/ИНН) — ЗДЕСЬ, НЕ в metadata ЮKassa (152-ФЗ).
+    # Дедуп двойного сабмита → детерминированный idempotence_key (ревью H-2). Коммит ДО платежа
+    # (ревью M-14: вебхук должен найти pending). metadata несёт только не-ПДн purchase_ref.
+    try:
+        purchase_ref, idem_key = await db.reuse_or_create_pending(
+            email=email, buyer_inn=inn,
+            buyer_ogrnip=(inn if kind in ("ogrn13", "ogrnip15") else None),
+            buyer_subject_type=subject_type, is_entrepreneur=True, plan_code=plan,
+            offer_version=config.SERVICE_OFFER_VERSION, offer_text_hash=config.SERVICE_OFFER_TEXT_HASH,
+            agree_pdn=(agree_pdn in _CHECKBOX_ON))
+    except Exception:  # noqa: BLE001
+        lg.exception("service_subscribe: reuse_or_create_pending failed")
+        return _back("yk_failed")
+    metadata = {"kind": "service_landing", "plan": plan, "purchase_ref": purchase_ref}
+    if persona:
+        metadata["persona"] = persona
     try:
         payment = await yookassa.create_payment(
             amount=amount, currency=config.SERVICE_CURRENCY,
             description=description, return_url=f"{site}/pay-success.html",
-            idempotence_key=uuid.uuid4().hex,
+            idempotence_key=idem_key,
             metadata=metadata,
             receipt=_service_receipt(email, description, amount),
         )
@@ -3945,6 +3988,32 @@ async def yookassa_webhook(request: Request):
                         await db.renew_subscription(
                             meta["tenant_id"], sub_id, payment_id,
                             amount_micro, config.SERVICE_PLAN_PERIOD_DAYS)
+            elif meta.get("kind") == "service_landing" and meta.get("purchase_ref"):
+                # T-1F-3b: анонимная покупка с лендинга → провижининг тенанта/подписки по email
+                # (create_client_account + подписка ПОЛНЫМ пулом + согласие в consent_events + claim).
+                if payment.get("status") == "succeeded" and payment.get("paid"):
+                    amount_micro = money.rub_to_micro(
+                        (payment.get("amount") or {}).get("value") or "0")
+                    rnd_hash = await auth.hash_password(secrets.token_urlsafe(32))
+                    res = await db.provision_service_landing(
+                        meta["purchase_ref"], payment_id, amount_micro,
+                        config.SERVICE_PLAN_PERIOD_DAYS, random_password_hash=rnd_hash)
+                    if res is None:
+                        processed_ok = False       # pending не найден → ТРАНЗИЕНТ (ЮKassa переретраит)
+                    elif res.get("needs_claim") and res.get("username"):
+                        # claim-письмо «задайте пароль» — ТОЛЬКО неактивированному аккаунту (password_set=false).
+                        raw = secrets.token_urlsafe(32)
+                        await db.create_reset_token(
+                            res["username"], _reset_token_hash(raw),
+                            ttl_min=config.ACCOUNT_CLAIM_TTL_MIN, request_ip=None)
+                        base = (config.PANEL_PUBLIC_BASE_URL or "").rstrip("/")
+                        claim_url = f"{base}/reset-password?token={raw}"
+                        try:
+                            await mailer.send_account_claim(
+                                res["email"], claim_url, ttl_min=config.ACCOUNT_CLAIM_TTL_MIN)
+                        except Exception:  # noqa: BLE001
+                            import logging
+                            logging.getLogger("admin-panel").exception("send_account_claim failed")
             elif (payment.get("status") == "succeeded" and payment.get("paid")
                   and meta.get("tenant_id")):
                 # Legacy-фолбэк счёта подписки БЕЗ нового kind, но С tenant_id в metadata

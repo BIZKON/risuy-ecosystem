@@ -384,6 +384,11 @@ RESET_TOKEN_TTL_MIN = _opt_int("RESET_TOKEN_TTL_MIN", 30)
 RESET_WINDOW_MIN = _opt_int("RESET_WINDOW_MIN", 15)
 RESET_MAX_PER_WINDOW = _opt_int("RESET_MAX_PER_WINDOW", 3)
 RESET_MAX_PER_IP = _opt_int("RESET_MAX_PER_IP", 10)
+# T-1F-3b лендинг-провижининг + B2B
+SERVICE_OFFER_VERSION = os.environ.get("SERVICE_OFFER_VERSION", "2026-07-22")  # редакция оферты (снимок согласия)
+SERVICE_OFFER_TEXT_HASH = os.environ.get("SERVICE_OFFER_TEXT_HASH", "") or None  # sha256 текста оферты (опц.)
+ACCOUNT_CLAIM_TTL_MIN = _opt_int("ACCOUNT_CLAIM_TTL_MIN", 10080)  # TTL claim-ссылки, мин (7 дней)
+PENDING_PURCHASE_TTL_HOURS = _opt_int("PENDING_PURCHASE_TTL_HOURS", 72)  # purge брошенных корзин
 RESET_TIMING_FLOOR_MS = _opt_int("RESET_TIMING_FLOOR_MS", 500)
 # По умолчанию НЕ логировать рабочую ссылку/email при ненастроенном SMTP (dry-run) —
 # иначе пустой SMTP на проде = утечка рабочего токена сброса в логи. Включать только на локали.

@@ -74,6 +74,11 @@
         </div>
 
         <div class="group">
+          <label class="lbl" for="inn">ИНН или ОГРНИП</label>
+          <input type="text" id="inn" name="inn" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="ИНН 10 или 12 цифр" autocomplete="off" required>
+        </div>
+
+        <div class="group">
           <label class="agree">
             <input type="checkbox" id="agreeOferta" name="agree_oferta" required>
             <span>Я принимаю условия <a href="oferta.html" target="_blank">Публичной оферты</a> и заключаю договор оказания услуг.</span>
@@ -81,6 +86,10 @@
           <label class="agree">
             <input type="checkbox" id="agreePdn" name="agree_pdn" required>
             <span>Я даю согласие на обработку моих персональных данных (адреса электронной почты) в целях исполнения договора, направления кассового чека и связи со мной — на условиях <a href="privacy.html" target="_blank">Политики конфиденциальности</a>.</span>
+          </label>
+          <label class="agree">
+            <input type="checkbox" id="agreeEntrepreneur" name="agree_entrepreneur" required>
+            <span>Подтверждаю, что действую в рамках предпринимательской деятельности (ИП или юридическое лицо) и оплачиваю услугу в связи с ней.</span>
           </label>
         </div>
 
@@ -122,7 +131,9 @@
     var texts = {
       bad_plan: 'Выберите тариф.',
       bad_email: 'Укажите корректный email.',
+      bad_inn: 'Проверьте ИНН или ОГРНИП — введены неверные цифры.',
       no_consent: 'Чтобы продолжить, отметьте оба согласия.',
+      no_entrepreneur: 'Подтвердите, что действуете в рамках предпринимательской деятельности.',
       no_yookassa: 'Оплата временно недоступна. Попробуйте позже или напишите нам.',
       yk_failed: 'Не удалось сформировать платёж. Попробуйте ещё раз через минуту.'
     };
@@ -142,6 +153,10 @@
     var amount = sel ? sel.getAttribute('data-amount') : '';
     if (amount) msg.textContent = 'Формируем платёж на сумму ' + amount + ' и перенаправляем на защищённую форму оплаты ЮKassa.';
     overlay.classList.add('on');
+    // Submit-lock: блокируем кнопку от повторного клика (дополняет серверный детерминированный
+    // idempotence_key — вместе исключают двойное списание). POST уже ушёл, навигацию не отменяет.
+    var btn = form.querySelector('.btn-pay');
+    if (btn) btn.disabled = true;
   });
 })();
 </script>

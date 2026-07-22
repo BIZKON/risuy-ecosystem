@@ -2709,11 +2709,14 @@ async def set_admin_user_active_with_audit(
 async def set_admin_user_password_with_audit(
     username: str, password_hash: str, *, actor: str, ip: str | None, user_agent: str | None,
 ) -> bool:
-    """Сбросить пароль оператора (UPDATE хеша + аудит). False — нет такого юзера. Plain НЕ логируем."""
+    """Сбросить пароль оператора (UPDATE хеша + аудит). False — нет такого юзера. Plain НЕ логируем.
+    T-1F-3b: помечает password_set=true (аккаунт «заявлен» — гейт claim-письма лендинга: пока false,
+    вебхук шлёт claim-ссылку; после первого сброса/установки — не шлём)."""
     async with pool.acquire() as c:
         async with c.transaction():
             res = await c.execute(
-                "update admin_users set password_hash = $2, updated_at = now() where username = $1",
+                "update admin_users set password_hash = $2, password_set = true, updated_at = now() "
+                "where username = $1",
                 username, password_hash,
             )
             if res.endswith(" 0"):
@@ -4746,6 +4749,153 @@ async def activate_subscription_from_payment(
         logging.getLogger(__name__).warning(
             "seed_default_funnel: сбой сида воронки tid=%s", tenant_id, exc_info=True)
     return True
+
+
+# ── T-1F-3b: анонимный лендинг-провижининг (POST /service/subscribe → вебхук service_landing) ──
+
+async def reuse_or_create_pending(
+    *, email: str, buyer_inn: str, buyer_ogrnip: str | None, buyer_subject_type: str,
+    is_entrepreneur: bool, plan_code: str, offer_version: str | None,
+    offer_text_hash: str | None, agree_pdn: bool,
+) -> tuple[str, str]:
+    """Серверная pre-tenant покупка (ПДн — email/ИНН — вне metadata ЮKassa, 152-ФЗ).
+    Дедуп двойного сабмита (ревью H-2): переиспользует ЖИВОЙ 'pending' того же (lower(email), plan)
+    → возвращает ЕГО idempotence_key, так что yookassa.create_payment с тем же ключом вернёт ТОТ ЖЕ
+    платёж (один заряд, не два). Гонко-безопасно: partial unique index
+    pending_service_purchase_one_open_idx → одновременный INSERT второго упрётся в конфликт, ловим
+    UniqueViolation и переиспользуем строку-победителя. Возвращает (purchase_ref=id, idempotence_key).
+    Строку КОММИТИТ — вызывать ДО create_payment (ревью M-14: вебхук должен найти pending)."""
+    e = (email or "").strip().lower()
+
+    async def _find(c):
+        return await c.fetchrow(
+            "select id, idempotence_key from pending_service_purchase "
+            "where lower(email) = $1 and plan_code = $2 and status = 'pending' limit 1", e, plan_code)
+
+    async with pool.acquire() as c:
+        existing = await _find(c)
+        if existing is not None:
+            return str(existing["id"]), existing["idempotence_key"]
+        new_id = await c.fetchval("select gen_random_uuid()")
+        idem = "svc:" + str(new_id).replace("-", "")   # детерминированный ключ ЮKassa (≤64)
+        try:
+            await c.execute(
+                "insert into pending_service_purchase (id, email, buyer_inn, buyer_ogrnip, "
+                "  buyer_subject_type, is_entrepreneur, plan_code, offer_version, offer_text_hash, "
+                "  agree_pdn, consent_at, idempotence_key) "
+                "values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11)",
+                new_id, e, buyer_inn, buyer_ogrnip, buyer_subject_type, bool(is_entrepreneur),
+                plan_code, offer_version, offer_text_hash, bool(agree_pdn), idem)
+        except asyncpg.UniqueViolationError:          # гонка первых сабмитов → строка уже есть
+            row = await _find(c)
+            if row is not None:
+                return str(row["id"]), row["idempotence_key"]
+            raise
+        return str(new_id), idem
+
+
+async def provision_service_landing(
+    purchase_ref: str, yk_payment_id: str, amount_microrub: int, period_days: int,
+    *, random_password_hash: str,
+) -> dict | None:
+    """Провижининг из succeeded-вебхука лендинга. ПОШАГОВО идемпотентно (каждый примитив — по
+    своему ключу; НЕ одна транзакция и НЕ удерживаем пуловое соединение через под-вызовы — ревью
+    HIGH-1: иначе дедлок пула). Гонка аккаунта по email ловится UniqueViolation (account_identities
+    UNIQUE); идемпотентность согласия — атомарным переходом pending→claimed (consent пишется ТОЛЬКО
+    когда ЭТА транзакция первой перевела pending в claimed). Возвращает:
+      • None — pending нет / план отсутствует в БД → ТРАНЗИЕНТ (не помечать processed; ревью M-14/M-6);
+      • {'claimed': True, ...} — повтор (pending уже claimed) → идемпотентный no-op;
+      • {'is_new', 'needs_claim', 'username', 'tenant_id', 'email'} — провижининг выполнен.
+    Лендинг ВСЕГДА полный пул + свежий период (overwrite/fresh снимок — ревью CRIT-1: полная цена =
+    полный пул, реюз НЕ прорачивается). Реюз тенанта suspended/canceled → реактивация."""
+    async with pool.acquire() as c:
+        pend = await c.fetchrow("select * from pending_service_purchase where id = $1", purchase_ref)
+    if pend is None:
+        return None
+    email = (pend["email"] or "").strip().lower()
+    if pend["status"] == "claimed":
+        return {"claimed": True, "is_new": False, "needs_claim": False, "username": None,
+                "email": email, "tenant_id": str(pend["tenant_id"]) if pend["tenant_id"] else None}
+    plan_code = pend["plan_code"]
+    # ── 1. план из БД ДО любых мутаций (ревью MED-orphan: не плодить аккаунт без подписки) ──
+    async with pool.acquire() as c:
+        plan = await c.fetchrow("select included_credits_microrub inc from plans where code = $1", plan_code)
+    if plan is None:
+        return None                                    # план оплачен по config, но не в БД → транзиент+алерт
+    # ── 2. resolve/create аккаунт (идемпотентно: find_identity + UniqueViolation-гонка) ──
+    ident = await find_identity("email", email)
+    is_new = ident is None
+    if is_new:
+        try:
+            username, tenant_id = await create_client_account(
+                provider="email", external_id=email, name=email,
+                password_hash=random_password_hash, verified=False)
+        except asyncpg.UniqueViolationError:           # гонка: параллельный вебхук создал → реюз
+            ident = await find_identity("email", email)
+            is_new = False
+    if not is_new:
+        if ident is None:
+            return None                                # гонка не по локу — транзиент (не падать)
+        username = ident["username"]
+        async with pool.acquire() as c:
+            tid = await c.fetchval(
+                "select tenant_id from memberships where username = $1 and role = 'owner' "
+                "order by created_at limit 1", username)
+            if tid is None:
+                return None                            # identity без владения → транзиент
+            tenant_id = str(tid)
+            # реактивация suspended/canceled при успешной оплате (решение владельца)
+            await c.execute(
+                "update tenants set status = 'active' "
+                "where id = $1::uuid and status in ('suspended','canceled')", tenant_id)
+    # ── 3. подписка + пул: лендинг = полный пул + свежий период (overwrite/fresh; идемпотентно по yk_id) ──
+    snap = {"pc_dir": "primary", "pc_pool_mode": "overwrite",
+            "pc_pool_amt": str(int(plan["inc"])), "pc_period": "fresh", "pc_old": "", "pc_ps": ""}
+    await activate_subscription_from_payment(
+        tenant_id, plan_code, yk_payment_id, amount_microrub, period_days,
+        receipt_email=email, plan_change_snapshot=snap)
+    # ── 4. identity (RLS) + согласие (append-only) + claimed — ОДНА транзакция; consent пишется
+    #    ТОЛЬКО если ЭТА транзакция первой перевела pending→claimed (идемпотентность consent) ──
+    async with pool.acquire() as c:
+        needs_claim = await c.fetchval(
+            "select not coalesce(password_set, false) from admin_users where username = $1", username)
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            claimed = await c.fetchval(
+                "update pending_service_purchase set status = 'claimed', tenant_id = $2, "
+                "  yookassa_payment_id = coalesce(yookassa_payment_id, $3), claimed_at = now() "
+                "where id = $1 and status = 'pending' returning 1", purchase_ref, tenant_id, yk_payment_id)
+            if claimed is not None:                    # мы первыми — пишем identity+согласие ровно раз
+                await c.execute(
+                    "insert into tenant_billing_identity (tenant_id, buyer_inn, buyer_ogrnip, buyer_subject_type) "
+                    "values ($1,$2,$3,$4) on conflict (tenant_id) do update "
+                    "set buyer_inn = excluded.buyer_inn, buyer_ogrnip = excluded.buyer_ogrnip, "
+                    "    buyer_subject_type = excluded.buyer_subject_type, updated_at = now()",
+                    tenant_id, pend["buyer_inn"], pend["buyer_ogrnip"], pend["buyer_subject_type"])
+                await c.execute(
+                    "insert into consent_events (tenant_id, doc_type, doc_version, text_hash, action, channel, occurred_at) "
+                    "values ($1, 'offer', 1, $2, 'granted', 'web', $3)",
+                    tenant_id, pend["offer_text_hash"], pend["consent_at"])
+                if pend["agree_pdn"]:
+                    await c.execute(
+                        "insert into consent_events (tenant_id, doc_type, doc_version, action, channel, occurred_at) "
+                        "values ($1, 'privacy', 1, 'granted', 'web', $2)",
+                        tenant_id, pend["consent_at"])
+    return {"is_new": is_new, "needs_claim": bool(needs_claim), "username": username,
+            "tenant_id": str(tenant_id), "email": email}
+
+
+async def purge_pending_service_purchase(older_than_hours: int) -> int:
+    """Очистка брошенных корзин (152-ФЗ минимизация ПДн; ревью M-11). Удаляет НЕзавершённые
+    (pending/failed/expired) старше older_than_hours; claimed (завершённые) сохраняются для
+    сверки платёж↔тенант. Возвращает число удалённых."""
+    async with pool.acquire() as c:
+        n = await c.fetchval(
+            "with d as (delete from pending_service_purchase "
+            "  where status in ('pending','failed','expired') "
+            "    and created_at < now() - make_interval(hours => $1::int) returning 1) "
+            "select count(*) from d", older_than_hours)
+    return int(n or 0)
 
 
 async def list_platform_payments(tenant_id, *, limit: int = 30) -> list[asyncpg.Record]:
