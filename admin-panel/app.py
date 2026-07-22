@@ -3683,6 +3683,19 @@ async def subscription_select(
         amount = Decimal(money.micro_to_amount_str(pc["amount_microrub"]))
     else:
         amount = plan_amount.quantize(Decimal("0.01"))
+    # T-1F-3a: не-ПДн снимок proration-решения (select-time) в metadata платежа → вебхук
+    # применит ТОТ ЖЕ пул (по уплаченной цене), а не пересчитает на f_webhook. Закрывает
+    # Important #1 (цена↔пул на границе f→0). Значения — короткие строки (лимиты ЮKassa).
+    plan_change_meta: dict[str, str] = {}
+    if pc is not None:
+        plan_change_meta = {
+            "pc_dir": str(pc.get("direction") or ""),
+            "pc_pool_mode": str(pc.get("pool_mode") or ""),
+            "pc_pool_amt": str(int(pc.get("pool_amount_microrub") or 0)),
+            "pc_period": str(pc.get("period_mode") or ""),
+            "pc_old": str(pc.get("old_plan_code") or ""),
+            "pc_ps": pc["old_period_start"].isoformat() if pc.get("old_period_start") else "",
+        }
 
     invoice_id = await db.create_period_invoice(
         tenant_id=session.active_tenant_id,
@@ -3707,7 +3720,7 @@ async def subscription_select(
             metadata={"invoice_id": invoice_id, "plan": plan_key,
                       "kind": "platform_subscription",
                       "tenant_id": str(session.active_tenant_id) if session.active_tenant_id else "",
-                      "email": email},
+                      "email": email, **plan_change_meta},
             receipt=_service_receipt(email, description, amount),
             # D3 (спека токен-биллинга v2, «без автосписаний»): способ оплаты НЕ сохраняем
             # (save_payment_method опущен → дефолт False). Без сохранённой карты
@@ -3910,10 +3923,16 @@ async def yookassa_webhook(request: Request):
                     # Wave 2b: сохранённый способ оплаты + email для авточеков рекуррента.
                     pm = payment.get("payment_method") or {}
                     pm_id = pm.get("id") if pm.get("saved") else None
+                    # T-1F-3a: снимок proration-решения (select-time) из metadata → activate
+                    # применит уплаченный пул, а не пересчитает на f_webhook (Important #1).
+                    snap_meta = {k: meta[k] for k in
+                                 ("pc_dir", "pc_pool_mode", "pc_pool_amt", "pc_period", "pc_old", "pc_ps")
+                                 if k in meta}
                     await db.activate_subscription_from_payment(
                         meta["tenant_id"], meta.get("plan") or "", payment_id,
                         amount_micro, config.SERVICE_PLAN_PERIOD_DAYS,
-                        payment_method_id=pm_id, receipt_email=meta.get("email") or None)
+                        payment_method_id=pm_id, receipt_email=meta.get("email") or None,
+                        plan_change_snapshot=snap_meta or None)
             elif meta.get("kind") == "platform_subscription_renewal" and meta.get("tenant_id"):
                 # Wave 2b: безакцептное автосписание (cron) → ПРОДЛЕВАЕТ существующую
                 # подписку (renew_subscription: UPDATE период + included_credits,

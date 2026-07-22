@@ -4538,33 +4538,69 @@ async def compute_plan_change(tenant_id, new_plan_code: str) -> dict | None:
     if live is None:
         return {"direction": "primary", "amount_microrub": new_price, "pool_mode": "overwrite",
                 "pool_amount_microrub": new_inc, "period_mode": "fresh", "old_plan_code": None,
-                **common}
+                "old_period_start": None, **common}
     f = _period_fraction(live["current_period_start"], live["current_period_end"], now)
     m = _plan_change_math(
         old_plan_code=live["plan_code"], old_price=live["price_microrub"],
         old_included=live["included_credits_microrub"], new_plan_code=new_plan_code,
         new_price=new_price, new_included=new_inc, f=f)
-    return {**m, **common, "f": f, "old_plan_code": live["plan_code"]}
+    # old_period_start — ЯКОРЬ периода для снимка T-1F-3a: webhook применит add-снимок
+    # (доплата апгрейда) verbatim только если под FOR UPDATE период тот же (не сдвинут
+    # renewal-кроном/параллельной активацией) И ещё не истёк; иначе — реконсиляция.
+    return {**m, **common, "f": f, "old_plan_code": live["plan_code"],
+            "old_period_start": live["current_period_start"]}
+
+
+def _parse_plan_change_snapshot(raw: dict | None) -> dict | None:
+    """T-1F-3a: разбор не-ПДн снимка proration-решения из metadata платежа (select-time).
+    Ключи (строки, из ЮKassa metadata): pc_pool_mode(add|overwrite), pc_pool_amt(µRUB),
+    pc_dir, pc_period(keep|extend|fresh), pc_old(old_plan_code|''), pc_ps(period_start ISO|'').
+    Возвращает нормализованный dict {dir,pool_mode,pool_amt,period,old,ps(datetime|None)} или
+    None (снимка нет / битый — вебхук уходит на legacy-пересчёт). Деньги — целые µRUB (без float)."""
+    if not raw:
+        return None
+    pool_mode = raw.get("pc_pool_mode")
+    if pool_mode not in ("add", "overwrite"):
+        return None
+    try:
+        pool_amt = int(raw["pc_pool_amt"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    ps = None
+    ps_raw = raw.get("pc_ps") or ""
+    if ps_raw:
+        try:
+            ps = datetime.fromisoformat(ps_raw)
+        except ValueError:
+            ps = None
+    return {"dir": raw.get("pc_dir") or "", "pool_mode": pool_mode, "pool_amt": pool_amt,
+            "period": raw.get("pc_period") or "fresh", "old": raw.get("pc_old") or None, "ps": ps}
 
 
 async def activate_subscription_from_payment(
     tenant_id, plan_code: str, yk_payment_id: str, amount_microrub: int, period_days: int,
     *, payment_method_id: str | None = None, receipt_email: str | None = None,
+    plan_change_snapshot: dict | None = None,
 ) -> bool:
-    """Wave 4 / T-1F-2: оплата тарифа → активация подписки + начисление пула тарифа.
+    """Wave 4 / T-1F-2 / T-1F-3a: оплата тарифа → активация подписки + начисление пула тарифа.
 
     Одной транзакцией, идемпотентно по yookassa_payment_id (payments-журнал). Держит
     ИНВАРИАНТ «ровно одна живая подписка на тенанта»: находит ЕДИНСТВЕННУЮ живую
-    (FOR UPDATE), схлопывает лишние живые (легаси-баг §9 слепого INSERT) в canceled,
-    затем ОДНА из трёх веток (proration §3, решения владельца Q1/Q2):
-      • A. Первичная (живой нет): INSERT active, период now..now+period, пул = Inc_new.
-      • B. Продление того же плана (extend): UPDATE живой, период += , пул = Inc_new (сгорание).
-      • C. Смена тарифа: UPDATE живой; АПГРЕЙД — период сохраняется, пул += ceil(ΔInc·f);
-           ДАУНГРЕЙД (и истёкший период) — рестарт периода, пул = Inc_new (сгорание).
+    (FOR UPDATE), схлопывает лишние живые (легаси-баг §9 слепого INSERT) в canceled.
+
+    `plan_change_snapshot` (T-1F-3a, закрывает Important #1) — не-ПДн снимок proration-решения,
+    посчитанного НА SELECT-TIME (compute_plan_change) и уплаченного клиентом; протаскивается
+    через metadata платежа. Когерентность цена↔пул:
+      • overwrite-снимок (первичная/продление/даунгрейд — полная цена): пул = Inc_new verbatim.
+      • add-снимок (апгрейд — оплачена ДЕЛЬТА ceil(ΔInc·f_select)): применяем keep ТОЛЬКО если под
+        FOR UPDATE период тот же (якорь pc_ps) и НЕ истёк; иначе (дрейф/истёк) — строго оплаченная
+        дельта + свежий период + флаг needs_reconciliation (НИКОГДА не over-grant полным Inc_new).
+    Без снимка (renewal/legacy) — прежний пересчёт _plan_change_math по webhook-time.
+
     Также: tenants.status provisioning→active (гаснет баннер); credit_wallets FOR UPDATE
     (гонка с metering); снятие ai_wallet_blocked. Возвращает True — активирована; False —
     план не найден/договорной (custom) или платёж уже обработан (повтор вебхука). amount —
-    только в payments для аудита; пул считается из plans+период, НЕ из amount."""
+    только в payments для аудита; пул считается из снимка/plans, НЕ из amount."""
     async with pool.acquire() as c:
         async with c.transaction():
             await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
@@ -4597,50 +4633,70 @@ async def activate_subscription_from_payment(
                     "update subscriptions set status = 'canceled' "
                     "where tenant_id = $1 and status in ('trialing','active','past_due') and id <> $2",
                     tenant_id, live["id"])
-            # ── ветвление A/B/C ──
-            if live is None:                       # A. Первичная активация
+            # ── T-1F-3a: решение о пуле/периоде. Снимок select-time (когерентность цена↔пул,
+            #    закрывает Important #1) ЛИБО legacy-пересчёт (renewal/платежи без снимка). ──
+            snap = _parse_plan_change_snapshot(plan_change_snapshot)
+            inc_new = int(plan["included_credits_microrub"])
+            needs_recon = False
+            if snap is not None and snap["pool_mode"] == "overwrite":
+                # Полная цена = полный пул: применяем verbatim (дрейф не важен — платил полную цену).
+                change_type, pool_mode = snap["dir"] or "primary", "overwrite"
+                pool_amount, period_mode, f = snap["pool_amt"], snap["period"], Decimal(1)
+            elif snap is not None:                 # add: апгрейд, оплачена ДЕЛЬТА ceil(ΔInc·f_select)
+                change_type, pool_mode, pool_amount = "upgrade", "add", snap["pool_amt"]
+                exact = (live is not None and live["plan_code"] == snap["old"]
+                         and snap["ps"] is not None and live["current_period_start"] == snap["ps"]
+                         and live["current_period_end"] > now)
+                if exact:                          # период тот же и НЕ истёк → сохранить (keep)
+                    period_mode = "keep"
+                    f = _period_fraction(live["current_period_start"], live["current_period_end"], now)
+                else:                              # дрейф/истёк → строго оплаченная дельта + fresh период
+                    period_mode, needs_recon, f = "fresh", True, Decimal(0)  # никогда не over-grant
+            elif live is None:                     # legacy без снимка: первичная активация
                 change_type, pool_mode = "primary", "overwrite"
-                pool_amount, f = int(plan["included_credits_microrub"]), Decimal(1)
-                sub = await c.fetchrow(
-                    "insert into subscriptions (tenant_id, plan_id, status, current_period_start, "
-                    "  current_period_end, yookassa_payment_method_id, receipt_email) "
-                    "values ($1, $2, 'active', now(), now() + make_interval(days => $3), $4, $5) "
-                    "returning current_period_end",
-                    tenant_id, plan["id"], period_days, payment_method_id, receipt_email)
-            else:                                  # B/C. Продление / смена тарифа (proration)
+                pool_amount, period_mode, f = inc_new, "fresh", Decimal(1)
+            else:                                  # legacy без снимка: пересчёт (renewal/старое)
                 f = _period_fraction(live["current_period_start"], live["current_period_end"], now)
                 m = _plan_change_math(
                     old_plan_code=live["plan_code"], old_price=live["price_microrub"],
                     old_included=live["included_credits_microrub"], new_plan_code=plan_code,
                     new_price=plan["price_microrub"], new_included=plan["included_credits_microrub"], f=f)
                 change_type, pool_mode = m["direction"], m["pool_mode"]
-                pool_amount = m["pool_amount_microrub"]
-                if m["period_mode"] == "keep":     # C-апгрейд: период НЕ трогаем
-                    sub = await c.fetchrow(
-                        "update subscriptions set plan_id = $2, status = 'active', charge_attempts = 0, "
-                        "  yookassa_payment_method_id = coalesce($3, yookassa_payment_method_id), "
-                        "  receipt_email = coalesce($4, receipt_email) "
-                        "where id = $1 returning current_period_end",
-                        live["id"], plan["id"], payment_method_id, receipt_email)
-                elif m["period_mode"] == "extend":  # B: тот же план, период += period_days
-                    sub = await c.fetchrow(
-                        "update subscriptions set status = 'active', charge_attempts = 0, "
-                        "  current_period_start = now(), "
-                        "  current_period_end = greatest(current_period_end, now()) "
-                        "                       + make_interval(days => $2), "
-                        "  yookassa_payment_method_id = coalesce($3, yookassa_payment_method_id), "
-                        "  receipt_email = coalesce($4, receipt_email) "
-                        "where id = $1 returning current_period_end",
-                        live["id"], period_days, payment_method_id, receipt_email)
-                else:                               # fresh: C-даунгрейд / истёкший период — рестарт
-                    sub = await c.fetchrow(
-                        "update subscriptions set plan_id = $2, status = 'active', charge_attempts = 0, "
-                        "  current_period_start = now(), "
-                        "  current_period_end = now() + make_interval(days => $3), "
-                        "  yookassa_payment_method_id = coalesce($4, yookassa_payment_method_id), "
-                        "  receipt_email = coalesce($5, receipt_email) "
-                        "where id = $1 returning current_period_end",
-                        live["id"], plan["id"], period_days, payment_method_id, receipt_email)
+                pool_amount, period_mode = m["pool_amount_microrub"], m["period_mode"]
+            # ── применение периода: (есть ли живая) × period_mode ──
+            if live is None:                       # нет живой → INSERT свежей (keep/extend → fresh)
+                sub = await c.fetchrow(
+                    "insert into subscriptions (tenant_id, plan_id, status, current_period_start, "
+                    "  current_period_end, yookassa_payment_method_id, receipt_email) "
+                    "values ($1, $2, 'active', now(), now() + make_interval(days => $3), $4, $5) "
+                    "returning current_period_end",
+                    tenant_id, plan["id"], period_days, payment_method_id, receipt_email)
+            elif period_mode == "keep":            # апгрейд: период НЕ трогаем
+                sub = await c.fetchrow(
+                    "update subscriptions set plan_id = $2, status = 'active', charge_attempts = 0, "
+                    "  yookassa_payment_method_id = coalesce($3, yookassa_payment_method_id), "
+                    "  receipt_email = coalesce($4, receipt_email) "
+                    "where id = $1 returning current_period_end",
+                    live["id"], plan["id"], payment_method_id, receipt_email)
+            elif period_mode == "extend":          # тот же план: период += period_days
+                sub = await c.fetchrow(
+                    "update subscriptions set status = 'active', charge_attempts = 0, "
+                    "  current_period_start = now(), "
+                    "  current_period_end = greatest(current_period_end, now()) "
+                    "                       + make_interval(days => $2), "
+                    "  yookassa_payment_method_id = coalesce($3, yookassa_payment_method_id), "
+                    "  receipt_email = coalesce($4, receipt_email) "
+                    "where id = $1 returning current_period_end",
+                    live["id"], period_days, payment_method_id, receipt_email)
+            else:                                  # fresh: рестарт периода (даунгрейд/дрейф/истёк)
+                sub = await c.fetchrow(
+                    "update subscriptions set plan_id = $2, status = 'active', charge_attempts = 0, "
+                    "  current_period_start = now(), "
+                    "  current_period_end = now() + make_interval(days => $3), "
+                    "  yookassa_payment_method_id = coalesce($4, yookassa_payment_method_id), "
+                    "  receipt_email = coalesce($5, receipt_email) "
+                    "where id = $1 returning current_period_end",
+                    live["id"], plan["id"], period_days, payment_method_id, receipt_email)
             period_end = sub["current_period_end"]
             # tenants.status: provisioning → active (баннер провижининга гаснет);
             # suspended/canceled НЕ трогаем (решение Q3).
@@ -4678,7 +4734,10 @@ async def activate_subscription_from_payment(
                 c, actor="yookassa-webhook", action="subscription_activated",
                 detail={"tenant_id": str(tenant_id), "plan": plan_code, "payment_id": yk_payment_id,
                         "change_type": change_type, "pool_mode": pool_mode,
-                        "pool_microrub": int(pool_amount), "f": str(f)})
+                        "pool_microrub": int(pool_amount), "f": str(f),
+                        # T-1F-3a: снимок разошёлся с живой подпиской (дрейф/истёк период) → начислена
+                        # СТРОГО оплаченная дельта + свежий период; T-1F-4 сверит платёж на реконсиляцию.
+                        "needs_reconciliation": needs_recon})
     # Активация прошла → засев дефолт-шаблона воронки выдачи лид-магнита новому тенанту.
     # ВНЕ транзакции активации и best-effort: сбой сида НЕ должен откатывать оплату/кредиты.
     try:
