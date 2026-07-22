@@ -332,6 +332,202 @@ async def main() -> None:
         check("usage_ledger не тронут платёжным путём подписки (биллинг с T-1C — токен-пул, "
               "а не сообщения; смена тарифа его не пишет)", ul_count == 0, str(ul_count))
 
+        # ── 11. T-1F-2: proration + инвариант «ровно одна живая подписка» ──
+        print("11. T-1F-2 — proration + одна живая подписка:")
+        ECON_INC = 3_750_000_000   # econom.included_credits_microrub == price_microrub
+        START_INC = 7_500_000_000  # start.included_credits_microrub == price_microrub
+
+        async def _live_count(tid) -> int:
+            async with db.pool.acquire() as cc:
+                return await cc.fetchval(
+                    "select count(*) from subscriptions where tenant_id=$1 "
+                    "and status in ('trialing','active','past_due')", tid)
+
+        # 11.1 две activate(econom) → одна живая, пул не 2× (extend перезаписывает)
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            tf = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-f','F','active') returning id")
+        await db.activate_subscription_from_payment(tf, "econom", "pay-f1", ECON_INC, 30)
+        await db.activate_subscription_from_payment(tf, "econom", "pay-f2", ECON_INC, 30)
+        async with db.pool.acquire() as c:
+            wf = await c.fetchval("select included_microrub from credit_wallets where tenant_id=$1", tf)
+            pf = await c.fetchval("select count(*) from payments where tenant_id=$1", tf)
+        due = await db.list_due_renewals(
+            tf, retry_hours=db.config.SERVICE_RENEWAL_RETRY_HOURS,
+            max_attempts=db.config.SERVICE_RENEWAL_MAX_ATTEMPTS)
+        check("11.1 две activate(econom) → одна живая", (await _live_count(tf)) == 1, str(await _live_count(tf)))
+        check("11.1 пул = econom.included (не 2×)", wf == ECON_INC, str(wf))
+        check("11.1 list_due_renewals ≤ 1 (нет двойной абонплаты)", len(due) <= 1, str(len(due)))
+
+        # 11.2 повтор того же yk_id → False, payments не растёт, пул цел (идемпотентность)
+        rep = await db.activate_subscription_from_payment(tf, "econom", "pay-f2", ECON_INC, 30)
+        async with db.pool.acquire() as c:
+            pf2 = await c.fetchval("select count(*) from payments where tenant_id=$1", tf)
+            wf2 = await c.fetchval("select included_microrub from credit_wallets where tenant_id=$1", tf)
+        check("11.2 повтор yk_id → False", rep is False, repr(rep))
+        check("11.2 payments не вырос", pf2 == pf, f"{pf2} vs {pf}")
+        check("11.2 пул цел", wf2 == ECON_INC, str(wf2))
+
+        # setup tu: живая econom, период now-15d..now+15d (f≈0.5), пул 2.0B, аванс 0.5B
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            tu = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-up','U','active') returning id")
+            econ_id = await c.fetchval("select id from plans where code='econom'")
+            await c.execute(
+                "insert into subscriptions(tenant_id,plan_id,status,current_period_start,current_period_end) "
+                "values ($1,$2,'active', now()-interval '15 days', now()+interval '15 days')", tu, econ_id)
+            await c.execute(
+                "insert into credit_wallets(tenant_id,included_microrub,included_period_end,topup_microrub,"
+                "balance_microrub) values ($1,2000000000, now()+interval '15 days',500000000,2500000000)", tu)
+
+        # 11.3a ЦЕНА апгрейда: compute_plan_change → доплата разницы (upcharge), НЕ полная цена
+        pc_up = await db.compute_plan_change(tu, "start")
+        up_amt = pc_up["amount_microrub"] if pc_up else None
+        check("11.3a compute апгрейд: direction=upgrade",
+              pc_up is not None and pc_up["direction"] == "upgrade", repr(pc_up["direction"] if pc_up else None))
+        check("11.3a f ≈ 0.5", pc_up is not None and Decimal("0.49") < pc_up["f"] < Decimal("0.51"),
+              str(pc_up["f"]) if pc_up else "нет")
+        # допуск ~5M µRUB (<5 ₽): f зависит от wall-clock now() (дрейф между select/webhook-time);
+        # это ЧИСТО апгрейд-пропорция ≈1.875B — надёжно отличима от полной цены 7.5B.
+        check("11.3a upcharge = ceil((7.5B−3.75B)·f) ≈ 1.875B (НЕ полная 7.5B)",
+              up_amt is not None and 1_870_000_000 <= up_amt <= 1_875_000_000, str(up_amt))
+
+        # 11.3b ПУЛ апгрейда: activate(start) → пул += разница, период сохранён, план start
+        ok_up = await db.activate_subscription_from_payment(tu, "start", "pay-up1", up_amt or START_INC, 30)
+        async with db.pool.acquire() as c:
+            wu = await c.fetchrow(
+                "select included_microrub, topup_microrub from credit_wallets where tenant_id=$1", tu)
+            su = await c.fetchrow(
+                "select p.code, (s.current_period_end > now()+interval '20 days') as end_far "
+                "from subscriptions s join plans p on p.id=s.plan_id "
+                "where s.tenant_id=$1 and s.status in ('trialing','active','past_due')", tu)
+        check("11.3b activate апгрейд → True", ok_up is True)
+        # ≈3.875B = 2.0B (старый пул) + ceil(3.75B·f≈0.5); нижняя граница 3.87B заведомо выше
+        # overwrite-вариантов (7.5B start / 3.75B econom) и no-op 2.0B → доказывает именно ADD.
+        check("11.3b пул = 2.0B + разница ≈ 3.875B (ADD, не overwrite 7.5B/3.75B, не no-op 2.0B)",
+              3_870_000_000 <= wu["included_microrub"] <= 3_875_000_000, str(wu["included_microrub"]))
+        check("11.3b период СОХРАНЁН (не рестарт на +30d)", su["end_far"] is False, "end_far")
+        check("11.3b план стал start", su["code"] == "start", su["code"])
+        check("11.3b аванс не тронут (0.5B)", wu["topup_microrub"] == 500_000_000, str(wu["topup_microrub"]))
+        check("11.3b одна живая", (await _live_count(tu)) == 1)
+
+        # setup td: живая start, период now-10d..now+20d, пул 6.0B, аванс 0.3B
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            td = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-down','D','active') returning id")
+            start_id = await c.fetchval("select id from plans where code='start'")
+            await c.execute(
+                "insert into subscriptions(tenant_id,plan_id,status,current_period_start,current_period_end) "
+                "values ($1,$2,'active', now()-interval '10 days', now()+interval '20 days')", td, start_id)
+            await c.execute(
+                "insert into credit_wallets(tenant_id,included_microrub,included_period_end,topup_microrub,"
+                "balance_microrub) values ($1,6000000000, now()+interval '20 days',300000000,6300000000)", td)
+
+        # 11.4a ЦЕНА даунгрейда: compute → полная цена меньшего (НЕ пропорция)
+        pc_dn = await db.compute_plan_change(td, "econom")
+        check("11.4a compute даунгрейд: direction=downgrade",
+              pc_dn is not None and pc_dn["direction"] == "downgrade", repr(pc_dn["direction"] if pc_dn else None))
+        check("11.4a сумма = полная цена econom (3.75B), не пропорция",
+              pc_dn is not None and pc_dn["amount_microrub"] == 3_750_000_000,
+              str(pc_dn["amount_microrub"] if pc_dn else None))
+
+        # 11.4b ПУЛ даунгрейда: activate(econom) → пул сгорает = Inc_econom, рестарт периода
+        ok_dn = await db.activate_subscription_from_payment(td, "econom", "pay-dn1", ECON_INC, 30)
+        async with db.pool.acquire() as c:
+            wd = await c.fetchrow(
+                "select included_microrub, topup_microrub from credit_wallets where tenant_id=$1", td)
+            sd = await c.fetchrow(
+                "select p.code, (s.current_period_end > now()+interval '25 days') as end_restart "
+                "from subscriptions s join plans p on p.id=s.plan_id "
+                "where s.tenant_id=$1 and s.status in ('trialing','active','past_due')", td)
+        check("11.4b activate даунгрейд → True", ok_dn is True)
+        check("11.4b пул = Inc_econom 3.75B (сгорание overwrite, не 6.0B, не 9.75B)",
+              wd["included_microrub"] == 3_750_000_000, str(wd["included_microrub"]))
+        check("11.4b период РЕСТАРТ на ≈now+30d", sd["end_restart"] is True, "end_restart")
+        check("11.4b план стал econom", sd["code"] == "econom", sd["code"])
+        check("11.4b аванс не тронут (0.3B)", wd["topup_microrub"] == 300_000_000, str(wd["topup_microrub"]))
+        check("11.4b одна живая", (await _live_count(td)) == 1)
+
+        # 11.5 tenants.status: provisioning → active при активации (гаснет баннер провижининга)
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            tp = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-prov','P','provisioning') returning id")
+        ok_p = await db.activate_subscription_from_payment(tp, "econom", "pay-prov1", ECON_INC, 30)
+        async with db.pool.acquire() as c:
+            st = await c.fetchval("select status from tenants where id=$1", tp)
+        check("11.5 activate provisioning-тенанта → True", ok_p is True)
+        check("11.5 tenants.status: provisioning → active", st == "active", st)
+
+        # 11.6 инвариант: у КАЖДОГО smoke-тенанта ≤ 1 живая подписка
+        async with db.pool.acquire() as c:
+            bad = await c.fetch(
+                "select tenant_id from subscriptions "
+                "where tenant_id in (select id from tenants where slug like 'smoke-bill-%') "
+                "and status in ('trialing','active','past_due') group by tenant_id having count(*) > 1")
+        check("11.6 инвариант count(live)==1 по всем smoke-тенантам", len(bad) == 0,
+              f"тенантов с >1 живой: {len(bad)}")
+
+        # 11.7 миграция: collapse через activate + дедуп-SQL + partial unique index (enforcement)
+        print("11.7 миграция one-live (collapse + дедуп + unique index):")
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            tg = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-mig','G','active') returning id")
+            tg2 = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-mig2','G2','active') returning id")
+            econ_id = await c.fetchval("select id from plans where code='econom'")
+            # индекс временно снимаем, чтобы засеять множественные живые (легаси-дубли §9);
+            # автокоммит (без c.transaction) → снятие видно отдельному соединению activate.
+            await c.execute("drop index if exists subscriptions_one_live_idx")
+        try:
+            # (a) activate collapse: у tg две живые → activate схлопывает до одной
+            async with db.pool.acquire() as c:
+                for _ in range(2):
+                    await c.execute(
+                        "insert into subscriptions(tenant_id,plan_id,status,current_period_start,"
+                        "current_period_end) values ($1,$2,'active', now(), now()+interval '30 days')", tg, econ_id)
+            ok_col = await db.activate_subscription_from_payment(tg, "econom", "pay-mig1", ECON_INC, 30)
+            check("11.7a activate → True", ok_col is True)
+            check("11.7a две живые + activate → collapse до одной", (await _live_count(tg)) == 1,
+                  str(await _live_count(tg)))
+            # (b) дедуп-SQL (миграция Часть 1) на трёх живых tg2; scope smoke-тенантами (dev-safety)
+            async with db.pool.acquire() as c:
+                for _ in range(3):
+                    await c.execute(
+                        "insert into subscriptions(tenant_id,plan_id,status,current_period_start,"
+                        "current_period_end) values ($1,$2,'active', now(), now()+interval '30 days')", tg2, econ_id)
+                await c.execute(
+                    "with ranked as (select id, row_number() over "
+                    "(partition by tenant_id order by created_at desc, id desc) rn from subscriptions "
+                    "where status in ('trialing','active','past_due') "
+                    "and tenant_id in (select id from tenants where slug like 'smoke-bill-%')) "
+                    "update subscriptions s set status='canceled' from ranked r "
+                    "where s.id=r.id and r.rn > 1")
+            check("11.7b дедуп-SQL: 3 живые → 1", (await _live_count(tg2)) == 1, str(await _live_count(tg2)))
+            # (c) partial unique index (миграция Часть 2) → вторая живая запрещена
+            async with db.pool.acquire() as c:
+                await c.execute(
+                    "create unique index if not exists subscriptions_one_live_idx "
+                    "on subscriptions (tenant_id) where status in ('trialing','active','past_due')")
+                raised = False
+                try:
+                    await c.execute(
+                        "insert into subscriptions(tenant_id,plan_id,status,current_period_start,"
+                        "current_period_end) values ($1,$2,'active', now(), now()+interval '30 days')", tg2, econ_id)
+                except asyncpg.UniqueViolationError:
+                    raised = True
+            check("11.7c partial unique index запрещает 2-ю живую (UniqueViolationError)", raised)
+        finally:
+            # конечное состояние dev = как после миграции: индекс присутствует
+            async with db.pool.acquire() as c:
+                await c.execute(
+                    "create unique index if not exists subscriptions_one_live_idx "
+                    "on subscriptions (tenant_id) where status in ('trialing','active','past_due')")
+
     finally:
         async with db.pool.acquire() as c:
             if forced:

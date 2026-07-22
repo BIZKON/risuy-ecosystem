@@ -3674,8 +3674,15 @@ async def subscription_select(
     start_from = latest["period_end"] if latest is not None else None
 
     start, end = _next_period_from(start_from)
-    plan_amount = _plan_amount(plan)
-    amount = plan_amount.quantize(Decimal("0.01"))
+    plan_amount = _plan_amount(plan)   # полная «витринная» цена плана (в service_invoices.plan_amount)
+    # T-1F-2 (решение владельца Q1): при ЖИВОЙ подписке и АПГРЕЙДЕ к оплате идёт доплата разницы
+    # (пропорция), а не полная цена нового плана. Первичная/продление/даунгрейд — полная цена.
+    # Единая формула с webhook-time (db.compute_plan_change → та же _plan_change_math, что в activate).
+    pc = await db.compute_plan_change(session.active_tenant_id, plan_key)
+    if pc is not None:
+        amount = Decimal(money.micro_to_amount_str(pc["amount_microrub"]))
+    else:
+        amount = plan_amount.quantize(Decimal("0.01"))
 
     invoice_id = await db.create_period_invoice(
         tenant_id=session.active_tenant_id,

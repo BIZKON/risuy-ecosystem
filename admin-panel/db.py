@@ -23,6 +23,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import asyncpg
@@ -4444,32 +4445,136 @@ async def seed_default_funnel(tenant_id) -> None:
                     tenant_id, key, value)
 
 
+# ── T-1F-2: proration смены тарифа (спека токен-биллинга v2, §3) ─────────────
+# Единая формула для ДВУХ точек: цена (subscription_select, select-time) и пул
+# (activate_subscription_from_payment, webhook-time). Живёт ЗДЕСЬ один раз —
+# ни app.py, ни activate её НЕ дублируют. Деньги — целые µRUB; ЕДИНСТВЕННОЕ
+# округление — ceil_mul (вверх, shared/money.py).
+def _td_micros(td) -> int:
+    """timedelta → целые микросекунды (без float — точная дробь для f)."""
+    return td.days * 86_400_000_000 + td.seconds * 1_000_000 + td.microseconds
+
+
+def _period_fraction(t_start, t_end, now) -> Decimal:
+    """Доля НЕизрасходованного периода: f = clamp((t_end−now)/(t_end−t_start), 0, 1).
+    Точная дробь целых микросекунд. Пустой/просроченный период → 0 (край §2: ветка C
+    сводится к свежей активации)."""
+    span = _td_micros(t_end - t_start)
+    if span <= 0:
+        return Decimal(0)
+    remain = _td_micros(t_end - now)
+    if remain <= 0:
+        return Decimal(0)
+    if remain >= span:
+        return Decimal(1)
+    return Decimal(remain) / Decimal(span)
+
+
+def _plan_change_math(*, old_plan_code, old_price, old_included,
+                      new_plan_code, new_price, new_included, f: Decimal) -> dict:
+    """Механика смены тарифа при ЖИВОЙ подписке (дизайн §3). Чистая функция (без БД) —
+    единственный источник формулы proration. Возвращает:
+      direction: extend|upgrade|downgrade — метка аудита (change_type)
+      amount_microrub: к оплате (ЮKassa) — upcharge для апгрейда, иначе полная цена нового
+      pool_mode: add (апгрейд: пул += разница) | overwrite (пул = Inc_new, сгорание)
+      pool_amount_microrub: add → дельта пула; overwrite → абсолютный новый пул
+      period_mode: keep (апгрейд, период сохраняется) | extend (тот же план) | fresh (рестарт)
+    """
+    from shared.money import ceil_mul  # ленивый импорт (путь shared доступен в рантайме, как money@3118)
+    old_price, old_included = int(old_price), int(old_included)
+    new_price, new_included = int(new_price), int(new_included)
+    if old_plan_code == new_plan_code:
+        # Продление того же плана: полная цена, пул перезаписывается (сгорание D1), период += .
+        return {"direction": "extend", "amount_microrub": new_price,
+                "pool_mode": "overwrite", "pool_amount_microrub": new_included,
+                "period_mode": "extend"}
+    if f <= 0:
+        # Период истёк → ветка C сводится к A: полная цена нового плана, рестарт, пул = Inc_new.
+        return {"direction": "upgrade" if new_price > old_price else "downgrade",
+                "amount_microrub": new_price, "pool_mode": "overwrite",
+                "pool_amount_microrub": new_included, "period_mode": "fresh"}
+    if new_price > old_price:
+        # АПГРЕЙД (решение владельца Q1): доплата разницы (пропорция), период СОХРАНЯЕТСЯ,
+        # пул += ceil((Inc_new−Inc_old)·f). Единственное округление — вверх.
+        return {"direction": "upgrade",
+                "amount_microrub": ceil_mul(new_price - old_price, f),
+                "pool_mode": "add", "pool_amount_microrub": ceil_mul(new_included - old_included, f),
+                "period_mode": "keep"}
+    # ДАУНГРЕЙД (решение владельца Q2): немедленно, полная цена меньшего, пул СГОРАЕТ
+    # (overwrite = Inc_new), рестарт периода, возврата нет, topup не трогаем.
+    return {"direction": "downgrade", "amount_microrub": new_price,
+            "pool_mode": "overwrite", "pool_amount_microrub": new_included, "period_mode": "fresh"}
+
+
+async def compute_plan_change(tenant_id, new_plan_code: str) -> dict | None:
+    """Единый расчёт смены тарифа (та же формула, что применит webhook в activate).
+
+    Читает ЖИВУЮ подписку RLS-скоуплено (без блокировки — это select-time для цены в
+    subscription_select) и новый план из plans. Возвращает dict из _plan_change_math +
+    {f, new_plan_id, new_included_microrub, new_price_microrub, old_plan_code}; для
+    первичной активации (живой нет) — direction='primary', полная цена/пул нового плана.
+    None — новый план не найден/договорной (custom): цену онлайн не считаем.
+    Когерентность: цена (select-time) и пул (webhook-time) — одна формула; для одиночного
+    потока состояние живой подписки между вызовами не меняется."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            new = await c.fetchrow(
+                "select id, price_microrub, included_credits_microrub from plans where code = $1",
+                new_plan_code)
+            if new is None or int(new["price_microrub"]) <= 0:
+                return None                        # custom/неизвестный/договорной — не считаем
+            now = await c.fetchval("select now()")
+            live = await c.fetchrow(
+                "select s.current_period_start, s.current_period_end, p.code as plan_code, "
+                "       p.price_microrub, p.included_credits_microrub "
+                "from subscriptions s join plans p on p.id = s.plan_id "
+                "where s.tenant_id = $1 and s.status in ('trialing','active','past_due') "
+                "order by s.created_at desc, s.id desc limit 1", tenant_id)
+    new_price = int(new["price_microrub"])
+    new_inc = int(new["included_credits_microrub"])
+    common = {"f": Decimal(1) if live is None else None, "new_plan_id": new["id"],
+              "new_included_microrub": new_inc, "new_price_microrub": new_price}
+    if live is None:
+        return {"direction": "primary", "amount_microrub": new_price, "pool_mode": "overwrite",
+                "pool_amount_microrub": new_inc, "period_mode": "fresh", "old_plan_code": None,
+                **common}
+    f = _period_fraction(live["current_period_start"], live["current_period_end"], now)
+    m = _plan_change_math(
+        old_plan_code=live["plan_code"], old_price=live["price_microrub"],
+        old_included=live["included_credits_microrub"], new_plan_code=new_plan_code,
+        new_price=new_price, new_included=new_inc, f=f)
+    return {**m, **common, "f": f, "old_plan_code": live["plan_code"]}
+
+
 async def activate_subscription_from_payment(
     tenant_id, plan_code: str, yk_payment_id: str, amount_microrub: int, period_days: int,
     *, payment_method_id: str | None = None, receipt_email: str | None = None,
 ) -> bool:
-    """Wave 4: оплата тарифа → активация подписки + начисление included_credits.
+    """Wave 4 / T-1F-2: оплата тарифа → активация подписки + начисление пула тарифа.
 
-    Одной транзакцией, идемпотентно по yookassa_payment_id (payments-журнал, как
-    mark_topup_succeeded). Связывает СТАРУЮ оплату (service_invoices, для UI-витрины
-    панели — помечается paid отдельно в вебхуке) с НОВЫМ метерингом:
-      • payments(type='subscription', succeeded) — журнал + идемпотентность;
-      • subscriptions(plan, active, период) — источник тарифа для get_tenant_plan;
-      • tenants.plan_id — фолбэк для get_tenant_plan;
-      • credit_wallets += included_credits плана (квота тарифа в кредитах);
-      • снятие ai_wallet_blocked (кредиты пришли — пауза ИИ не нужна).
-    Возвращает True — активирована (первый раз); False — план не найден/не покупаемый
-    (custom) или платёж уже обработан (повтор вебхука). Кошелёк for update — гонка с
-    параллельным списанием metering. amount пишем в payments для аудита; кредиты —
-    из плана (included_credits), НЕ из amount (overage в кредиты не идёт)."""
+    Одной транзакцией, идемпотентно по yookassa_payment_id (payments-журнал). Держит
+    ИНВАРИАНТ «ровно одна живая подписка на тенанта»: находит ЕДИНСТВЕННУЮ живую
+    (FOR UPDATE), схлопывает лишние живые (легаси-баг §9 слепого INSERT) в canceled,
+    затем ОДНА из трёх веток (proration §3, решения владельца Q1/Q2):
+      • A. Первичная (живой нет): INSERT active, период now..now+period, пул = Inc_new.
+      • B. Продление того же плана (extend): UPDATE живой, период += , пул = Inc_new (сгорание).
+      • C. Смена тарифа: UPDATE живой; АПГРЕЙД — период сохраняется, пул += ceil(ΔInc·f);
+           ДАУНГРЕЙД (и истёкший период) — рестарт периода, пул = Inc_new (сгорание).
+    Также: tenants.status provisioning→active (гаснет баннер); credit_wallets FOR UPDATE
+    (гонка с metering); снятие ai_wallet_blocked. Возвращает True — активирована; False —
+    план не найден/договорной (custom) или платёж уже обработан (повтор вебхука). amount —
+    только в payments для аудита; пул считается из plans+период, НЕ из amount."""
     async with pool.acquire() as c:
         async with c.transaction():
             await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
             plan = await c.fetchrow(
-                "select id, included_credits_microrub from plans where code = $1", plan_code)
+                "select id, price_microrub, included_credits_microrub from plans where code = $1",
+                plan_code)
             if plan is None:
                 return False                       # custom/неизвестный план — подписку не активируем
-            # Идемпотентность: повторный вебхук того же платежа → строка уже есть → no-op.
+            # Идемпотентность: повторный вебхук того же платежа → строка уже есть → no-op
+            # (ДО любых мутаций подписки/кошелька — повтор ничего не трогает).
             row = await c.fetchrow(
                 "insert into payments (tenant_id, type, yookassa_payment_id, idempotence_key, "
                 "                      amount_microrub, status, captured_at) "
@@ -4478,38 +4583,103 @@ async def activate_subscription_from_payment(
                 tenant_id, yk_payment_id, f"sub:{yk_payment_id}", max(int(amount_microrub), 1))
             if row is None:
                 return False                       # уже обработан
-            await c.execute(
-                "insert into subscriptions (tenant_id, plan_id, status, "
-                "                           current_period_start, current_period_end, "
-                "                           yookassa_payment_method_id, receipt_email) "
-                "values ($1, $2, 'active', now(), now() + make_interval(days => $3), $4, $5)",
-                tenant_id, plan["id"], period_days, payment_method_id, receipt_email)
-            await c.execute("update tenants set plan_id = $2 where id = $1", tenant_id, plan["id"])
-            inc = int(plan["included_credits_microrub"])
-            if inc > 0:
-                # T-1B-3: пул тарифа (included) + period_end = конец нового периода (та же
-                # транзакционная now(), что current_period_end подписки). Активация ЗАДАЁТ пул
-                # (перезапись — сгорание прошлого). Аванс (topup) не тронут.
+            now = await c.fetchval("select now()")
+            # ЕДИНСТВЕННАЯ живая подписка (FOR UPDATE — гонка с metering/повтором вебхука).
+            live = await c.fetchrow(
+                "select s.id, s.plan_id, s.current_period_start, s.current_period_end, "
+                "       p.code as plan_code, p.price_microrub, p.included_credits_microrub "
+                "from subscriptions s join plans p on p.id = s.plan_id "
+                "where s.tenant_id = $1 and s.status in ('trialing','active','past_due') "
+                "order by s.created_at desc, s.id desc limit 1 for update", tenant_id)
+            if live is not None:
+                # Collapse лишних живых (легаси §9) в canceled — держим инвариант one-live.
                 await c.execute(
-                    "select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
+                    "update subscriptions set status = 'canceled' "
+                    "where tenant_id = $1 and status in ('trialing','active','past_due') and id <> $2",
+                    tenant_id, live["id"])
+            # ── ветвление A/B/C ──
+            if live is None:                       # A. Первичная активация
+                change_type, pool_mode = "primary", "overwrite"
+                pool_amount, f = int(plan["included_credits_microrub"]), Decimal(1)
+                sub = await c.fetchrow(
+                    "insert into subscriptions (tenant_id, plan_id, status, current_period_start, "
+                    "  current_period_end, yookassa_payment_method_id, receipt_email) "
+                    "values ($1, $2, 'active', now(), now() + make_interval(days => $3), $4, $5) "
+                    "returning current_period_end",
+                    tenant_id, plan["id"], period_days, payment_method_id, receipt_email)
+            else:                                  # B/C. Продление / смена тарифа (proration)
+                f = _period_fraction(live["current_period_start"], live["current_period_end"], now)
+                m = _plan_change_math(
+                    old_plan_code=live["plan_code"], old_price=live["price_microrub"],
+                    old_included=live["included_credits_microrub"], new_plan_code=plan_code,
+                    new_price=plan["price_microrub"], new_included=plan["included_credits_microrub"], f=f)
+                change_type, pool_mode = m["direction"], m["pool_mode"]
+                pool_amount = m["pool_amount_microrub"]
+                if m["period_mode"] == "keep":     # C-апгрейд: период НЕ трогаем
+                    sub = await c.fetchrow(
+                        "update subscriptions set plan_id = $2, status = 'active', charge_attempts = 0, "
+                        "  yookassa_payment_method_id = coalesce($3, yookassa_payment_method_id), "
+                        "  receipt_email = coalesce($4, receipt_email) "
+                        "where id = $1 returning current_period_end",
+                        live["id"], plan["id"], payment_method_id, receipt_email)
+                elif m["period_mode"] == "extend":  # B: тот же план, период += period_days
+                    sub = await c.fetchrow(
+                        "update subscriptions set status = 'active', charge_attempts = 0, "
+                        "  current_period_start = now(), "
+                        "  current_period_end = greatest(current_period_end, now()) "
+                        "                       + make_interval(days => $2), "
+                        "  yookassa_payment_method_id = coalesce($3, yookassa_payment_method_id), "
+                        "  receipt_email = coalesce($4, receipt_email) "
+                        "where id = $1 returning current_period_end",
+                        live["id"], period_days, payment_method_id, receipt_email)
+                else:                               # fresh: C-даунгрейд / истёкший период — рестарт
+                    sub = await c.fetchrow(
+                        "update subscriptions set plan_id = $2, status = 'active', charge_attempts = 0, "
+                        "  current_period_start = now(), "
+                        "  current_period_end = now() + make_interval(days => $3), "
+                        "  yookassa_payment_method_id = coalesce($4, yookassa_payment_method_id), "
+                        "  receipt_email = coalesce($5, receipt_email) "
+                        "where id = $1 returning current_period_end",
+                        live["id"], plan["id"], period_days, payment_method_id, receipt_email)
+            period_end = sub["current_period_end"]
+            # tenants.status: provisioning → active (баннер провижининга гаснет);
+            # suspended/canceled НЕ трогаем (решение Q3).
+            await c.execute(
+                "update tenants set plan_id = $2, "
+                "  status = case when status = 'provisioning' then 'active' else status end "
+                "where id = $1", tenant_id, plan["id"])
+            # ── кошелёк: пул тарифа. add (апгрейд: += дельта) / overwrite (перв./продл./даунгрейд:
+            #    = Inc_new, сгорание). Аванс (topup) НЕ трогаем. FOR UPDATE — гонка с metering.
+            #    included_period_end = current_period_end подписки (апгрейд его сохраняет = t_end).
+            await c.execute("select 1 from credit_wallets where tenant_id = $1 for update", tenant_id)
+            if pool_mode == "add":
                 await c.execute(
                     "insert into credit_wallets (tenant_id, included_microrub, included_period_end, "
                     "                            balance_microrub, updated_at) "
-                    "values ($1, $2, now() + make_interval(days => $3), $2, now()) "
-                    "on conflict (tenant_id) do update "
+                    "values ($1, $2, $3, $2, now()) on conflict (tenant_id) do update "
+                    "set included_microrub    = credit_wallets.included_microrub + excluded.included_microrub, "
+                    "    included_period_end  = excluded.included_period_end, "
+                    "    balance_microrub     = credit_wallets.included_microrub + excluded.included_microrub "
+                    "                           + credit_wallets.topup_microrub, "
+                    "    updated_at = now()", tenant_id, int(pool_amount), period_end)
+            else:                                   # overwrite
+                await c.execute(
+                    "insert into credit_wallets (tenant_id, included_microrub, included_period_end, "
+                    "                            balance_microrub, updated_at) "
+                    "values ($1, $2, $3, $2, now()) on conflict (tenant_id) do update "
                     "set included_microrub    = excluded.included_microrub, "
                     "    included_period_end  = excluded.included_period_end, "
                     "    balance_microrub     = excluded.included_microrub + credit_wallets.topup_microrub, "
-                    "    updated_at = now()",
-                    tenant_id, inc, period_days)
+                    "    updated_at = now()", tenant_id, int(pool_amount), period_end)
             await c.execute(
                 "delete from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
                 tenant_id)
             await _insert_audit(
                 c, actor="yookassa-webhook", action="subscription_activated",
-                detail={"tenant_id": str(tenant_id), "plan": plan_code,
-                        "payment_id": yk_payment_id, "credited_microrub": inc})
-    # Активация прошла (первый раз) → засев дефолт-шаблона воронки выдачи лид-магнита новому тенанту.
+                detail={"tenant_id": str(tenant_id), "plan": plan_code, "payment_id": yk_payment_id,
+                        "change_type": change_type, "pool_mode": pool_mode,
+                        "pool_microrub": int(pool_amount), "f": str(f)})
+    # Активация прошла → засев дефолт-шаблона воронки выдачи лид-магнита новому тенанту.
     # ВНЕ транзакции активации и best-effort: сбой сида НЕ должен откатывать оплату/кредиты.
     try:
         await seed_default_funnel(tenant_id)
