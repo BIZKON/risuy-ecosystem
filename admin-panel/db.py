@@ -3276,7 +3276,10 @@ _INVOICE_COLS = (
 
 
 async def count_ai_messages(period_start, period_end=None) -> int:
-    """Сообщения, сгенерированные ИИ (Лия), за период [start, end|now). Метрика тарифа.
+    """LEGACY: исторический показатель числа сообщений ИИ (Лия) за период, НЕ биллинговая
+    единица (биллинг с T-1C = usage_ledger/credit_wallets, токен-пул; T-1C-2 убрал overage,
+    рассчитанный этой функцией, из платёжного пути /subscription/select). Оставлено для
+    витрины/аналитики (историко-информационный метр «Подписки», список счетов).
     period_start/end — date (timestamptz сравнивается с date по полуночи UTC)."""
     if period_end is None:
         q = ("select count(*) from messages "

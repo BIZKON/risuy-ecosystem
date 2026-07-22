@@ -11,6 +11,9 @@
   5. service_revenue_total СКАНИТ по всем тенантам (платформенная выручка) — НЕ зависит от ctx;
   6. tenant_id обязателен (create_period_invoice/mark_..._paid → ValueError при None);
   7. per-tenant флаг отмены: отмена тенанта A не трогает B.
+  10. T-1C-2: /subscription/select — overage-биллинг убран из платёжного пути (перерасход
+      сообщений сверх квоты прошлого периода больше НЕ доначисляется; итоговая сумма нового
+      счёта = только plan_amount).
 
 Гонится как gen_user (owner). Owner ENABLE-RLS обходит → на время теста FORCE RLS на
 service_invoices (owner становится субъектом политики, имитируем panel_rw); в finally — снять FORCE.
@@ -22,7 +25,7 @@ service_invoices (owner становится субъектом политики
 import asyncio
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +38,15 @@ os.environ.setdefault("ADMIN_PASSWORD_HASH", "$argon2id$v=19$m=65536,t=3,p=4$c29
 
 import asyncpg  # noqa: E402
 import db        # noqa: E402  (admin-panel/db.py)
+import auth      # noqa: E402  (admin-panel/auth.py — auth.Session для прямого вызова роута)
+
+# app.py (FastAPI) грузится с cwd=admin-panel/ — при импорте он монтирует StaticFiles("static")
+# и Jinja2Templates("templates") относительными путями. Сразу возвращаем cwd назад, чтобы
+# относительные пути DSN/скрипта ниже не сбились.
+_cwd_before_app_import = os.getcwd()
+os.chdir(os.path.join(ROOT, "admin-panel"))
+import app as admin_app  # noqa: E402  (T-1C-2: прямой вызов subscription_select)
+os.chdir(_cwd_before_app_import)
 
 DSN = os.environ.get("BILLING_SMOKE_DSN")
 if not DSN or "/risuy_dev" not in DSN.split("?")[0]:
@@ -53,11 +65,29 @@ def check(name: str, cond: bool, detail="") -> None:
 async def _cleanup(c):
     sub = "(select id from tenants where slug like 'smoke-bill-%')"
     for tbl in ("service_invoices", "usage_ledger", "credit_wallets",
-                "payments", "subscriptions", "tenant_settings"):
+                "payments", "subscriptions", "tenant_settings", "messages"):
         await c.execute(f"delete from {tbl} where tenant_id in {sub}")
     await c.execute("delete from app_settings where key like $1",
                     f"{db.config.SERVICE_CANCEL_SETTING_KEY}:%")
     await c.execute("delete from tenants where slug like 'smoke-bill-%'")
+
+
+class _FakeHeaders:
+    """Пустые заголовки запроса — subscription_select читает host/origin/ua/xff, но
+    при отсутствии host _same_origin(request) доверяет CSRF-токену (см. app.py)."""
+
+    def get(self, key, default=None):  # noqa: ARG002 — сигнатура Headers.get
+        return default
+
+
+class _FakeRequest:
+    """Минимальная замена fastapi.Request для прямого (не через ASGI) вызова
+    subscription_select — тестируем платёжную ЛОГИКУ, не HTTP-транспорт."""
+
+    def __init__(self):
+        self.headers = _FakeHeaders()
+        self.client = None
+        self.cookies = {}
 
 
 async def main() -> None:
@@ -226,6 +256,81 @@ async def main() -> None:
         check("renew → пул ПЕРЕЗАПИСАН 3_750_000_000 (сгорание, не 1M+3.75B)",
               w["included_microrub"] == 3_750_000_000, str(w["included_microrub"]))
         check("renew: аванс не тронут (1_000_200)", w["topup_microrub"] == 1_000_200)
+
+        # ── 10. T-1C-2: overage-биллинг убран из /subscription/select ──
+        print("10. T-1C-2 — смена тарифа НЕ доначисляет overage:")
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            te = await c.fetchval(
+                "insert into tenants(slug,name,status) values('smoke-bill-e','E','active') returning id")
+        db.set_active_tenant(te)
+
+        # Прошлый ОПЛАЧЕННЫЙ период со СНИМКОМ маленькой квоты=2 (снимок квоты живёт в самом
+        # счёте, не в config.SERVICE_PLANS — дёшево смоделировать перерасход без 500+ строк).
+        prev_start, prev_end = date(2026, 5, 1), date(2026, 6, 1)
+        prev_iid = await db.create_period_invoice(
+            tenant_id=te, period_start=prev_start, period_end=prev_end,
+            plan_key="econom", plan_name="Эконом", quota=2, plan_amount=Decimal("3750"),
+            overage_count=0, overage_amount=Decimal("0"), amount=Decimal("3750"), currency="RUB",
+            actor="smoke-bill", ip=None, user_agent=None)
+        await db.attach_yookassa_payment(prev_iid, "pay-bill-E-prev")
+        await db.mark_service_invoice_paid_by_payment("pay-bill-E-prev", tenant_id=te, card_last4="4242")
+
+        # 5 сообщений ИИ внутри прошлого периода > quota=2 — СТАРАЯ логика per_message
+        # дала бы overage_count=3, overage_amount=3*7.5=22.50 сверх plan_amount=3750.
+        async with db.pool.acquire() as c:
+            for i in range(5):
+                await c.execute(
+                    "insert into messages (tg_user_id, direction, kind, source, tenant_id, created_at) "
+                    "values ($1, 'out', 'text', 'liya', $2, $3)",
+                    9000 + i, te, datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc))
+
+        # Прямой вызов роута (bypass Depends: require_session/CSRF-DI не участвуют — сессия
+        # и csrf_token собраны вручную, как и должно быть при вызове функции напрямую).
+        sess = auth.Session(sid="smoke-sid-e", actor="smoke-bill", csrf_token="smoke-csrf-e",
+                             active_tenant_id=te)
+        orig_yk_enabled = admin_app.config.YOOKASSA_ENABLED
+        orig_create_payment = admin_app.yookassa.create_payment
+        admin_app.config.YOOKASSA_ENABLED = True  # смоук-окружение по умолчанию без ЮKassa-креда
+
+        async def _fake_create_payment(**_kwargs):
+            return {"id": "pay-bill-E-new",
+                    "confirmation": {"confirmation_url": "https://example.invalid/pay"}}
+
+        admin_app.yookassa.create_payment = _fake_create_payment
+        try:
+            resp = await admin_app.subscription_select(
+                request=_FakeRequest(), session=sess, plan_key="econom",
+                email="", csrf_token="smoke-csrf-e")
+        finally:
+            admin_app.yookassa.create_payment = orig_create_payment
+            admin_app.config.YOOKASSA_ENABLED = orig_yk_enabled
+
+        loc = resp.headers.get("location", "") if hasattr(resp, "headers") else ""
+        check("subscription_select редиректит на confirmation_url ЮKassa (не err=)",
+              getattr(resp, "status_code", None) == 303 and "example.invalid" in loc, f"status={getattr(resp, 'status_code', None)} location={loc!r}")
+
+        async with db.pool.acquire() as c:
+            new_inv = await c.fetchrow(
+                "select overage_count, overage_amount, plan_amount, amount, status "
+                "from service_invoices where tenant_id=$1 and id != $2 "
+                "order by created_at desc limit 1", te, prev_iid)
+        check("новый счёт создан (pending)", new_inv is not None and new_inv["status"] == "pending",
+              repr(new_inv["status"] if new_inv else None))
+        check("overage_count == 0 (T-1C-2: overage убран из биллинга смены тарифа)",
+              new_inv is not None and new_inv["overage_count"] == 0,
+              str(new_inv["overage_count"]) if new_inv else "нет счёта")
+        check("overage_amount == 0",
+              new_inv is not None and Decimal(str(new_inv["overage_amount"])) == Decimal("0"),
+              str(new_inv["overage_amount"]) if new_inv else "нет счёта")
+        check("итоговая сумма счёта == plan_amount (без overage-надбавки)",
+              new_inv is not None and Decimal(str(new_inv["amount"])) == Decimal(str(new_inv["plan_amount"])),
+              f"{new_inv['amount']} vs {new_inv['plan_amount']}" if new_inv else "нет счёта")
+
+        async with db.pool.acquire() as c:
+            ul_count = await c.fetchval("select count(*) from usage_ledger where tenant_id=$1", te)
+        check("usage_ledger не тронут платёжным путём подписки (биллинг с T-1C — токен-пул, "
+              "а не сообщения; смена тарифа его не пишет)", ul_count == 0, str(ul_count))
 
     finally:
         async with db.pool.acquire() as c:

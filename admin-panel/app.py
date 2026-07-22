@@ -3661,24 +3661,21 @@ async def subscription_select(
     if config.SERVICE_RECEIPT_ENABLED and not _valid_email(email):
         return RedirectResponse(url="/subscription?err=bad_email", status_code=303)
 
-    # Превышение ПРОШЛОГО (текущего оплаченного) периода → доначисляем в этот счёт.
+    # T-1C-2: overage-БИЛЛИНГ («доплата за перерасход сообщений сверх квоты») убран из
+    # платёжного пути смены тарифа — единица биллинга с T-1C = токен-пул (usage_ledger/
+    # credit_wallets), а не count_ai_messages (легаси-показатель, см. db.count_ai_messages).
+    # Колонки overage_count/overage_amount в service_invoices остаются (фискально-легаси),
+    # но теперь всегда 0 — итоговая сумма счёта = только plan_amount.
+    # start_from (продолжение периода от хвоста прошлого ОПЛАЧЕННОГО счёта) — НЕ overage,
+    # оставляем как было.
     latest = await db.get_latest_paid_invoice()
     overage_count = 0
     overage_amount = Decimal("0")
-    start_from = None
-    if latest is not None:
-        prev_plan = _plan(latest["plan_key"]) or {}
-        prev_quota = latest["quota"]
-        if prev_quota is not None:
-            prev_used = await db.count_ai_messages(latest["period_start"], latest["period_end"])
-            overage_count = max(0, prev_used - prev_quota)
-        over_price = prev_plan.get("overage") or 0
-        overage_amount = (Decimal(str(over_price)) * overage_count).quantize(Decimal("0.01"))
-        start_from = latest["period_end"]
+    start_from = latest["period_end"] if latest is not None else None
 
     start, end = _next_period_from(start_from)
     plan_amount = _plan_amount(plan)
-    amount = (plan_amount + overage_amount).quantize(Decimal("0.01"))
+    amount = plan_amount.quantize(Decimal("0.01"))
 
     invoice_id = await db.create_period_invoice(
         tenant_id=session.active_tenant_id,
