@@ -144,16 +144,32 @@ async def cut_over_tenant(conn, tenant_id, *, now=None) -> dict:
                 over_price = (config.SERVICE_PLANS.get(plan_key) or {}).get("overage") or 0
             overage_amount = (Decimal(str(over_price)) * overage_count).quantize(Decimal("0.01"))
         if overage_amount > 0:
-            # settle-only: plan_amount=0 (подписку не продаём), amount=overage_amount. Отдельная
-            # транзакция create_period_invoice (реюз db-слоя) → на краше до маркера возможен
-            # повтор счёта; FOR UPDATE сериализует параллельные прогоны, статус pending.
-            await db.create_period_invoice(
-                tenant_id=tenant_id, period_start=latest["period_start"],
-                period_end=latest["period_end"], plan_key=plan_key,
-                plan_name=latest["plan_name"], quota=quota, plan_amount=Decimal("0"),
-                overage_count=overage_count, overage_amount=overage_amount,
-                amount=overage_amount, currency=(latest["currency"] or "RUB"),
-                actor="billing-cutover", ip=None, user_agent=None)
+            # Идемпотентность на КРАХ-РЕТРАЕ: create_period_invoice берёт СВОЁ соединение из
+            # пула и коммитит НЕЗАВИСИМО от транзакции cutover. Если прошлый прогон крашнулся
+            # ПОСЛЕ коммита счёта, но ДО маркера (шаг 8) — маркер/кошелёк откатились, а счёт
+            # осиротел. Дедуп-пречек по натуральному ключу (tenant_id + период + признак
+            # cutover created_by='billing-cutover') на conn транзакции cutover (RLS-скоуп +
+            # явный tenant_id → работает и под owner-DSN): второй pending-счёт НЕ создаём,
+            # осиротевший переиспользуем и продолжаем шаги 6–8.
+            existing_inv = await conn.fetchval(
+                "select id from service_invoices "
+                "where tenant_id = $1 and period_start = $2 and period_end = $3 "
+                "and created_by = 'billing-cutover' limit 1",
+                tenant_id, latest["period_start"], latest["period_end"])
+            if existing_inv is not None:
+                logger.info("cutover: тенант %s — осиротевший cutover overage-счёт %s "
+                            "(краш-ретрай); реюз, второй не создаём", tenant_id, existing_inv)
+            else:
+                # settle-only: plan_amount=0 (подписку не продаём), amount=overage_amount.
+                # Отдельная транзакция create_period_invoice (реюз db-слоя), статус pending;
+                # FOR UPDATE сериализует параллельные прогоны, дедуп закрывает крах-ретрай-щель.
+                await db.create_period_invoice(
+                    tenant_id=tenant_id, period_start=latest["period_start"],
+                    period_end=latest["period_end"], plan_key=plan_key,
+                    plan_name=latest["plan_name"], quota=quota, plan_amount=Decimal("0"),
+                    overage_count=overage_count, overage_amount=overage_amount,
+                    amount=overage_amount, currency=(latest["currency"] or "RUB"),
+                    actor="billing-cutover", ip=None, user_agent=None)
 
         # ── Шаг 6: перенос теневого минуса (сохранить в авансе, НЕ в пуле) ──
         included = int(wallet["included_microrub"])

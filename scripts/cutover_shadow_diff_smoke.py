@@ -103,15 +103,17 @@ async def _seed_paid_invoice(c, tenant) -> None:
         tenant, PERIOD_START, PERIOD_END, QUOTA)
 
 
-async def _seed_messages(c, tenant, n: int) -> int:
-    """n исходящих сообщений Лии в окне; возвращает max(id) (будущий metering_msg_hwm)."""
-    max_id = 0
+async def _seed_messages(c, tenant, n: int) -> list[int]:
+    """n исходящих сообщений Лии в окне; возвращает список id (max = будущий metering_msg_hwm).
+    Строки usage_ledger привязываются к этим id ключом 'msg:{id}' (как _scan_tenant_messages),
+    чтобы shadow-diff мог ограничить окно сверху frozen_hwm (дизайн §2)."""
+    ids: list[int] = []
     for i in range(n):
         mid = await c.fetchval(
             "insert into messages (tg_user_id, direction, kind, source, tenant_id, created_at) "
             "values ($1,'out','text','liya',$2,$3) returning id", 7000 + i, tenant, MSG_AT)
-        max_id = max(max_id, int(mid))
-    return max_id
+        ids.append(int(mid))
+    return ids
 
 
 async def _seed_ledger_msg(c, tenant, key: str, charged: int) -> None:
@@ -127,13 +129,21 @@ async def _shadow_diff(tenant) -> tuple[int, int, int]:
     """(OLD_expected, LEDGER_actual, shadow_diff) для тенанта в окне PERIOD_START..PERIOD_END.
 
     OLD_expected — count_ai_messages(окно) под RLS активного тенанта × PMM.
-    LEDGER_actual — Σ charged по msg:%-строкам тенанта (явный tenant_id-фильтр: не зависит от RLS)."""
+    LEDGER_actual — Σ charged по msg:%-строкам тенанта, ОГРАНИЧЕННЫМ СВЕРХУ frozen_hwm
+    (дизайн §2: сообщения после разреза — новый счётчик, в дифф не входят = анти-двойной-счёт).
+    frozen_hwm = max(id) сообщений Лии тенанта (= снимок metering_msg_hwm); id извлекаем из
+    ключа 'msg:{id}'. Явный tenant_id-фильтр: не зависит от RLS."""
     db.set_active_tenant(tenant)
     count = await db.count_ai_messages(PERIOD_START, PERIOD_END)
     async with db.pool.acquire() as c:
+        frozen_hwm = int(await c.fetchval(
+            "select coalesce(max(id), 0) from messages "
+            "where tenant_id = $1 and source = 'liya' and direction = 'out'", tenant))
         actual = int(await c.fetchval(
             "select coalesce(sum(charged_microrub), 0) from usage_ledger "
-            "where tenant_id = $1 and kind = 'message' and idempotence_key like 'msg:%'", tenant))
+            "where tenant_id = $1 and kind = 'message' and idempotence_key like 'msg:%' "
+            "and (substring(idempotence_key from '^msg:([0-9]+)'))::bigint <= $2",
+            tenant, frozen_hwm))
     old_expected = int(count) * PMM
     return old_expected, actual, old_expected - actual
 
@@ -167,9 +177,10 @@ async def main() -> None:
         async with db.pool.acquire() as c:
             await _seed_sub_econom(c, ta)
             await _seed_paid_invoice(c, ta)
-            hwm = await _seed_messages(c, ta, N)
-            for i in range(N):
-                await _seed_ledger_msg(c, ta, f"msg:a{i}", PMM)
+            mids = await _seed_messages(c, ta, N)
+            hwm = max(mids)
+            for mid in mids:
+                await _seed_ledger_msg(c, ta, f"msg:{mid}", PMM)
             # кошелёк в минусе (теневой долг per_message в авансе); пул пуст, период не выставлен
             await c.execute(
                 "insert into credit_wallets (tenant_id, included_microrub, included_period_end, "
@@ -252,6 +263,58 @@ async def main() -> None:
               and w_re["topup_microrub"] == w_before["topup_microrub"])
         check("маркер один", markers == 1, f"факт {markers}")
 
+        # ── S3b. идемпотентность overage-счёта при КРАХ-РЕТРАЕ (осиротевший счёт, маркера нет) ──
+        # create_period_invoice коммитит СВОИМ соединением, НЕЗАВИСИМО от транзакции cutover.
+        # Если прошлый прогон крашнулся ПОСЛЕ коммита счёта, но ДО маркера (шаг 8), маркер/
+        # кошелёк откатились, а счёт остался. Ретрай (маркера нет) НЕ должен создавать ВТОРОЙ
+        # cutover overage-счёт (дубль billing-документа) — дедуп по натуральному ключу.
+        print("S3b. идемпотентность overage-счёта (краш-ретрай):")
+        db.set_active_tenant(None)
+        async with db.pool.acquire() as c:
+            ti = await _make_tenant(c, "smoke-cut-idem")
+        db.set_active_tenant(ti)
+        async with db.pool.acquire() as c:
+            await _seed_sub_econom(c, ti)
+            await _seed_paid_invoice(c, ti)
+            mids_i = await _seed_messages(c, ti, N)
+            for mid in mids_i:
+                await _seed_ledger_msg(c, ti, f"msg:{mid}", PMM)
+            await c.execute(
+                "insert into credit_wallets (tenant_id, included_microrub, included_period_end, "
+                "topup_microrub, balance_microrub) values ($1, 0, null, -1000000, -1000000)", ti)
+            await c.execute(
+                "insert into tenant_settings (tenant_id, key, value) "
+                "values ($1, 'metering_msg_hwm', $2)", ti, str(max(mids_i)))
+            # ОСИРОТЕВШИЙ cutover overage-счёт (created_by='billing-cutover' — тот же
+            # натуральный ключ, что выставляет cut_over_tenant; маркер НЕ ставим).
+            await c.execute(
+                "insert into service_invoices (tenant_id, period_start, period_end, plan_key, "
+                "plan_name, quota, plan_amount, overage_count, overage_amount, amount, currency, "
+                "status, created_by) "
+                "values ($1,$2,$3,'econom','Эконом',$4,0,$5,$6,$6,'RUB','pending','billing-cutover')",
+                ti, PERIOD_START, PERIOD_END, QUOTA, N - QUOTA, OVER_PRICE * (N - QUOTA))
+        async with db.pool.acquire() as c:
+            inv_pre = await c.fetchval(
+                "select count(*) from service_invoices "
+                "where tenant_id=$1 and created_by='billing-cutover'", ti)
+        db.set_active_tenant(ti)
+        async with db.pool.acquire() as conn:
+            res_i = await cut.cut_over_tenant(conn, ti)
+        async with db.pool.acquire() as c:
+            inv_post = await c.fetchval(
+                "select count(*) from service_invoices "
+                "where tenant_id=$1 and created_by='billing-cutover'", ti)
+            marker_i = await c.fetchval(
+                "select count(*) from tenant_settings where tenant_id=$1 and key='billing_cutover_done'", ti)
+            w_i = await _wallet(c, ti)
+        check("осиротевший cutover-счёт засеян (1 до разреза)", inv_pre == 1, f"pre={inv_pre}")
+        check("status == done", res_i.get("status") == "done", repr(res_i))
+        check("cutover overage-счёт НЕ задвоен (ровно 1)", inv_post == 1, f"post={inv_post}")
+        check("маркер billing_cutover_done выставлен", marker_i == 1, f"markers={marker_i}")
+        check("пул выставлен: included == econom.included",
+              w_i is not None and w_i["included_microrub"] == plan_included,
+              str(w_i["included_microrub"]) if w_i else "нет кошелька")
+
         # ── S4. RED-детектор ПОТЕРИ (одна строка charged=0) ──
         print("S4. RED-детектор потери (charged=0):")
         db.set_active_tenant(None)
@@ -259,10 +322,10 @@ async def main() -> None:
             tl = await _make_tenant(c, "smoke-cut-loss")
         db.set_active_tenant(tl)
         async with db.pool.acquire() as c:
-            await _seed_messages(c, tl, N)
-            for i in range(N - 1):
-                await _seed_ledger_msg(c, tl, f"msg:l{i}", PMM)
-            await _seed_ledger_msg(c, tl, f"msg:l{N-1}", 0)   # ПОТЕРЯ: списание 0
+            mids_l = await _seed_messages(c, tl, N)
+            for mid in mids_l[:-1]:
+                await _seed_ledger_msg(c, tl, f"msg:{mid}", PMM)
+            await _seed_ledger_msg(c, tl, f"msg:{mids_l[-1]}", 0)   # ПОТЕРЯ: списание 0
         _, _, diff_loss = await _shadow_diff(tl)
         check("shadow_diff == pmm (потеря обнаружена)", diff_loss == PMM, f"diff={diff_loss}")
         check("shadow_diff != 0", diff_loss != 0)
@@ -274,10 +337,11 @@ async def main() -> None:
             td = await _make_tenant(c, "smoke-cut-dup")
         db.set_active_tenant(td)
         async with db.pool.acquire() as c:
-            await _seed_messages(c, td, N)
-            for i in range(N):
-                await _seed_ledger_msg(c, td, f"msg:d{i}", PMM)
-            await _seed_ledger_msg(c, td, "msg:d-dup", PMM)   # ДУБЛЬ: лишнее списание
+            mids_d = await _seed_messages(c, td, N)
+            for mid in mids_d:
+                await _seed_ledger_msg(c, td, f"msg:{mid}", PMM)
+            # ДУБЛЬ: лишнее списание за уже учтённое сообщение (id в окне: ≤ frozen_hwm).
+            await _seed_ledger_msg(c, td, f"msg:{mids_d[0]}-dup", PMM)
         _, _, diff_dup = await _shadow_diff(td)
         check("shadow_diff < 0 (дубль обнаружен)", diff_dup < 0, f"diff={diff_dup}")
         check("shadow_diff == -pmm", diff_dup == -PMM, f"diff={diff_dup}")
