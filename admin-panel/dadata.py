@@ -130,12 +130,32 @@ def _post(url: str, payload: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+# Гард длины query (DaData suggestions API — практический лимит запроса). Длиннее —
+# find_party/suggest_party отдают пустой результат СРАЗУ, БЕЗ HTTP-вызова провайдеру.
+# ЕДИНЫЙ источник истины: companies_lookup/companies_search (app.py) гейтят квоту
+# (dadata_quota_take) и списание (charge_dadata) через would_query() ниже — иначе
+# фантомное списание/квота за вызов, которого не было (ревью T-1D-3, Important).
+MAX_QUERY_LEN = 300
+
+
+def would_query(query: str) -> bool:
+    """True, если find_party/suggest_party с этим query реально дойдут до HTTP-запроса
+    в DaData (query непустой и не длиннее MAX_QUERY_LEN). False — они вернут пустой
+    результат немедленно, без обращения к провайдеру.
+
+    Вызывающий код (app.py: companies_lookup/companies_search) обязан гейтить ЭТИМ
+    условием квоту (dadata_quota_take) и списание (db.charge_dadata) ДО их выполнения —
+    иначе списываются деньги/квота за вызов, которого не было."""
+    q = (query or "").strip()
+    return bool(q) and len(q) <= MAX_QUERY_LEN
+
+
 async def find_party(query: str) -> ProspectCard | None:
     """Точный поиск по ИНН/ОГРН (findById). None — не настроено/не найдено/ошибка."""
     if not is_configured():
         return None
     q = (query or "").strip()
-    if not q or len(q) > 300:
+    if not would_query(q):
         return None
     try:
         resp = await asyncio.to_thread(_post, _FIND_URL, {"query": q})
@@ -151,7 +171,7 @@ async def suggest_party(query: str, count: int = 7) -> list[dict]:
     if not is_configured():
         return []
     q = (query or "").strip()
-    if not q or len(q) > 300:
+    if not would_query(q):
         return []
     try:
         resp = await asyncio.to_thread(_post, _SUGGEST_URL, {"query": q, "count": max(1, min(count, 20))})

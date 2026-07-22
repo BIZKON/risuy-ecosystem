@@ -5191,6 +5191,14 @@ async def charge_dadata(tenant_id, key_part: str) -> None:
                 allow_negative=True,
             )
     except Exception:
+        # Компромисс (Minor, ревью T-1D-3): широкий except гасит ЛЮБУЮ ошибку charge_usage —
+        # включая намеренный «громкий» tripwire RuntimeError per_message-депрекейта
+        # (shared/metering.py: billing_mode=='per_message' → raise, T-1C-1). Для пути DaData
+        # это осознанно ОК: per_message-планов для resource='dadata' не бывает (не
+        # per-сообщенческий тариф), а сбой метеринга не должен блокировать UX проверки
+        # контрагента (см. докстринг выше). Побочный эффект: если тенант всё же попадёт на
+        # реактивированный per_message-план, tripwire здесь НЕ прокинется наверх — узнать
+        # о нём можно только из этого лога (exception ниже), не из упавшего запроса.
         logging.getLogger(__name__).exception(
             "Метеринг DaData: списание не удалось (tenant=%s) — UX проверки контрагента не блокируем",
             tenant_id,

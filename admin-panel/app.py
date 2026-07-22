@@ -4663,7 +4663,11 @@ async def companies_search(
     await _enforce_csrf(request, session, csrf_token)
     tid = session.active_tenant_id
     suggestions = []
-    if tid and dadata.is_configured() and (q or "").strip():
+    # dadata.would_query(q) — источник истины (admin-panel/dadata.py): q длиннее
+    # dadata.MAX_QUERY_LEN suggest_party НЕ отправит в DaData (вернёт [] без HTTP), поэтому
+    # квота и списание гейтятся ТЕМ ЖЕ условием — иначе фантомная квота+22,5₽ за вызов,
+    # которого не было (фикс Important-финдинга ревью T-1D-3; было — (q or "").strip()).
+    if tid and dadata.is_configured() and dadata.would_query(q):
         if await db.dadata_quota_take(config.DADATA_DAILY_LIMIT):
             suggestions = await dadata.suggest_party(q)
             # T-1D-3: тарификация фактического вызова DaData (7,5₽×3=22,5₽).
