@@ -21,7 +21,10 @@
         (дельта копится до вписывания цены из ЛК), алерт рейт-лимитирован;
       • план per_message → снапшот пишется как СВЕРКА, без списания;
     агент аккаунта БЕЗ строки в реестре пропускается (никому не списывается);
- 3) per_message-планы: списание за каждое исходящее сообщение Лии
+ 3) ⚠️ ЗАМОРОЖЕНО (T-1C-1, депрекейт per_message): шаг ОТВЯЗАН от _tick,
+    _scan_per_message больше не вызывается (планы econom/start мигрированы на
+    cost_multiplier). Ниже — историческое поведение до полного удаления в cutover
+    T-1C-3. per_message-планы: списание за каждое исходящее сообщение Лии
     (messages: source='liya', direction='out'), idempotence_key = "msg:{id}".
     Первый скан тенанта = baseline (hwm = max(id) истории Лии БЕЗ списания —
     иначе вся история затарифицировалась бы задним числом, финдинг №2);
@@ -93,7 +96,10 @@ async def run(bot: Bot, interval: int | None = None) -> None:
 
 async def _tick(bot: Bot) -> None:
     await _snapshot_agents(bot)
-    await _scan_per_message(bot)
+    # T-1C-1: per_message-скан ОТВЯЗАН от тика (депрекейт). Планы econom/start
+    # мигрированы на cost_multiplier, live per_message-тенантов нет. _scan_per_message
+    # и _scan_tenant_messages ниже ЗАМОРОЖЕНЫ (не вызываются) — полное удаление после
+    # cutover-разреза T-1C-3 (когда shadow-diff=0 подтверждён).
 
 
 # ── Шаги 1–2: снапшоты used_tokens и дельта-списания ─────────────────────────
@@ -254,6 +260,8 @@ async def _process_agent_delta(
 
 
 # ── Шаг 3: per_message-планы — списание за исходящие сообщения Лии ────────────
+# ⚠️ ЗАМОРОЖЕНО (T-1C-1, депрекейт per_message): НЕ вызывается из _tick. Оставлено до
+# cutover T-1C-3; на cost_multiplier-плане _scan_tenant_messages выходит no-op (гейт ниже).
 async def _scan_per_message(bot: Bot) -> None:
     async with db.pool.acquire() as c:
         tenants = await c.fetch(

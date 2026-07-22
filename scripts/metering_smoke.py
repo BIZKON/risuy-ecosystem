@@ -8,7 +8,7 @@
   3. DaData cost×наценка_ресурса: charged == ceil_mul(cost, 3.00) == 22,5₽; token_rate NULL; маржа ≥ 66,7%;
   4. Voice ×2: наценка ЧИТАЕТСЯ из resource_pricing (2.00), НЕ из плана (3.00) — доказывает per-resource;
   5. гонка/FOR UPDATE: 5 параллельных списаний dadata при кошельке на 2 → ровно 2 успеха, 3 отказа;
-  6. per_message:      план econom → charged == цене сообщения плана (7,5 ₽);
+  6. per_message депрекейт (T-1C-1): econom→cost_multiplier, kind='message' тарифицируется per-resource (×3), НЕ флэт 7,5 ₽;
   7. постфактум-минус: allow_negative=True + неизвестный ресурс → множитель плана, кошелёк в минус.
 
 Тест-тенанты smoke-* создаются и УДАЛЯЮТСЯ в конце. На прод не запускать (чистка делает delete в леджере).
@@ -89,6 +89,7 @@ async def cleanup(conn: asyncpg.Connection) -> None:
                 delete from tenant_settings where tenant_id = t;
                 delete from tenants         where id = t;
             end loop;
+            delete from plans where code like 'smoke-%';  -- T-1C-1: temp per_message-план tripwire-теста
         end $$;
         """
     )
@@ -99,7 +100,7 @@ async def main() -> None:
     async with pool.acquire() as conn:
         await cleanup(conn)  # хвосты прошлых прогонов
         t_price = await make_tenant(conn, "smoke-price", "custom")   # cost_multiplier ×3, prepaid
-        t_msg = await make_tenant(conn, "smoke-permsg", "econom")    # per_message 7,5 ₽
+        t_msg = await make_tenant(conn, "smoke-permsg", "econom")    # econom (после 1C — cost_multiplier ×3)
         t_legacy = await make_tenant(conn, "smoke-legacy", None)     # без плана (переходник Школы)
 
         # ── 1. LLM tokens×курс + снимок курса + маржа (T-1A-2) ───────────────
@@ -188,17 +189,21 @@ async def main() -> None:
         check("ровно 2 строки леджера", n_race == 2)
         check("баланс == 650 − 2×300 == 50 (не ниже пола)", bal == 50, f"факт {bal}")
 
-        # ── 6. per_message: charged == цене сообщения плана ──────────────────
-        print("6. per_message (econom, 7,5 ₽/сообщение):")
+        # ── 6. per_message депрекейт (T-1C-1): econom теперь cost_multiplier ──
+        # Ветка billing_mode='per_message' удалена из charge_usage. kind='message' на
+        # econom тарифицируется per-resource (множитель плана ×3), а НЕ флэт-ценой 7,5₽.
+        print("6. econom cost_multiplier — per_message-ветка удалена:")
         await set_wallet(conn, t_msg, 10_000_000)
         row = await charge_usage(
-            conn, t_msg, 0,
+            conn, t_msg, 1_000_000,
             {"kind": "message", "provider": "smoke", "units": {"messages": 1}},
             "smoke:msg:1", allow_negative=False,
         )
-        check("charged == 7_500_000 µRUB", row["charged_microrub"] == 7_500_000,
-              f"факт {row['charged_microrub']}")
-        check("balance_after == 2_500_000", row["balance_after_microrub"] == 2_500_000)
+        check("charged == 3_000_000 (cost×множитель, НЕ флэт 7,5₽)",
+              row["charged_microrub"] == 3_000_000,
+              f"факт {row['charged_microrub']} (7_500_000 = не удалённая per_message-ветка)")
+        check("token_rate NULL (не-LLM)", row["token_rate_microrub_per_1k"] is None)
+        check("balance_after == 7_000_000", row["balance_after_microrub"] == 7_000_000)
 
         # ── 7. Постфактум-минус: неизвестный ресурс → множитель плана, минус ──
         print("7. Тенант без плана, неизвестный ресурс, allow_negative=True:")
@@ -210,6 +215,30 @@ async def main() -> None:
         check("множитель дефолтный 3.00 → charged 300000", row["charged_microrub"] == 300_000,
               f"факт {row['charged_microrub']}")
         check("кошелёк ушёл в минус (−300000)", row["balance_after_microrub"] == -300_000)
+
+        # ── 8. per_message tripwire (T-1C-1): реактивация деприкейта → громкая ошибка ──
+        # Защита от тихого списания 0₽: message-путь зовёт charge_usage с cost=0, а удалённая
+        # per_message-ветка больше не подставляет цену → на per_message-плане обязан упасть.
+        print("8. per_message tripwire (реактивация деприкейта → raise):")
+        await conn.execute(
+            "insert into plans (code, name, price_microrub, billing_mode, per_message_microrub) "
+            "values ('smoke-pm', 'Смоук per_message', 0, 'per_message', 7500000) "
+            "on conflict (code) do nothing")
+        t_pm = await make_tenant(conn, "smoke-pm-tenant", "smoke-pm")
+        await set_wallet(conn, t_pm, 10_000_000)
+        raised = False
+        try:
+            await charge_usage(
+                conn, t_pm, 0,
+                {"kind": "message", "units": {"messages": 1}},
+                "smoke:pm-tripwire:1", allow_negative=True,
+            )
+        except RuntimeError:
+            raised = True
+        n_pm = await conn.fetchval(
+            "select count(*) from usage_ledger where idempotence_key = 'smoke:pm-tripwire:1'")
+        check("charge_usage падает на per_message-плане (не списывает 0₽)", raised)
+        check("леджер не записан (tripwire до списания)", n_pm == 0, f"факт {n_pm}")
 
         await cleanup(conn)
         print("Чистка smoke-тенантов выполнена.")

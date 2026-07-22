@@ -129,8 +129,9 @@ async def charge_usage(
 
     meta: kind ('llm'|'embedding'|'message'|'other'), provider, model,
           units (dict: tokens_*/messages), request_id. charged считается ЗДЕСЬ:
-          • billing_mode='per_message' и kind='message' → цена сообщения плана;
-          • иначе → ceil_mul(cost, множитель плана). Оба значения — из БД (сервер).
+          • resource='llm' → tokens_total × курс продажи (billing_token_rate, снимок);
+          • иначе → ceil_mul(cost, наценка ресурса из resource_pricing / множитель плана).
+          Курс, наценки и множитель — только с сервера (T-1A-2; per_message удалён в T-1C-1).
     """
     if cost_microrub < 0:
         raise ValueError("cost_microrub не может быть отрицательным")
@@ -160,10 +161,16 @@ async def charge_usage(
             # T-1A-2: per-resource прайс + курс из БД (решение #1). resource определяет ставку.
             resource = meta.get("resource") or meta.get("kind") or "other"
             token_rate = None  # снимок курса в usage_ledger — заполняется только для LLM
-            if plan["billing_mode"] == "per_message" and meta.get("kind") == "message":
-                charged = int(plan["per_message_microrub"])
-                multiplier = plan["markup_multiplier"]
-            elif resource == "llm":
+            # T-1C-1 tripwire: per_message-модель СНЯТА. Если план тенанта всё ещё
+            # billing_mode='per_message' (случайная реактивация до полного удаления в
+            # T-1C-3, либо новый такой план) — падаем ГРОМКО. Иначе message-путь с cost=0
+            # молча списал бы ceil_mul(0, …)=0₽ (удалённая ветка больше не подставляет цену).
+            if plan["billing_mode"] == "per_message":
+                raise RuntimeError(
+                    f"per_message депрекейт (T-1C-1): план тенанта {tenant_id} — billing_mode="
+                    "'per_message'; модель снята, тарифицируйте через токен-пул (cost_multiplier)"
+                )
+            if resource == "llm":
                 # LLM тарифицируется по КУРСУ продажи токена из БД (billing_token_rate,
                 # версионируемый); наценка вшита в курс → множитель-снимок = 1.00.
                 token_rate = await _current_token_rate(conn)

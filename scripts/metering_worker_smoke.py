@@ -8,8 +8,8 @@ risuy_dev (никаких моков леджера/снапшотов):
   C. glitch used=0:      при prev>0 НЕ сбрасывает baseline и НЕ списывает (финдинг №1);
   D. recovery:           следующая дельта считается от СОХРАНЁННОГО baseline (не от 0);
   E. реальный сброс:     ненулевое уменьшение → новый baseline, без списания;
-  F. per_message baseline: первый скан = hwm=max(id) истории Лии БЕЗ списания (финдинг №2);
-  G. per_message charge:   новое сообщение после baseline списывается по цене плана.
+  F. per_message заморожен (T-1C-1): econom→cost_multiplier → _scan_tenant_messages = no-op
+     (не списывает, hwm не трогает); _tick отвязан от _scan_per_message.
 
 Тестовые сущности smoke-* создаются и УДАЛЯЮТСЯ в конце. На прод не запускать.
 
@@ -103,8 +103,6 @@ async def main() -> None:
             "values ($1, 100000000, 100000000) on conflict (tenant_id) do update "
             "set topup_microrub=100000000, balance_microrub=100000000", t_mult)  # средства в бакет-аванс (T-1B-2)
 
-    agent = {"id": AGENT, "model_id": 0, "used_tokens": 0}
-
     # A. baseline
     print("A. baseline агента (без списания):")
     await mw._process_agent_delta(AGENT, t_mult, 1000, "smoke-model")
@@ -154,8 +152,8 @@ async def main() -> None:
         check("снапшот = 100 (новый baseline)", await last_snapshot(c, AGENT) == 100)
         check("леджер не вырос (2 строки)", await ledger_count(c, t_mult) == 2)
 
-    # F/G. per_message baseline + charge
-    print("F. per_message baseline (финдинг №2):")
+    # F. per_message ЗАМОРОЖЕН (T-1C-1): econom→cost_multiplier → _scan_tenant_messages = no-op.
+    print("F. per_message заморожен (econom→cost_multiplier, скан не списывает):")
     async with pool.acquire() as c:
         t_msg = await c.fetchval(
             "insert into tenants (slug, name, status) values "
@@ -164,34 +162,50 @@ async def main() -> None:
             "insert into subscriptions (tenant_id, plan_id, status, "
             "current_period_start, current_period_end) "
             "select $1, p.id, 'active', now(), now()+interval '30 days' "
-            "from plans p where p.code='econom'", t_msg)  # per_message 7,5 ₽
+            "from plans p where p.code='econom'", t_msg)  # econom — после 1C cost_multiplier
         await c.execute(
             "insert into credit_wallets (tenant_id, topup_microrub, balance_microrub) "
             "values ($1, 100000000, 100000000)", t_msg)  # средства в бакет-аванс (T-1B-2)
-        # 3 ИСТОРИЧЕСКИХ сообщения Лии (created_at старше grace) — НЕ должны списаться
         for i in range(3):
             await c.execute(
                 "insert into messages (tg_user_id, direction, kind, source, tenant_id, created_at) "
                 "values ($1, 'out', 'text', 'liya', $2, now()-interval '10 min')", 5000+i, t_msg)
+    # Два скана: в старом per_message-мире второй списал бы новое сообщение (по 7,5₽).
     await mw._scan_tenant_messages(t_msg)
-    async with pool.acquire() as c:
-        hwm = await c.fetchval(
-            "select value from tenant_settings where tenant_id=$1 and key='metering_msg_hwm'", t_msg)
-        check("baseline hwm установлен", hwm is not None)
-        check("история НЕ списана (леджер пуст)", await ledger_count(c, t_msg) == 0)
-
-    print("G. per_message: новое сообщение после baseline списывается:")
     async with pool.acquire() as c:
         await c.execute(
             "insert into messages (tg_user_id, direction, kind, source, tenant_id, created_at) "
             "values ($1, 'out', 'text', 'liya', $2, now()-interval '5 min')", 6000, t_msg)
     await mw._scan_tenant_messages(t_msg)
     async with pool.acquire() as c:
-        row = await c.fetchrow(
-            "select charged_microrub from usage_ledger where tenant_id=$1", t_msg)
-        check("одно списание", await ledger_count(c, t_msg) == 1)
-        check("charged == 7_500_000 (цена econom)", row and row["charged_microrub"] == 7_500_000,
-              f"факт {row['charged_microrub'] if row else None}")
+        n_msg_keys = await c.fetchval(
+            "select count(*) from usage_ledger "
+            "where tenant_id=$1 and idempotence_key like 'msg:%'", t_msg)
+        hwm = await c.fetchval(
+            "select value from tenant_settings where tenant_id=$1 and key='metering_msg_hwm'", t_msg)
+        n_led = await ledger_count(c, t_msg)
+        check("per_message скан не списывает (леджер пуст)", n_led == 0, f"факт {n_led}")
+        check("нет idempotence_key 'msg:%'", n_msg_keys == 0, f"факт {n_msg_keys}")
+        check("hwm не выставлен (скан вышел на cost_multiplier-плане)", hwm is None, f"факт {hwm}")
+
+    print("F2. _tick отвязан от _scan_per_message (заморозка T-1C-1):")
+    # Поведенческая проверка: подменяем _snapshot_agents (no-op) и _scan_per_message (шпион),
+    # прогоняем _tick и убеждаемся, что шпион НЕ вызван (надёжнее разбора исходника).
+    scan_called: list[bool] = []
+    orig_snap, orig_scan = mw._snapshot_agents, mw._scan_per_message
+
+    async def _noop_snap(_bot):
+        return None
+
+    async def _spy_scan(_bot):
+        scan_called.append(True)
+
+    mw._snapshot_agents, mw._scan_per_message = _noop_snap, _spy_scan
+    try:
+        await mw._tick(None)
+    finally:
+        mw._snapshot_agents, mw._scan_per_message = orig_snap, orig_scan
+    check("_tick НЕ вызывает _scan_per_message", not scan_called, f"вызван={len(scan_called)}")
 
     # H. T-1B-4: хард-стоп по ОБОИМ бакетам (пул с учётом period_end + аванс)
     print("H. T-1B-4 хард-стоп по бакетам:")
