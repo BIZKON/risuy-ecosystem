@@ -140,6 +140,40 @@ async def get_payment(payment_id: str, *, creds: tuple[str, str] | None = None) 
     return await asyncio.to_thread(_request, "GET", f"/payments/{payment_id}", creds=creds)
 
 
+async def list_payments(
+    *, creds: tuple[str, str] | None = None, created_gte: str | None = None,
+    created_lt: str | None = None, status: str | None = "succeeded",
+    limit: int = 100, max_pages: int = 50,
+) -> list[dict]:
+    """Список платежей магазина за окно (T-1F-4 реконсиляция осиротевших). Пагинация ЮKassa
+    через next_cursor. created_gte/created_lt — ISO8601 (фильтры created_at.gte/lt). Возвращает
+    все items (до max_pages страниц). creds=None → магазин подписки платформы (config.YOOKASSA_*)."""
+    from urllib.parse import urlencode
+    items: list[dict] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        params = {"limit": str(limit)}
+        if status:
+            params["status"] = status
+        if created_gte:
+            params["created_at.gte"] = created_gte
+        if created_lt:
+            params["created_at.lt"] = created_lt
+        if cursor:
+            params["cursor"] = cursor
+        page = await asyncio.to_thread(_request, "GET", "/payments?" + urlencode(params), creds=creds)
+        items.extend(page.get("items") or [])
+        cursor = page.get("next_cursor")
+        if not cursor:
+            break
+    if cursor:   # достигли max_pages, а страницы ещё есть → часть платежей НЕ вошла (ревью LOW)
+        import logging
+        logging.getLogger("yookassa").warning(
+            "list_payments: достигнут max_pages=%s, next_cursor не пуст — список УСЕЧЁН (%s платежей); "
+            "сузьте окно (--since-hours) или поднимите max_pages", max_pages, len(items))
+    return items
+
+
 # ── Магазин ШКОЛЫ (Phase 1B: продажи лидам) ──────────────────────────────────
 def _shop_creds() -> tuple[str, str]:
     return (config.SHOP_YOOKASSA_SHOP_ID, config.SHOP_YOOKASSA_SECRET_KEY)
