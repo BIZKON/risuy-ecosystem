@@ -5140,7 +5140,9 @@ async def club_intro_list(tenant_id) -> list[dict]:
 
 async def dadata_quota_take(limit: int) -> bool:
     """Атомарный инкремент глобального суточного счётчика запросов DaData (app_settings, value text).
-    True — в пределах лимита; False — исчерпан. Ключ dadata_quota__<YYYY-MM-DD> (UTC)."""
+    True — в пределах лимита; False — исчерпан. Ключ dadata_quota__<YYYY-MM-DD> (UTC).
+    Это rate-limit ПРОВАЙДЕРА (сколько запросов в сутки уйдёт в DaData), НЕ биллинг —
+    списание денег тенанта делает отдельная, независимая charge_dadata (T-1D-3)."""
     from datetime import datetime, timezone
     key = "dadata_quota__" + datetime.now(timezone.utc).date().isoformat()
     async with pool.acquire() as c:
@@ -5150,6 +5152,49 @@ async def dadata_quota_take(limit: int) -> bool:
             "                                updated_at = now() "
             "returning value::int", key)
         return cur <= limit
+
+
+async def charge_dadata(tenant_id, key_part: str) -> None:
+    """Тарификация фактического вызова DaData (T-1D-3, закрывает утечку §7.5): списывает
+    7_500_000 µRUB (7,5₽ себестоимость запроса find_party/suggest_party) через ЕДИНУЮ
+    точку charge_usage (shared/metering.py) с resource='dadata' → charged = ceil_mul(cost,
+    resource_pricing['dadata']=3.00) = 22_500_000 µRUB (22,5₽); token_rate не пишется
+    (снимок курса — только для kind='llm').
+
+    Звать ПОСЛЕ того, как запрос к DaData реально совершён (квота dadata_quota_take —
+    отдельный суточный rate-limit провайдера, списывается выше по коду и этой функцией
+    НЕ подменяется и не трогается).
+
+    Идемпотентность — на (тенант, запрос, сутки UTC): idempotence_key = 'dadata:{tenant}:
+    {key_part}:{дата}', так что повтор того же ИНН/поискового запроса тем же тенантом в
+    те же сутки НЕ списывает повторно (дедуп — в charge_usage, unique(idempotence_key)).
+
+    allow_negative=True: DaData уже вызвана и оплачена нами постфактум — отказать в
+    списании нельзя (ТЗ §5.1), кошелёк тенанта может уйти в минус.
+
+    RLS: conn берётся из pool.acquire() — _apply_tenant_guc проставит app.tenant_id из
+    активного тенанта сессии (require_session → db.set_active_tenant); списываем ЕГО ЖЕ
+    tenant_id, поэтому RLS-политика tenant_isolation на credit_wallets/usage_ledger проходит.
+
+    Ошибка метеринга НЕ должна ломать UX проверки контрагента — гасится здесь (лог, без
+    re-raise), чтобы сбой списания не уронил companies_lookup/companies_search."""
+    from shared.metering import charge_usage
+    date_key = datetime.now(timezone.utc).date().isoformat()
+    idem = f"dadata:{tenant_id}:{key_part}:{date_key}"
+    try:
+        async with pool.acquire() as c:
+            await charge_usage(
+                c, tenant_id, 7_500_000,
+                {"kind": "other", "resource": "dadata", "provider": "dadata",
+                 "units": {"requests": 1}},
+                idem,
+                allow_negative=True,
+            )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Метеринг DaData: списание не удалось (tenant=%s) — UX проверки контрагента не блокируем",
+            tenant_id,
+        )
 
 
 # ── Бриф-онбординг тенанта (tenant_brief) ─────────────────────────────────────

@@ -4643,6 +4643,9 @@ async def companies_lookup(
     if not await db.dadata_quota_take(config.DADATA_DAILY_LIMIT):
         return RedirectResponse(url=f"{dest}?err=quota", status_code=303)
     card = await dadata.find_party(q)
+    # T-1D-3: тарификация фактического вызова DaData (7,5₽×3=22,5₽); квота выше —
+    # отдельный rate-limit провайдера, списание — независимая обёртка charge_usage.
+    await db.charge_dadata(tid, q)
     if card is None:
         return RedirectResponse(url=f"{dest}?err=not_found", status_code=303)
     await db.prospect_upsert(card=card, tenant_id=tid, actor=session.actor,
@@ -4663,6 +4666,8 @@ async def companies_search(
     if tid and dadata.is_configured() and (q or "").strip():
         if await db.dadata_quota_take(config.DADATA_DAILY_LIMIT):
             suggestions = await dadata.suggest_party(q)
+            # T-1D-3: тарификация фактического вызова DaData (7,5₽×3=22,5₽).
+            await db.charge_dadata(tid, q)
     prospects = await db.prospect_list() if tid else []
     return templates.TemplateResponse(
         request, "companies.html",
