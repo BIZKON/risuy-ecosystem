@@ -54,9 +54,32 @@ async def _ledger(c, tid, scope=None):
     return await (c.fetch(q, tid, f"emb:{tid}:{scope}:%") if scope else c.fetch(q, tid))
 
 
+_saved_price_rows: list = []      # снимок РЕАЛЬНЫХ строк цены эмбеддера (смоук их временно удаляет)
+
+
 async def _del_price(c):
     await c.execute("delete from model_prices where provider = $1 and model = $2",
                     em.EMBED_PROVIDER, em.EMBED_MODEL)
+
+
+async def _save_price_rows(c):
+    """Снять снимок боевых строк цены эмбеддера ДО прогона: смоук проверяет инертность,
+    поэтому обязан их удалить — но не имеет права оставить dev без тарификации."""
+    global _saved_price_rows
+    _saved_price_rows = await c.fetch(
+        "select price_in_microrub_per_1k pin, price_out_microrub_per_1k pout, effective_from ef "
+        "from model_prices where provider = $1 and model = $2",
+        em.EMBED_PROVIDER, em.EMBED_MODEL)
+
+
+async def _restore_price_rows(c):
+    """Вернуть снятые строки (иначе прогон смоука молча отключил бы тарификацию эмбеддингов)."""
+    for r in _saved_price_rows:
+        await c.execute(
+            "insert into model_prices(provider, model, price_in_microrub_per_1k, "
+            "price_out_microrub_per_1k, effective_from) values($1,$2,$3,$4,$5) "
+            "on conflict (provider, model, effective_from) do nothing",
+            em.EMBED_PROVIDER, em.EMBED_MODEL, r["pin"], r["pout"], r["ef"])
 
 
 async def _cleanup(c):
@@ -71,6 +94,7 @@ async def main() -> None:
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     try:
         async with pool.acquire() as c:
+            await _save_price_rows(c)      # боевые строки цены вернём в finally
             await _cleanup(c)
             econ = await c.fetchval("select id from plans where code='econom'")
             tid = await c.fetchval(
@@ -142,6 +166,13 @@ async def main() -> None:
         async with pool.acquire() as c:
             await _cleanup(c)
     finally:
+        # Вернуть боевые строки цены ДАЖЕ при падении смоука — иначе прогон молча
+        # отключил бы тарификацию эмбеддингов на этом кластере.
+        try:
+            async with pool.acquire() as c:
+                await _restore_price_rows(c)
+        except Exception:  # noqa: BLE001
+            print("  ⚠️ НЕ УДАЛОСЬ вернуть строки model_prices эмбеддера — проверьте вручную!")
         await pool.close()
 
     print()
