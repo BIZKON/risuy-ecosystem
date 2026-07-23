@@ -4942,6 +4942,9 @@ async def knowledge_upload(
         import logging
         logging.getLogger("admin-panel").exception("kb upload failed")
         return RedirectResponse(url="/knowledge?err=kb_embed", status_code=303)
+    # T-1D-2: тарификация эмбеддингов индексации базы знаний (утечка §7.5). Зовём ПОСЛЕ
+    # фактического успеха embed_passages; ошибки метеринга гасит обёртка db.charge_embedding.
+    await db.charge_embedding(session.active_tenant_id, chunks, scope="kb")
     kb_roles, _ = await _kb_roles_for(session)
     role = knowledge_roles.normalize_role(role, set(kb_roles))
     doc_title = (title.strip() or fname)[: config.KB_TITLE_MAX]

@@ -5584,6 +5584,27 @@ async def charge_dadata(tenant_id, key_part: str) -> None:
         )
 
 
+async def charge_embedding(tenant_id, texts, *, scope: str) -> None:
+    """Тарификация эмбеддингов ПАНЕЛИ (T-1D-2): индексация базы знаний. Обёртка над
+    shared.embed_metering.charge_embedding — берёт conn из pool (RLS: _apply_tenant_guc
+    проставит app.tenant_id активного тенанта сессии; списываем ЕГО ЖЕ tenant_id, политика
+    tenant_isolation на credit_wallets/usage_ledger проходит).
+
+    Ошибки метеринга ГАСЯТСЯ (лог, без re-raise): сбой списания не должен ронять загрузку
+    документа в базу знаний — тот же компромисс, что в charge_dadata (включая гашение
+    громкого tripwire per_message). Инертность «нет цены → не списываем» обеспечена внутри
+    shared.embed_metering (charge_usage при отсутствии цены НЕ зовётся)."""
+    from shared.embed_metering import charge_embedding as _charge
+    try:
+        async with pool.acquire() as c:
+            await _charge(c, tenant_id, texts, scope=scope)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Метеринг эмбеддингов: списание не удалось (tenant=%s, scope=%s) — ингест БЗ не блокируем",
+            tenant_id, scope,
+        )
+
+
 # ── Бриф-онбординг тенанта (tenant_brief) ─────────────────────────────────────
 # json/secrets/datetime/timedelta/timezone уже импортированы модульно вверху файла.
 

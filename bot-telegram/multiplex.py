@@ -253,6 +253,8 @@ async def t_text(message: Message, bot: Bot) -> None:
     _need_rag = cfg.get("kb_enabled") or (cfg.get("memory_enabled") and cfg.get("team_agent_id"))
     qvec = await kb.embed_query(message.text) if _need_rag else None
     if qvec:
+        # T-1D-2: один эмбеддинг запроса на оба ретрива (KB+память) → одно списание.
+        await db.charge_embedding(db.tenant_id(), [message.text], scope="query")
         if cfg.get("kb_enabled"):
             kb_context = await kb.retrieve_context(
                 message.text, db.tenant_id(), cfg.get("agent_slug"), vec=qvec)

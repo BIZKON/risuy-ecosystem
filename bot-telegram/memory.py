@@ -54,6 +54,9 @@ async def retrieve(text: str, tenant_id, agent_id, lead_key: str | None,
         return ""
     if vec is None:
         vec = await kb.embed_query(text)
+        # T-1D-2: считали эмбеддинг сами (вызов без предвычисленного vec) → тарифицируем.
+        if vec:
+            await db.charge_embedding(tenant_id, [text], scope="query")
     if not vec:
         return ""
     try:
@@ -117,6 +120,8 @@ async def maybe_summarize(*, external_id, tenant_id, cfg: dict, history: list[di
         emb = await kb.embed_passage(summary)
         if not emb:
             return
+        # T-1D-2: эмбеддинг сводки памяти (passage) — тарифицируем по факту вычисления.
+        await db.charge_embedding(tenant_id, [summary], scope="memory")
         await db.memory_insert(
             tenant_id, agent_id, summary, emb,
             metadata={"lead": lead_key, "up_to": msg_count})

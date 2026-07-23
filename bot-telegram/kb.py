@@ -74,6 +74,10 @@ async def retrieve_context(text: str, tenant_id, persona: str | None = None,
     vec — предвычисленный эмбеддинг запроса (переиспользование на пути ответа); None → считаем сами."""
     if vec is None:
         vec = await embed_query(text)
+        # T-1D-2: эмбеддинг посчитан ЗДЕСЬ (School-путь без предвычисленного vec) → тарифицируем.
+        # Когда vec передан сверху (multiplex), списание уже сделано там — двойного нет.
+        if vec:
+            await db.charge_embedding(tenant_id, [text], scope="query")
     if not vec:
         return ""
     try:

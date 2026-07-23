@@ -2857,3 +2857,24 @@ async def club_intro_reveal(intro_id) -> dict | None:
         from_contact = await _contact(intro["from_member"])
         to_contact = await _contact(intro["to_member"])
     return {"from": from_contact, "to": to_contact}
+
+
+# ── T-1D-2: тарификация эмбеддингов бота (RAG-ретрив + память агента) ─────────
+async def charge_embedding(tenant_id, texts, *, scope: str) -> None:
+    """Обёртка над shared.embed_metering.charge_embedding для БОТА. Ошибки метеринга ГАСЯТСЯ
+    (лог, без re-raise): списание не должно ломать путь ответа — RAG/память и так fail-soft
+    (kb.py при сбое отдаёт None → бот отвечает как раньше). Инертность «нет цены → не
+    списываем» обеспечена внутри shared.embed_metering.
+
+    RLS: бот подключается ВЛАДЕЛЬЦЕМ БД (gen_user) — политики tenant_isolation на
+    credit_wallets/usage_ledger он обходит, поэтому app.tenant_id тут не выставляем;
+    скоуп держится явным tenant_id, который уходит в charge_usage (как в metering_worker)."""
+    from shared.embed_metering import charge_embedding as _charge
+    try:
+        async with pool.acquire() as c:
+            await _charge(c, tenant_id, texts, scope=scope)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Метеринг эмбеддингов: списание не удалось (tenant=%s, scope=%s) — путь ответа не блокируем",
+            tenant_id, scope, exc_info=True,
+        )
