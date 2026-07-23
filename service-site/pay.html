@@ -58,12 +58,12 @@
           <label class="lbl">Тариф</label>
           <label class="pay-opt">
             <input type="radio" name="plan" value="econom" data-amount="3 750 ₽" required>
-            <span><span class="nm">Эконом</span><span class="qt">500 сообщений ИИ в месяц</span></span>
+            <span><span class="nm">Эконом</span><span class="qt">включённый лимит 3 750 ₽ (≈500 ответов — оценочно)</span></span>
             <span class="pr">3 750 ₽<small>/30 дней</small></span>
           </label>
           <label class="pay-opt">
             <input type="radio" name="plan" value="start" data-amount="7 500 ₽">
-            <span><span class="nm">Стартовый</span><span class="qt">1 500 сообщений ИИ в месяц</span></span>
+            <span><span class="nm">Стартовый</span><span class="qt">включённый лимит 7 500 ₽ (≈1 500 ответов — оценочно)</span></span>
             <span class="pr">7 500 ₽<small>/30 дней</small></span>
           </label>
         </div>
@@ -75,21 +75,21 @@
 
         <div class="group">
           <label class="lbl" for="inn">ИНН или ОГРНИП</label>
-          <input type="text" id="inn" name="inn" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="ИНН 10 или 12 цифр" autocomplete="off" required>
+          <input type="text" id="inn" name="inn" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="ИНН (10 или 12 цифр), ОГРН (13) или ОГРНИП (15)" autocomplete="off" required>
         </div>
 
         <div class="group">
           <label class="agree">
             <input type="checkbox" id="agreeOferta" name="agree_oferta" required>
-            <span>Я принимаю условия <a href="oferta.html" target="_blank">Публичной оферты</a> и заключаю договор оказания услуг.</span>
+            <span>Я принимаю условия <a href="oferta.html" target="_blank" rel="noopener">Публичной оферты</a> (редакция № 2 от 23.07.2026) и заключаю договор оказания услуг.</span>
           </label>
           <label class="agree">
             <input type="checkbox" id="agreePdn" name="agree_pdn" required>
-            <span>Я даю согласие на обработку моих персональных данных (адреса электронной почты) в целях исполнения договора, направления кассового чека и связи со мной — на условиях <a href="privacy.html" target="_blank">Политики конфиденциальности</a>.</span>
+            <span>Я даю <a href="consent.html" target="_blank" rel="noopener">согласие</a> на обработку моих персональных данных — адреса электронной почты, ИНН/ОГРНИП, а также иных данных в объёме, указанном в <a href="privacy.html" target="_blank" rel="noopener">Политике конфиденциальности</a>.</span>
           </label>
           <label class="agree">
             <input type="checkbox" id="agreeEntrepreneur" name="agree_entrepreneur" required>
-            <span>Подтверждаю, что действую в рамках предпринимательской деятельности (ИП или юридическое лицо) и оплачиваю услугу в связи с ней.</span>
+            <span>Подтверждаю, что приобретаю услуги для использования в предпринимательской деятельности (ИП или юридическое лицо) и не являюсь потребителем в смысле Закона РФ «О защите прав потребителей».</span>
           </label>
         </div>
 
@@ -132,7 +132,7 @@
       bad_plan: 'Выберите тариф.',
       bad_email: 'Укажите корректный email.',
       bad_inn: 'Проверьте ИНН или ОГРНИП — введены неверные цифры.',
-      no_consent: 'Чтобы продолжить, отметьте оба согласия.',
+      no_consent: 'Отметьте согласие с офертой и согласие на обработку персональных данных.',
       no_entrepreneur: 'Подтвердите, что действуете в рамках предпринимательской деятельности.',
       no_yookassa: 'Оплата временно недоступна. Попробуйте позже или напишите нам.',
       yk_failed: 'Не удалось сформировать платёж. Попробуйте ещё раз через минуту.'
