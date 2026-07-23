@@ -19,7 +19,12 @@ webhook_event_new и завершением → 'received' навсегда). Т
 Прод (risuy) — ТОЛЬКО при RECONCILE_ALLOW_PROD=1 (и явном «да»); risuy_dev — свободно.
 Идемпотентно: повторный прогон уже проведённого платежа = 'already' (не задваивает).
 
-Запуск (dry-run прод): RECONCILE_ALLOW_PROD=1 DATABASE_URL="postgresql://<panel_rw|owner>@host:5432/risuy?sslmode=require" \
+⚠️ ТОЛЬКО OWNER-DSN (gen_user). Под panel_rw НЕЛЬЗЯ: `payments` под RLS tenant_isolation, а скрипт
+работает БЕЗ app.tenant_id (кросс-тенантный обход) → panel_rw увидит 0 строк, и оракул
+_has_succeeded_payment сочтёт ОСИРОТЕВШИМИ ВСЕ платежи (ложные would_recover, а с --apply —
+повторное проведение). Владелец БД RLS обходит — как и смоук.
+
+Запуск (dry-run прод): RECONCILE_ALLOW_PROD=1 DATABASE_URL="postgresql://<owner>@host:5432/risuy?sslmode=require" \
   YOOKASSA_SHOP_ID=… YOOKASSA_SECRET_KEY=… YOOKASSA_API_BASE=https://api.yookassa.ru/v3 \
   SESSION_SECRET=… ADMIN_USERNAME=… ADMIN_PASSWORD_HASH='$argon2…' PYTHONPATH=. python3 scripts/reconcile_yookassa.py
   (добавить --apply чтобы реально до-провести; --since-hours N окно, дефолт 168=7д).
