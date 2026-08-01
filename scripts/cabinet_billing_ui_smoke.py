@@ -119,6 +119,24 @@ for micro, want in [(-148808346, "-148,81"), (-1000500000, "-1 000,50"), (-15000
     got = micro_to_rub_str(micro)
     check(f"{micro} → {want!r}", got == want, f"получено {got!r}")
 
+print("ДЕНЬГИ — второй форматтер панели _fmt_amount (знак у отрицательных)")
+# Отдельная от micro_to_rub_str функция с тем же дефектом: маржа в блоке «Экономика
+# сервиса» печаталась как «-58,-21 ₽», а -0,21 вообще теряла знак («0,-21»).
+# Требует зависимостей панели (asyncpg, fastapi); без них проверка пропускается.
+_cwd = os.getcwd()
+try:
+    os.chdir(os.path.join(ROOT, "admin-panel"))      # app.py грузит templates/ относительно cwd
+    import app as panel_app                          # noqa: E402
+    for v, want in [("-58.21", "-58,21"), ("-1990.50", "-1 990,50"), ("-0.21", "-0,21"),
+                    ("-1000", "-1 000"), ("0", "0"), ("1990.50", "1 990,50")]:
+        got = panel_app._fmt_amount(v)
+        check(f"_fmt_amount({v}) → {want!r}", got == want, f"получено {got!r}")
+except ImportError as exc:
+    print(f"  · пропущено: нет зависимостей панели ({exc.name}); "
+          f"запустите в окружении с admin-panel/requirements.txt")
+finally:
+    os.chdir(_cwd)
+
 print("СОСТОЯНИЕ 1 — подписка активна, пул жив, аванс есть (с РЕАЛЬНЫМИ тарифами)")
 html = full()
 check("есть «Доступно»", "Доступно:" in html)

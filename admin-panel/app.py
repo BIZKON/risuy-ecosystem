@@ -3332,14 +3332,23 @@ async def payments_list(
 
 
 def _fmt_amount(value) -> str:
-    """Сумма без знака валюты: «1 990» / «1 990,50» (узкий неразрывный пробел)."""
+    """Сумма без знака валюты: «1 990» / «1 990,50» (узкий неразрывный пробел).
+
+    Знак считается ОТДЕЛЬНО, по модулю: int(Decimal('-58.21')) усекает к нулю и даёт -58,
+    а дробная часть считается тем же знаком и даёт -21 — на экране получалось «-58,-21».
+    Отрицательные суммы сюда приходят реально: маржа в блоке «Экономика сервиса» при
+    нулевой выручке. Тот же дефект был в shared/money.py::micro_to_rub_str.
+    """
     if value is None:
         return "0"
     d = Decimal(value)
+    negative = d < 0
+    d = -d if negative else d
     whole = int(d)
     cents = int((d - whole) * 100)
     int_str = f"{whole:,}".replace(",", " ")
-    return int_str if cents == 0 else f"{int_str},{cents:02d}"
+    out = int_str if cents == 0 else f"{int_str},{cents:02d}"
+    return f"-{out}" if negative else out
 
 
 # ---- /payments — записать продажу (POST, manual) -------------------------- #
