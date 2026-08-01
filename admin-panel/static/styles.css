@@ -1403,9 +1403,11 @@ select.field__input {
 
 /* История периодов */
 .bhistory { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+/* Колонки: Период · Тариф · Сумма · шеврон. Прежние «Использовано/Осталось/Превышение»
+   сняты — они считались по снятой единице биллинга, а превышение в счёт не пишется. */
 .bhistory__head, .bperiod__row {
   display: grid;
-  grid-template-columns: 1.6fr 1.2fr 1.2fr 0.9fr 1fr 40px;
+  grid-template-columns: 1.6fr 1.4fr 1fr 40px;
   gap: 10px;
   align-items: center;
   padding: 12px 18px;
@@ -1454,8 +1456,8 @@ select.field__input {
 
 @media (max-width: 720px) {
   .bhistory__head { display: none; }
-  .bperiod__row { grid-template-columns: 1fr 1fr 40px; }
-  .bperiod__row span:nth-child(4), .bperiod__row span:nth-child(5) { display: none; }
+  .bperiod__row { grid-template-columns: 1.4fr 1fr 40px; }
+  .bperiod__row span:nth-child(2) { display: none; }   /* узкий экран: прячем тариф, сумму оставляем */
   .bperiod__tx-head, .bperiod__tx-row { grid-template-columns: 1fr 1fr 1fr; }
   .bperiod__tx-head span:nth-child(3), .bperiod__tx-row span:nth-child(3) { display: none; }
 }

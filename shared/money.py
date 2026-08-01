@@ -17,11 +17,20 @@ def rub_to_micro(value: str | int | Decimal) -> int:
 
 
 def micro_to_rub_str(micro: int) -> str:
-    """µRUB → строка '1 234,56' (для UI; копейки скрываются, если их нет)."""
+    """µRUB → строка '1 234,56' (для UI; копейки скрываются, если их нет).
+
+    Знак считается ОТДЕЛЬНО, по модулю. divmod в Python округляет вниз, поэтому наивный
+    divmod(int(d * 100), 100) на отрицательных давал разряд ниже и мусорные копейки:
+    долг 148,81 ₽ печатался как «-149,19». Отрицательные суммы сюда приходят реально —
+    остаток кошелька уходит в минус (списания идут постфактум, allow_negative=True) и
+    рендерится в «Подписке», «Расходе» и «Профиле».
+    """
     d = (Decimal(micro) / MICRO).quantize(Decimal("0.01"))
-    whole, cents = divmod(int(d * 100), 100)
+    negative = d < 0
+    whole, cents = divmod(int(abs(d) * 100), 100)
     s = f"{whole:,}".replace(",", " ")
-    return s if cents == 0 else f"{s},{cents:02d}"
+    out = s if cents == 0 else f"{s},{cents:02d}"
+    return f"-{out}" if negative else out
 
 
 def micro_to_amount_str(micro: int) -> str:

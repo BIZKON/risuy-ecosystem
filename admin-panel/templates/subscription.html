@@ -10,20 +10,39 @@
   <p class="page-head__hint">Оплата за экосистему (бот + панель + лендинг) по тарифам. Это <b>не</b> платежи ваших клиентов — те в разделе «Платежи».</p>
 </div>
 
-{% if paid_flash %}{{ flash('Вы вернулись со страницы оплаты. Если платёж прошёл — тариф и счётчик обновятся в течение минуты (по уведомлению ЮKassa).', 'info') }}{% endif %}
+{% if paid_flash %}{{ flash('Вы вернулись со страницы оплаты. Если платёж прошёл, зачисление придёт в течение минуты — тариф и запас обновятся автоматически.', 'info') }}{% endif %}
 {% if canceled_flash %}{{ flash('Подписка отменена. Доступ сохранится до конца оплаченного периода.', 'ok') }}{% endif %}
 {% if detached_flash %}{{ flash('Карта отвязана: автопродление выключено. Продлевать подписку можно вручную в любой момент.', 'ok') }}{% endif %}
 {% if err %}{{ flash(err, 'error') }}{% endif %}
 
-{# ── Кошелёк (Wave 2a): баланс + пополнение + история платежей платформы ── #}
+{# ── Запас: доступно + разбивка на лимит и аванс + пополнение + история платежей ── #}
 {% if wallet %}
-<section class="section" aria-label="Кошелёк">
-  <h2 class="section__title section__title--lg">Кошелёк</h2>
+<section class="section" aria-label="Запас средств">
+  <h2 class="section__title section__title--lg">Запас</h2>
   <div class="billing-card">
+    <p class="meter-box__stats">Доступно: <b>{{ wallet.available }} ₽</b></p>
+    {% if wallet.has_debt %}
     <p class="meter-box__stats">
-      Баланс: <b class="{% if wallet.balance_negative %}over-text{% endif %}">{{ wallet.balance }} ₽</b>
-      <span class="muted">· списания за работу ИИ идут с кошелька (детально — этап «Расход»)</span>
+      <span class="over-text">Задолженность: <b>{{ wallet.debt }} ₽</b></span>
+      <span class="muted">· услуги уже оказаны; сумма удержана из аванса и погасится при пополнении</span>
     </p>
+    {% endif %}
+    <p class="meter-box__stats">
+      Включённый лимит: <b>{{ wallet.pool or '0' }} ₽</b>
+      {% if wallet.pool %}<span class="muted">· действует до {{ wallet.pool_expires_at.strftime('%d.%m.%Y') }}; неиспользованный остаток на следующий период не переносится и не возвращается</span>
+      {% elif wallet.pool_burned %}<span class="muted">· период закончился, остаток лимита не перенесён</span>
+      {% else %}<span class="muted">· тариф не подключён</span>{% endif %}
+    </p>
+    <p class="meter-box__stats">
+      Аванс: <b>{{ wallet.topup }} ₽</b>
+      <span class="muted">· возвращается по письменному заявлению в течение 10 рабочих дней, за вычетом задолженности</span>
+    </p>
+    {% if wallet.rate %}
+    <p class="hint">Курс тарификации: <b>{{ wallet.rate }} ₽</b> за 1000 токенов обработки языковой моделью. Списания идут сначала из включённого лимита, затем из аванса — детально в разделе «Расход».</p>
+    {% endif %}
+    {% if not wallet.wallet_exists %}
+    <p class="hint">Лицевой счёт пока пуст. Он наполняется включённым лимитом тарифа и пополнением; списания за оказанные услуги отражаются здесь же.</p>
+    {% endif %}
     <form method="post" action="/wallet/topup" class="field-row">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="field">
@@ -41,14 +60,9 @@
       {% endif %}
       <button class="btn btn--dark" type="submit">Пополнить</button>
     </form>
-    {% if wallet.saved_method %}
-    <form method="post" action="/subscription/detach-card">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="btn btn--soft" type="submit">Отвязать карту (выключить автопродление)</button>
-    </form>
-    {% else %}
-    <p class="hint">Сохранённой карты нет — автопродление не настроено. Карта сохраняется при оплате подписки с галочкой автопродления (появится после включения рекуррента ЮKassa).</p>
-    {% endif %}
+    {# Блок «Отвязать карту» снят: оферта п. 4.4 прямо обещает, что автоматическое списание
+       (рекуррентные платежи) не производится, save_payment_method нигде не передаётся, а
+       SERVICE_RENEWAL_ENABLED=False. Маршрут /subscription/detach-card в коде сохранён. #}
     {% if wallet.payments %}
     <div class="table-wrap">
       <table class="table table--compact table--zebra">
@@ -85,8 +99,11 @@
       </h2>
       {% if sub.exists %}
       <p class="billing-card__sub">
-        {{ sub.amount_display }} <span class="muted">за период</span>
-        · Следующий платёж <b>{{ sub.period_end.strftime('%d.%m.%Y') }}</b>
+        {% if sub.amount_display %}{{ sub.amount_display }} <span class="muted">за период</span>
+        {% else %}<span class="muted">Цена договорная</span>{% endif %}
+        {# «Следующий платёж» не пишем: автосписаний нет (оферта п. 4.4), период
+           продлевается оплатой вручную. #}
+        · Период до <b>{{ sub.period_end.strftime('%d.%m.%Y') }}</b>
         {% if sub.canceled %}· <span class="over-text">подписка отменена</span>
         {% elif sub.expired %}· <span class="over-text">период истёк</span>{% endif %}
       </p>
@@ -100,23 +117,9 @@
     </a>
   </div>
 
-  {% if sub.exists and sub.meter.quota is not none %}
-  <div class="meter-box">
-    <span class="meter-box__label">Запросы по тарифу</span>
-    {# Полоса — инлайновый SVG (CSP style-src 'self' запрещает style="width"): серое = в
-       квоте, оранжевое = превышение. preserveAspectRatio=none растягивает на всю ширину. #}
-    <svg class="meter" width="100%" height="20" viewBox="0 0 100 10" preserveAspectRatio="none" role="img" aria-label="Использование тарифа">
-      <rect x="0" y="0" width="100" height="10" rx="2" fill="#e2e6ec"/>
-      <rect x="0" y="0" width="{{ sub.meter.pct }}" height="10" rx="2" fill="#5b6b7f"/>
-      {% if sub.meter.over > 0 %}<rect x="{{ sub.meter.pct }}" y="0" width="{{ sub.meter.over_pct }}" height="10" fill="#e8821e"/>{% endif %}
-    </svg>
-    <p class="meter-box__stats">
-      Использовано: <b>{{ sub.meter.used }} из {{ sub.meter.quota }}</b>
-      · Осталось: <b>{{ sub.meter.remaining }}</b>
-      {% if sub.meter.over > 0 %}· <span class="over-text">Превышение: {{ sub.meter.over }}</span>{% endif %}
-    </p>
-  </div>
-  {% endif %}
+  {# Счётчик «Запросы по тарифу» снят: он мерил снятую единицу биллинга (сообщения ИИ),
+     а «Превышение» считалось на лету, хотя в счёт с T-1C всегда пишется 0. Обязательства
+     определяются включённым лимитом и курсом (оферта п. 4.1) — они показаны в «Запасе». #}
 
   {% if sub.exists and not sub.canceled %}
   <form method="post" action="/subscription/cancel" class="billing-card__cancel">
@@ -173,16 +176,14 @@
   {% if invoices %}
   <div class="bhistory">
     <div class="bhistory__head">
-      <span>Период</span><span>Тариф</span><span>Использовано</span><span>Осталось</span><span>Превышение</span><span class="bhistory__sp"></span>
+      <span>Период</span><span>Тариф</span><span>Сумма</span><span class="bhistory__sp"></span>
     </div>
     {% for inv in invoices %}
     <details class="bperiod">
       <summary class="bperiod__row">
         <span class="nowrap">{{ inv.period_start.strftime('%d.%m.%y') }} - {{ inv.period_end.strftime('%d.%m.%y') }}</span>
         <span>{{ inv.plan_name|e }}</span>
-        <span>{{ inv.used }}{% if inv.quota is not none %} из {{ inv.quota }}{% endif %}</span>
-        <span>{% if inv.remaining is not none %}{{ inv.remaining }}{% else %}—{% endif %}</span>
-        <span class="{% if inv.over > 0 %}over-text{% endif %}">{{ inv.over }}</span>
+        <span class="mono">{{ inv.amount_display }}</span>
         <span class="bperiod__chev" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </span>
@@ -195,7 +196,7 @@
         <div class="bperiod__tx-row">
           <span class="nowrap">{{ inv.paid_at.strftime('%d.%m.%y') if inv.paid_at else '—' }}</span>
           <span class="mono">{{ inv.amount_display }}</span>
-          <span>Оплата за подписку{% if inv.over > 0 %} + превышение{% endif %}</span>
+          <span>Оплата за подписку</span>
           <span class="mono">{% if inv.card_last4 %}**** {{ inv.card_last4|e }}{% else %}—{% endif %}</span>
           <span>
             {% if inv.status == 'paid' %}<span class="badge badge--ostatus" data-ostatus="paid">Успешно</span>
@@ -209,8 +210,16 @@
   </div>
   {% else %}
   <div class="empty">
+    {# Оплата с витрины счёт не создаёт (provision_service_landing пишет только подписку),
+       поэтому у клиента, который ТОЛЬКО ЧТО заплатил, эта история пуста. Предлагать ему
+       «оплатите первый период» — противоречие с его же платежом в блоке «Запас». #}
+    {% if wallet and wallet.has_paid %}
+    <p class="empty__title">Здесь пока пусто</p>
+    <p class="empty__text">Ваши оплаты и пополнения показаны выше, в разделе «Запас». Периоды по счетам появятся здесь после оплаты тарифа из кабинета.</p>
+    {% else %}
     <p class="empty__title">Платежей пока нет</p>
     <p class="empty__text">Выберите тариф и оплатите первый период — здесь появится история.</p>
+    {% endif %}
   </div>
   {% endif %}
 </section>
@@ -240,8 +249,15 @@
           {% for f in p.features %}<li>{{ f }}</li>{% endfor %}
         </ul>
         <div class="plan-cta">
-          {% if p.is_current %}
-          <button class="btn btn--block" type="button" disabled>Ваш текущий тариф</button>
+          {# Свой тариф покупаем ТОЛЬКО когда период уже кончился. Досрочная оплата того же
+             плана уходит в ветку pool_mode='overwrite' (db.compute_plan_change) и ОБНУЛЯЕТ
+             неизрасходованный включённый лимит, тогда как оферта п. 4.5 сжигает остаток лишь
+             по окончании расчётного периода, а блок «Запас» рядом обещает «действует до …».
+             При этом автопродления нет (оферта п. 4.4), поэтому после окончания периода
+             форма обязана появиться — иначе клиент не сможет продлиться вовсе. #}
+          {% if p.is_current and sub.exists and not sub.expired %}
+          <button class="btn btn--block" type="button" disabled>Продление после {{ sub.period_end.strftime('%d.%m.%Y') }}</button>
+          <p class="hint">Оплатить этот же тариф можно по окончании периода: досрочная оплата обнулила бы остаток текущего лимита.</p>
           {% elif p.payable %}
           <form method="post" action="/subscription/select">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -252,14 +268,12 @@
               <input class="field__input" type="email" name="email" placeholder="Email для чека (54-ФЗ)" required autocomplete="email">
             </label>
             {% endif %}
-            <button class="btn btn--dark btn--block" type="submit"{% if not yookassa_enabled %} disabled{% endif %}>Выбрать тариф</button>
+            <button class="btn btn--dark btn--block" type="submit"{% if not yookassa_enabled %} disabled{% endif %}>{% if p.is_current %}Продлить тариф{% else %}Выбрать тариф{% endif %}</button>
           </form>
-          {% else %}
-          {% if contact_url %}
+          {% elif contact_url %}
           <a class="btn btn--dark btn--block" href="{{ contact_url|e }}" target="_blank" rel="noopener">{{ p.cta or 'Оставить заявку' }}</a>
           {% else %}
           <button class="btn btn--dark btn--block" type="button" disabled>{{ p.cta or 'Оставить заявку' }}</button>
-          {% endif %}
           {% endif %}
         </div>
       </div>

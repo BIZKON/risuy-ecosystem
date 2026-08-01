@@ -4228,13 +4228,95 @@ async def delete_tenant_secret(
 # Все tenant-scoped запросы — в транзакции после set_config('app.tenant_id') (RLS).
 
 async def get_wallet_balance(tenant_id) -> int:
-    """Баланс кошелька тенанта в µRUB (0 — кошелька ещё нет: создаётся первым пополнением)."""
+    """ЛЕГАСИ: зеркало balance_microrub (депрекейт с T-1C). Клиенту как «доступно» НЕ
+    показывать — оно не учитывает сгорание пула. Для кабинета — get_billing_overview.
+    Кошелёк создаётся не только пополнением, но и первым списанием, и активацией тарифа."""
     async with pool.acquire() as c:
         async with c.transaction():
             await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
             v = await c.fetchval(
                 "select balance_microrub from credit_wallets where tenant_id = $1", tenant_id)
             return int(v or 0)
+
+
+async def get_billing_overview(tenant_id) -> dict:
+    """Снимок биллинга тенанта для кабинета — ОДНИМ соединением.
+
+    Почему одной функцией: пул панели max_size=5 с хуком app.tenant_id на каждом acquire,
+    и правило «не брать второе соединение внутри удержанного» ловилось ревью четырежды.
+
+    «Доступно» считается ТОЙ ЖЕ формулой, что и движок списания (shared/metering.py):
+    пул учитывается, только пока не истёк период. Сгоревший пул обнуляется ЛЕНИВО, внутри
+    charge_usage, отдельной кроны нет — поэтому без проверки периода UI показывал бы
+    несуществующие деньги.
+
+    Граница данных: возвращаются ТОЛЬКО клиентские поля. plans читается перечислением
+    колонок (в таблице живёт markup_multiplier); себестоимость и множители сюда не попадают.
+    """
+    empty = {
+        "wallet_exists": False, "pool_microrub": 0, "pool_expires_at": None,
+        "pool_alive": False, "topup_microrub": 0, "available_microrub": 0,
+        "subscription": None, "token_rate_microrub_per_1k": None, "ai_blocked": False,
+    }
+    if not tenant_id:
+        return empty                    # тенант не выбран: RLS-ноль подавать как факт нельзя
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            w = await c.fetchrow(
+                "select included_microrub, included_period_end, topup_microrub, "
+                "       coalesce(included_period_end > now(), false) as pool_alive "
+                "from credit_wallets where tenant_id = $1",
+                tenant_id,
+            )
+            # Живая подписка = тот же набор статусов, что в partial unique index
+            # subscriptions_one_live_idx и в get_tenant_plan (trialing/active/past_due).
+            sub = await c.fetchrow(
+                """
+                select s.status, s.current_period_start, s.current_period_end,
+                       p.code as plan_code, p.name as plan_name,
+                       p.price_microrub, p.included_credits_microrub
+                from subscriptions s
+                join plans p on p.id = s.plan_id
+                where s.tenant_id = $1 and s.status in ('trialing', 'active', 'past_due')
+                order by s.created_at desc
+                limit 1
+                """,
+                tenant_id,
+            )
+            # Прайс-слой аддитивен и на части окружений отсутствует → guard, иначе
+            # UndefinedTableError свалит всю транзакцию и страницу целиком.
+            # Привилегию проверяем ОТДЕЛЬНО от существования: гранты panel_rw периодически
+            # перетирает реконсиляция Timeweb (db/panel_role.sql), а InsufficientPrivilege
+            # отравляет транзакцию — следующий же запрос упал бы InFailedSQLTransaction,
+            # и «Подписка», «Профиль» и «Расход» отдали бы 500 целиком вместо деградации.
+            rate = None
+            if (await c.fetchval("select to_regclass('public.billing_token_rate')") is not None
+                    and await c.fetchval(
+                        "select has_table_privilege('public.billing_token_rate', 'select')")):
+                rate = await c.fetchval(
+                    "select rate_microrub_per_1k from billing_token_rate "
+                    "where effective_from <= now() order by effective_from desc limit 1"
+                )
+            blocked = await c.fetchval(
+                "select value from tenant_settings where tenant_id = $1 and key = 'ai_wallet_blocked'",
+                tenant_id,
+            )
+
+    pool_micro = int(w["included_microrub"]) if w else 0
+    topup_micro = int(w["topup_microrub"]) if w else 0
+    alive = bool(w["pool_alive"]) if w else False
+    return {
+        "wallet_exists": w is not None,
+        "pool_microrub": pool_micro,
+        "pool_expires_at": w["included_period_end"] if w else None,
+        "pool_alive": alive,
+        "topup_microrub": topup_micro,
+        "available_microrub": (pool_micro if alive else 0) + topup_micro,
+        "subscription": dict(sub) if sub is not None else None,
+        "token_rate_microrub_per_1k": int(rate) if rate is not None else None,
+        "ai_blocked": bool((blocked or "").strip()),
+    }
 
 
 async def create_platform_payment(

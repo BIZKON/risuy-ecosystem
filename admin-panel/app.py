@@ -3433,45 +3433,53 @@ def _next_period_from(end_date):
     return start, start + timedelta(days=config.SERVICE_PLAN_PERIOD_DAYS)
 
 
-def _meter(used: int, quota):
-    """Счётчик: в квоте / превышение / осталось + доли для полосы (grey + orange)."""
-    if quota is None:
-        return {"used": used, "quota": None, "in_quota": used, "over": 0,
-                "remaining": None, "pct": 0, "over_pct": 0}
-    in_quota = min(used, quota)
-    over = max(0, used - quota)
-    remaining = max(0, quota - used)
-    total = max(used, quota) or 1
-    return {"used": used, "quota": quota, "in_quota": in_quota, "over": over,
-            "remaining": remaining,
-            "pct": round(in_quota * 100 / total), "over_pct": round(over * 100 / total)}
+# МСК фиксированным смещением, а НЕ ZoneInfo("Europe/Moscow"): базовый образ прода —
+# python:3.12-slim, системного tzdata в нём нет и пакета tzdata нет ни в одном
+# requirements. ZoneInfo упал бы ZoneInfoNotFoundError НА ИМПОРТЕ модуля, то есть
+# панель не поднялась бы вовсе. Москва с 2014 года живёт на постоянном UTC+3 без
+# перевода часов, поэтому фиксированное смещение здесь точно.
+_MSK = timezone(timedelta(hours=3))
 
 
-async def _current_subscription(tenant_id) -> dict:
-    """Текущая подписка АКТИВНОГО ТЕНАНТА: тариф/период из последнего оплаченного счёта +
-    флаг отмены + живой расход сообщений ИИ за период. get_latest_paid_invoice/count_ai_messages
-    скоупятся по app.tenant_id (RLS, выставлен require_session); флаг отмены — per-tenant."""
-    latest = await db.get_latest_paid_invoice()
+def _msk(dt):
+    """Дата/время в МСК: в БД всё timestamptz (UTC), клиенту показываем московское время.
+    Без этого период, кончающийся 01.08 в 00:00 МСК, печатался бы как 31.07."""
+    return dt.astimezone(_MSK) if dt is not None else None
+
+
+async def _current_subscription(tenant_id, ov: dict) -> dict:
+    """Текущая подписка активного тенанта — из subscriptions (истина всех платёжных путей).
+
+    Раньше тариф и период брались из последнего ОПЛАЧЕННОГО счёта service_invoices. Но
+    провижининг с витрины счетов не создаёт вовсе (db.provision_service_landing пишет
+    только subscriptions), поэтому клиент, оплативший на лендинге, видел «тариф НЕ ВЫБРАН»
+    при живой подписке и начисленном пуле. На проде paid-счетов нет ни одного — то есть
+    это видели все.
+
+    Снимок ov приходит из db.get_billing_overview: одно соединение на всю страницу.
+    Счётчик сообщений ИИ снят намеренно (решение владельца, оферта п. 4.1: обязательства
+    определяются включённым лимитом и курсом, а НЕ количеством ответов).
+    """
     canceled = await db.is_subscription_canceled(tenant_id)
-    today = datetime.now(timezone.utc).date()
-    if latest is None:
-        return {"exists": False, "active": False, "canceled": canceled,
-                "plan_key": None, "meter": _meter(0, None)}
-    expired = latest["period_end"] < today
-    # Расход за текущий период: до now (если идёт) или до конца периода (если истёк).
-    end_cap = None if not expired else latest["period_end"]
-    used = await db.count_ai_messages(latest["period_start"], end_cap)
+    sub = ov.get("subscription")
+    if sub is None:
+        return {"exists": False, "active": False, "canceled": canceled, "plan_key": None}
+    end = sub["current_period_end"]
+    expired = end is not None and end < datetime.now(timezone.utc)
     return {
         "exists": True,
-        "active": (not expired) and (not canceled),
+        "active": (not expired) and (not canceled) and sub["status"] in ("trialing", "active"),
         "canceled": canceled,
         "expired": expired,
-        "plan_key": latest["plan_key"],
-        "plan_name": latest["plan_name"],
-        "amount_display": _fmt_amount(latest["amount"]) + " ₽",
-        "period_start": latest["period_start"],
-        "period_end": latest["period_end"],
-        "meter": _meter(used, latest["quota"]),
+        "plan_key": sub["plan_code"],          # совпадает с ключами config.SERVICE_PLANS
+        "plan_name": sub["plan_name"],
+        # У договорного тарифа price_microrub = 0 — печатать «0 ₽ за период» нельзя.
+        "amount_display": (
+            money.micro_to_rub_str(int(sub["price_microrub"])) + " ₽"
+            if int(sub["price_microrub"]) > 0 else None
+        ),
+        "period_start": _msk(sub["current_period_start"]),
+        "period_end": _msk(end),
     }
 
 
@@ -3484,18 +3492,21 @@ def _plans_for_picker(current_key: str | None) -> list[dict]:
 
 
 def _present_invoice(r) -> dict:
-    """Строка истории: период + использование (живой расчёт) + транзакция."""
-    quota = r["quota"]
-    used = r["used"]
-    over = max(0, used - quota) if quota is not None else 0
-    remaining = max(0, quota - used) if quota is not None else None
+    """Строка истории оплат: период, тариф, сумма, транзакция.
+
+    Колонки «Использовано / Осталось / Превышение» сняты: они считались на лету по числу
+    сообщений ИИ (снятая единица биллинга), а в сам счёт с T-1C всегда пишется
+    overage_amount = 0. То есть история утверждала «взяли доплату», которой в сумме нет —
+    это была ложь в финансовом блоке, а не устаревший маркетинг.
+    """
     return {
         "id": r["id"],
         "period_start": r["period_start"], "period_end": r["period_end"],
         "plan_name": r["plan_name"],
-        "used": used, "quota": quota, "remaining": remaining, "over": over,
         "amount_display": _fmt_amount(r["amount"]) + " ₽",
-        "status": r["status"], "paid_at": r["paid_at"], "card_last4": r["card_last4"],
+        # period_start/period_end — колонки date, их конвертировать не нужно; paid_at —
+        # timestamptz, и без перевода в МСК платёж в 01:30 выглядел бы вчерашним.
+        "status": r["status"], "paid_at": _msk(r["paid_at"]), "card_last4": r["card_last4"],
     }
 
 
@@ -3602,7 +3613,10 @@ async def subscription_page(
     detached: int = 0,
     err: str | None = None,
 ):
-    sub = await _current_subscription(session.active_tenant_id)
+    # Один снимок биллинга на всю страницу: и «Запас», и карточка тарифа читают его,
+    # чтобы не занимать два соединения пула (max_size=5) на один рендер.
+    overview = await db.get_billing_overview(session.active_tenant_id)
+    sub = await _current_subscription(session.active_tenant_id, overview)
     invoices = [_present_invoice(r) for r in await db.list_service_invoices()]
     return templates.TemplateResponse(
         request,
@@ -3624,32 +3638,68 @@ async def subscription_page(
             "detached_flash": bool(detached),
             "err": _service_err_text(err),
             "economics": await _ai_economics(session.is_platform),
-            # Wave 2a: кошелёк тенанта (топап + история платежей платформы + отвязка карты)
-            "wallet": await _wallet_ctx(session),
+            # Кошелёк тенанта: «Запас» с разбивкой + пополнение + история платежей платформы
+            "wallet": await _wallet_ctx(session, overview),
         },
     )
 
 
-async def _wallet_ctx(session: auth.Session) -> dict | None:
-    """Кошелёк активного тенанта для раздела «Подписка». None — тенант не выбран."""
+async def _wallet_ctx(session: auth.Session, ov: dict) -> dict | None:
+    """«Запас» активного тенанта для раздела «Подписка». None — тенант не выбран.
+
+    Одна крупная цифра «Доступно» + под ней две подписанные строки: включённый лимит
+    (действует до даты, на следующий период не переносится — оферта п. 4.5) и аванс
+    (возвратный по заявлению — п. 4.7). Разная юридическая природа бакетов подписана
+    рядом с суммой, а не в сноске.
+
+    Отрицательный остаток подаётся как ЗАДОЛЖЕННОСТЬ за уже оказанные услуги, а не как
+    ошибка и не как блокировка: списания идут постфактум с allow_negative, и минус живёт
+    только на авансе — пул отрицательным не бывает.
+    """
     tid = session.active_tenant_id
     if not tid:
         return None
-    balance = await db.get_wallet_balance(tid)
+    avail = int(ov["available_microrub"])
+    topup = int(ov["topup_microrub"])
+    pool = int(ov["pool_microrub"])
+    rate = ov["token_rate_microrub_per_1k"]
+    # Задолженность живёт на бакете АВАНСА, а не в знаке итоговой суммы. Если гейтить по
+    # available < 0, то при активном тарифе (пул положителен) удержанный долг исчезнет с
+    # экрана, и разбивка перестанет сходиться: «лимит 7 500 + аванс 0» против «доступно
+    # 7 351,19». Активация тарифа аванс НЕ трогает — пишется только included_microrub.
+    # Порог 5000 µRUB: копейки округляются, иначе клиент увидел бы «Задолженность: 0 ₽».
+    debt = -topup if topup < 0 else 0
     pays = await db.list_platform_payments(tid, limit=15)
+    # Альтернативный текст пустой истории показываем только по РЕАЛЬНО прошедшим оплатам:
+    # list_platform_payments отдаёт и pending, и canceled (на проде висят 2 pending и ни
+    # одной успешной), а сообщать клиенту про оплаты, которых не было, нельзя.
+    has_paid = any(p["status"] == "succeeded" for p in pays)
     return {
-        "balance": money.micro_to_rub_str(balance),
-        "balance_negative": balance < 0,
+        # В «Доступно» отрицательное число не печатаем: иначе одна и та же сумма
+        # продублируется с разными знаками рядом со строкой задолженности.
+        "available": money.micro_to_rub_str(max(avail, 0)),
+        # Строго больше: ровно на пороге форматтер округлил бы до «Задолженность: 0 ₽».
+        "has_debt": debt > 5000,
+        "debt": money.micro_to_rub_str(debt),
+        "pool": money.micro_to_rub_str(pool) if ov["pool_alive"] else None,
+        "pool_expires_at": _msk(ov["pool_expires_at"]) if ov["pool_alive"] else None,
+        # Без условия pool > 0: сгоревший пул обнуляется ЛЕНИВО при первом же списании
+        # после конца периода, и с pool > 0 ветка «остаток не перенесён» стала бы
+        # недостижимой — под карточкой «период истёк» писалось бы «тариф не подключён».
+        "pool_burned": bool(ov["pool_expires_at"] and not ov["pool_alive"]),
+        "has_paid": has_paid,
+        "topup": money.micro_to_rub_str(max(topup, 0)),
+        "rate": money.micro_to_rub_str(rate) if rate else None,
+        "wallet_exists": ov["wallet_exists"],
         "topup_min": config.WALLET_TOPUP_MIN_RUB,
         "topup_max": config.WALLET_TOPUP_MAX_RUB,
         "receipt_required": config.SERVICE_RECEIPT_ENABLED,
-        "saved_method": bool(await db.get_saved_payment_method(tid)),
         "payments": [
             {
                 "type": "Пополнение кошелька" if p["type"] == "topup" else "Подписка",
                 "amount": money.micro_to_rub_str(int(p["amount_microrub"])),
                 "status": p["status"],
-                "created_at": p["created_at"],
+                "created_at": _msk(p["created_at"]),   # в БД UTC, клиенту показываем МСК
             }
             for p in pays
         ],
@@ -5658,7 +5708,9 @@ async def account_page(
             # active_tenant — произвольный чужой клиент → на ЛИЧНОМ /account его не выводим
             # (он управляет клиентами в /tenants /subscription). Тариф из глобального service_invoices
             # (без tenant_id/RLS) на /account НЕ показываем — иначе клиент B видел бы тариф клиента A.
-            "wallet": (await _wallet_ctx(session)) if not is_platform else None,
+            "wallet": (
+                await _wallet_ctx(session, await db.get_billing_overview(session.active_tenant_id))
+            ) if not is_platform else None,
             "support_url": _safe_support_url(config.SUPPORT_URL),
             "password_min": config.ACCOUNT_PASSWORD_MIN,
             "name_max": config.ACCOUNT_DISPLAY_NAME_MAX,
@@ -6757,12 +6809,16 @@ async def usage_page(
     ai_blocked = False
     if session.active_tenant_id:
         tid = session.active_tenant_id
-        balance = await db.get_wallet_balance(tid)
-        ai_blocked = await db.is_tenant_ai_blocked(tid)
+        # «Доступно» по той же формуле, что у движка списания: сгоревший пул не считаем.
+        # Раньше здесь было легаси-зеркало balance_microrub — оно показывало деньги,
+        # которых уже нет (обнуление пула ленивое, внутри charge_usage).
+        overview = await db.get_billing_overview(tid)
+        balance = int(overview["available_microrub"])
+        ai_blocked = bool(overview["ai_blocked"])
         for r in await db.list_usage(tid, limit=100):
             units = r["units"] if isinstance(r["units"], dict) else json.loads(r["units"] or "{}")
             rows_ctx.append({
-                "occurred_at": r["occurred_at"],
+                "occurred_at": _msk(r["occurred_at"]),   # в БД UTC, клиенту показываем МСК
                 "kind_label": _USAGE_KIND_LABELS.get(r["kind"], r["kind"]),
                 "volume": _usage_volume(r["kind"], units),
                 "charged": money.micro_to_rub_str(int(r["charged_microrub"])),
