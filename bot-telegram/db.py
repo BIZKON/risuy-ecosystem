@@ -508,15 +508,17 @@ async def is_bot_paused(tg_user_id: int, *, messenger: str = "tg") -> bool:
 
 
 # ── Отписка (152-ФЗ) ─────────────────────────────────────────────────────────
-async def set_unsubscribed(external_id: int, messenger: str = "tg") -> None:
+async def set_unsubscribed(external_id: int, messenger: str = "tg"):
     """Идемпотентная отписка: первый момент фиксируем, повторный /stop не перетирает.
     messenger — канал (C3: vk/max отписываются ключевым словом «стоп»). external_id — id лида
-    В КАНАЛЕ (tg→tg_user_id, vk→vk_user_id, max→max_user_id)."""
+    В КАНАЛЕ (tg→tg_user_id, vk→vk_user_id, max→max_user_id).
+    Возвращает lead_id|None (канон request_erase): None — лида этого канала у тенанта нет,
+    отписывать нечего. Вызывающие вправе результат игнорировать."""
     col = _user_col(messenger)
     async with pool.acquire() as c:
-        await c.execute(
+        return await c.fetchval(
             f"update leads set unsubscribed_at = coalesce(unsubscribed_at, now()) "
-            f"where {col} = $1 and tenant_id = $2",
+            f"where {col} = $1 and tenant_id = $2 returning id",
             external_id, tenant_id(),
         )
 
@@ -1996,8 +1998,9 @@ async def submit_brief(token: str, answers: dict) -> str:
 
 async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
     """Конфиг ИИ демо-тенанта для ВЕБ-чата на сайте (зеркало Telegram-демо): system_prompt + model
-    (gateway-бэкенд). None — демо-тенанта нет или Лия выключена. Бот=owner, RLS обходит; читаем
-    ровно ai_enabled/ai_system_prompt/ai_model демо-тенанта по слагу."""
+    (gateway-бэкенд) + daily_limit (суточный потолок ответов). None — демо-тенанта нет или Лия
+    выключена. Бот=owner, RLS обходит; читаем ровно ai_enabled/ai_system_prompt/ai_model демо-
+    тенанта по слагу."""
     async with pool.acquire() as c:
         rows = await c.fetch(
             "select t.id as tid, s.key, s.value from tenant_settings s "
@@ -2010,11 +2013,26 @@ async def get_demo_chat_cfg(slug: str = "demo-sandbox") -> dict | None:
     kv = {r["key"]: (r["value"] or "") for r in rows}
     if not (kv.get("ai_enabled") or "").strip():
         return None
+    # Суточный потолок ответов: app_settings['demo_chat_daily_limit'] ПОВЕРХ env-дефолта
+    # (правка одним UPDATE, без деплоя) — канон get_effective_guide_url. Чтение изолировано
+    # в СВОЙ try/except: без него любой промах уронил бы весь конфиг в None, а это 503 на
+    # витрине — то есть чтение НАСТРОЙКИ потолка выключало бы демо. daily_limit всегда int
+    # и никогда None: сравнение «cur <= None» в гейте дало бы TypeError → мёртвая витрина.
+    daily_limit = config.DEMO_CHAT_DAILY_LIMIT
+    try:
+        raw = (await get_app_setting("demo_chat_daily_limit") or "").strip()
+        if raw:
+            daily_limit = max(int(raw), 0)
+    except Exception as e:  # noqa: BLE001 — мусор в настройке/сбой чтения → env-дефолт
+        logging.getLogger(__name__).warning(
+            "Не удалось прочитать demo_chat_daily_limit (%s) — беру дефолт %s",
+            e, config.DEMO_CHAT_DAILY_LIMIT)
     return {
         "tid": rows[0]["tid"],          # для веб-эскалации горячего лида (адрес — escalation.resolve)
         "system_prompt": kv.get("ai_system_prompt") or "",
         "model": (kv.get("ai_model") or "").strip(),
         "fallback": kv.get("ai_fallback_text") or "",
+        "daily_limit": daily_limit,
     }
 
 
@@ -2314,6 +2332,81 @@ async def publish_runtime_status(
                     """,
                     key, value,
                 )
+
+
+# ── Суточный потолок публичного демо-чата (дыра C) ────────────────────────────
+# Счётчики ГЛОБАЛЬНЫЕ (не тенант-скоуплены) и лежат в app_settings под суточными ключами
+# UTC — ровно как dadata_quota__<дата> в панели. Бот пишет app_settings owner-ролью (см.
+# блок выше) — грантов не требует. Два измерения: ответы (штуки) и токены (рубли): потолок
+# в штуках без токен-бюджета потолком в деньгах не является — объём одного запроса веб-чата
+# задаёт сам отправитель (история до 24×2000 символов).
+
+async def demo_chat_quota_take(limit: int) -> tuple[bool, int]:
+    """Атомарно берёт слот суточного счётчика ответов веб-демо → (в пределах, новое значение).
+
+    Зеркало admin-panel/db.py::dadata_quota_take (rate-limit ПРОВАЙДЕРА, не биллинг) с одним
+    отличием: возвращаем и само значение. По нему вызывающий ловит РОВНО первый перебор
+    (cur == limit + 1) и шлёт владельцу один алерт в сутки, не делая второго запроса.
+    Один оператор insert … on conflict … returning = атомарность: read-modify-write под
+    параллельными запросами выдавал бы одинаковые номера и пропускал лишние ответы.
+    Ключ demo_chat_quota__<YYYY-MM-DD> (UTC). Счётчик растёт и ПОСЛЕ исчерпания —
+    семантика «попытки» (как у dadata), поэтому по нему видно и объём отказов.
+    Исключение НЕ гасим: сбой записи ≠ исчерпание потолка, вызывающий разводит их в логе."""
+    from datetime import datetime, timezone
+    key = "demo_chat_quota__" + datetime.now(timezone.utc).date().isoformat()
+    async with pool.acquire() as c:
+        cur = await c.fetchval(
+            "insert into app_settings (key, value) values ($1, '1') "
+            "on conflict (key) do update set value = (app_settings.value::int + 1)::text, "
+            "                                updated_at = now() "
+            "returning value::int", key)
+        return cur <= limit, cur
+
+
+async def demo_chat_tokens_add(tokens: int) -> int:
+    """Прибавляет токены к суточному расходу веб-демо → новое значение. Ключ
+    demo_chat_tokens__<YYYY-MM-DD> (UTC), арифметика в bigint (миллионы токенов в сутки).
+
+    tokens может быть ОТРИЦАТЕЛЬНЫМ: перед платным вызовом бот бронирует оценку запроса, а
+    после ответа дописывает дельту «факт минус бронь» (обычно минус) либо снимает бронь
+    целиком, если факта не случилось. Сумма брони и дельты = реальный расход.
+
+    В INSERT-ветке пишем ПРИСЛАННОЕ число, а не литерал: механическая копия
+    dadata_quota_take записала бы '1', и первый запрос суток занизил бы расход до одного
+    токена. В UPDATE-ветке слагаемое берём из excluded.value (канон — publish_runtime_status
+    выше), чтобы параметр встречался в запросе РОВНО один раз: иначе тип $2 выводился бы из
+    двух разных контекстов, и asyncpg мог бы ждать str там, где мы шлём int.
+    greatest(0, …) в UPDATE-ветке — от отрицательного суточного расхода: минус в счётчике
+    читался бы как авария учёта. Остаточный край: если бронь легла в ключ вчерашних суток, а
+    корректировка пришла уже за полночь UTC, новый ключ создаст INSERT-ветка со снятой бронью
+    (минус порядка одного запроса) — первый же положительный add вернёт счётчик в плюс."""
+    from datetime import datetime, timezone
+    key = "demo_chat_tokens__" + datetime.now(timezone.utc).date().isoformat()
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "insert into app_settings (key, value) values ($1, $2) "
+            "on conflict (key) do update set "
+            "    value = greatest(0::bigint, "
+            "                     app_settings.value::bigint + excluded.value::bigint)::text, "
+            "    updated_at = now() "
+            "returning value::bigint", key, str(int(tokens)))
+
+
+async def demo_chat_tokens_used() -> int:
+    """Суточный расход токенов веб-демо. 0 — ключа нет, мусор или сбой чтения.
+
+    Читается ПЕРЕД платным вызовом шлюза, поэтому fail-open нулём: сбой чтения не должен
+    закрывать витрину (потолок по числу ответов при этом продолжает работать)."""
+    from datetime import datetime, timezone
+    key = "demo_chat_tokens__" + datetime.now(timezone.utc).date().isoformat()
+    try:
+        async with pool.acquire() as c:
+            raw = await c.fetchval("select value from app_settings where key = $1", key)
+        return int((raw or "").strip() or 0)
+    except Exception as e:  # noqa: BLE001 — учёт расхода не важнее ответа посетителю
+        logging.getLogger(__name__).warning(
+            "Не удалось прочитать суточный расход токенов демо: %s", e)
+        return 0
 
 
 # ── Трекинг /r/<token>: чтение токена + лог клика (пишет БОТ) ─────────────────

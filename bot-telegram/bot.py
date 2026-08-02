@@ -168,6 +168,20 @@ async def _health(_request: web.Request) -> web.Response:
 # ai.ask_gateway (stateless, контекст в messages[]). Публичный, без сессии. Защита от слива
 # баланса: CORS только для сайта, per-IP rate-limit, кап длины истории/сообщения. Метеринг НЕ
 # списываем (демо, цены модели нет — иначе спам ERROR; ответ важнее учёта).
+#
+# ⚠️ ГРАНИЦА СУТОЧНОГО ПОТОЛКА (дыра C). Потолок ниже (_demo_chat, счётчики в app_settings)
+# закрывает ТОЛЬКО эту веб-витрину. TG-путь демо-тенанта идёт мимо: мультиплекс → ai.ask_ai →
+# ask_gateway + schedule_gateway_capture, и им этот гейт не управляет.
+# Цена размена — считаем честно, на БОЕВЫХ числах (100 ответов в сутки). Минутные лимиты
+# (_CHAT_RL_MAX 20/IP, _CHAT_RL_GLOBAL_MAX 120) живут в памяти процесса и обнуляются каждым
+# редеплоем, а суточный потолок — общий и в БД: флудер выбирает его с ОДНОГО IP примерно за
+# 5 минут (20/мин), а с нескольких IP — меньше чем за минуту (120/мин), после чего витрина
+# до полуночи UTC (03:00 МСК) отвечает «вернусь завтра». До потолка тот же флуд закрывал
+# витрину максимум на минуту (окно рассасывалось само), зато расход денег был неограничен —
+# то есть мы обменяли неограниченный убыток на риск суточной потери витрины. Быстрый возврат
+# витрины — апсерт app_settings без деплоя, рецепт лежит в тексте алерта владельцу ниже.
+# Настоящее лечение — суточный per-IP ключ рядом с общим счётчиком и/или снижение
+# _CHAT_RL_GLOBAL_MAX: TODO(владелец), решение Р3(4). Здесь их нет.
 _DEMO_CHAT_ORIGIN = "https://info.pro-agent-ai.ru"
 _CHAT_RL_WINDOW = 60.0       # окно rate-limit, сек
 _CHAT_RL_MAX = 20            # макс. сообщений с одного IP за окно
@@ -179,32 +193,42 @@ _CHAT_MAX_LEN = 2000         # кап длины одного сообщения
 _chat_rl_hits: dict[str, list[float]] = {}
 
 
-def _rl_allow_chat(ip: str | None) -> bool:
-    """True, если запрос чата в пределах лимитов окна (single-instance, in-memory):
+def _rl_allow_chat(ip: str | None, scope: str = "demo") -> bool:
+    """True, если запрос в пределах лимитов окна (single-instance, in-memory):
     сначала ОБЩИЙ бюджет эндпоинта (защита платного LLM от распределённого спуфа XFF),
     затем per-IP. Порядок проверок: сначала per-IP, и только ПРОШЕДШИЙ per-IP запрос
     засчитывается в общий бюджет — иначе один IP своими же per-IP-отказами исчерпал бы
     общий счётчик и закрыл эндпоинт всем (per-IP-отказы не доходят до LLM, тратить на
-    них общий бюджет незачем)."""
+    них общий бюджет незачем).
+
+    scope разводит бюджеты РАЗНЫХ эндпоинтов ('demo' — веб-чат, 'brief' — публичный приём
+    брифа): раньше оба делили один словарь, и флуд демо-чата выбирал общий бюджет 120/мин,
+    после чего форма брифа ПЛАТЯЩЕГО клиента начинала отдавать 429. С появлением суточного
+    потолка у флудера появился мотив, поэтому бюджеты раздельные. Ключ per-IP строим как
+    '<scope>:<ip>', общий — '<scope>\\x00global': непечатаемый префикс общего ключа не
+    пересекается ни с одним реальным IP (заголовки NUL не переносят)."""
     now = time.monotonic()
+    gkey = scope + _CHAT_RL_GLOBAL_KEY
     # Общий бюджет — проверяем (но НЕ инкрементируем) первым: если исчерпан, дальше не идём.
-    g = [t for t in _chat_rl_hits.get(_CHAT_RL_GLOBAL_KEY, ()) if now - t < _CHAT_RL_WINDOW]
+    g = [t for t in _chat_rl_hits.get(gkey, ()) if now - t < _CHAT_RL_WINDOW]
     if len(g) >= _CHAT_RL_GLOBAL_MAX:
-        _chat_rl_hits[_CHAT_RL_GLOBAL_KEY] = g
+        _chat_rl_hits[gkey] = g
         return False
     if ip:
-        hits = [t for t in _chat_rl_hits.get(ip, ()) if now - t < _CHAT_RL_WINDOW]
+        key = f"{scope}:{ip}"
+        hits = [t for t in _chat_rl_hits.get(key, ()) if now - t < _CHAT_RL_WINDOW]
         if len(hits) >= _CHAT_RL_MAX:
-            _chat_rl_hits[ip] = hits
+            _chat_rl_hits[key] = hits
             return False
         hits.append(now)
-        _chat_rl_hits[ip] = hits
+        _chat_rl_hits[key] = hits
     # Дошли сюда → запрос реально уйдёт в LLM: теперь засчитываем в общий бюджет.
     g.append(now)
-    _chat_rl_hits[_CHAT_RL_GLOBAL_KEY] = g
+    _chat_rl_hits[gkey] = g
     if len(_chat_rl_hits) > 10000:
         for k in list(_chat_rl_hits.keys()):
-            if k != _CHAT_RL_GLOBAL_KEY and all(now - t >= _CHAT_RL_WINDOW for t in _chat_rl_hits[k]):
+            if not k.endswith(_CHAT_RL_GLOBAL_KEY) and all(
+                    now - t >= _CHAT_RL_WINDOW for t in _chat_rl_hits[k]):
                 _chat_rl_hits.pop(k, None)
     return True
 
@@ -264,12 +288,91 @@ def _consent_required(body: dict) -> bool:
     return not bool(isinstance(body, dict) and body.get("consent"))
 
 
+# Текст, который видит посетитель при исчерпанном суточном потолке. Без слов «лимит»/«квота»/
+# «ошибка»: для человека это не авария, а «на сегодня хватит». Контакт — общий («напишите в
+# Telegram»), как в фолбэке ниже. TODO(владелец): точная формулировка и конкретный контакт —
+# решение Р3(3), сюда подставляется без правки логики.
+_DEMO_CAP_TEXT = (
+    "Сегодня демо-Лия уже ответила всем, кто успел зайти — она снова будет на связи завтра 🙂 "
+    "Если вопрос срочный, напишите нам в Telegram: разберём вашу задачу лично."
+)
+
+
+def _demo_cap_payload() -> web.StreamResponse:
+    """Чистое тело отказа по суточному потолку демо (без БД и сети — тестируется напрямую).
+
+    Форма скопирована с гарда согласия: непустой reply + код. Виджет сайта читает data.reply
+    РАНЬШЕ статуса и покажет наш текст; код 'daily_cap' (а НЕ 'rate_limited') нужен, чтобы
+    фронт не подставил своё «подождите минуту» — ждать минуту бесполезно, демо вернётся завтра.
+    _cors обязателен: без заголовка браузер отбросит ответ и посетитель увидит «Связь прервалась»."""
+    return _cors(web.json_response({"error": "daily_cap", "reply": _DEMO_CAP_TEXT}, status=429))
+
+
+# Оценка запроса, которая БРОНИРУЕТСЯ до платного вызова (см. _demo_reserve_tokens).
+_DEMO_CHARS_PER_TOKEN = 2    # пессимистично: у русского текста в BPE ~2-3 символа на токен
+_DEMO_RESERVE_OUT = 1000     # запас на ответ: max_tokens шлюзу не шлём, длину задаёт модель
+
+
+def _demo_reserve_tokens(system_prompt: str | None, history: list[dict] | None, text: str) -> int:
+    """Оценка токенов запроса к шлюзу — её бронируем ДО вызова, факт дописываем ПОСЛЕ.
+
+    Зачем бронь. Гейт бюджета читает суточный расход ПЕРЕД платным вызовом, а факт
+    приходит через секунды ПОСЛЕ ответа шлюза: без брони все запросы, стартовавшие внутри
+    этого окна, проходят гейт по одному и тому же устаревшему числу (read-before/write-after),
+    и суточный бюджет срабатывает с задержкой на время полёта параллельных запросов. Бронь
+    схлопывает окно с «время ответа модели» до «два запроса в БД»: следующий посетитель уже
+    видит забронированный расход. Остаточная неточность — разница оценки и факта на запросах,
+    летящих ОДНОВРЕМЕННО, а не весь трафик за время полёта.
+
+    Считаем ВЕСЬ payload шлюза (ai._build_chat_messages): system-промпт демо-тенанта тоже
+    оплачивается и легко весит десятки тысяч символов. Пере-оценка ничего не стоит (её
+    снимет корректировка фактом), недо-оценка стоит денег → делим на 2 символа на токен,
+    а не на 3, и добавляем запас на ответ."""
+    chars = len(system_prompt or "") + len(text or "")
+    for h in history or []:
+        chars += len((h.get("content") or "") if isinstance(h, dict) else "")
+    return chars // _DEMO_CHARS_PER_TOKEN + _DEMO_RESERVE_OUT
+
+
+# Разовость алертов владельцу по поводам, которые могут повторяться каждым запросом
+# (образец — рейт-лимит _PRICE_WARN_INTERVAL/_price_warned в ai.py). Алерт «потолок пройден»
+# в этом словаре не нуждается: он висит на РОВНО одном значении счётчика за сутки.
+_DEMO_ALERT_INTERVAL = 3600.0
+_demo_alert_sent: dict[str, float] = {}
+
+
+def _demo_alert_allow(reason: str, interval: float = _DEMO_ALERT_INTERVAL) -> bool:
+    """True, если сигнал владельцу по этому поводу можно слать сейчас (реже interval).
+    Память процессная (как _price_warned): редеплой сбрасывает — сигнал повторится, это лучше
+    молчания."""
+    now = time.monotonic()
+    if now - _demo_alert_sent.get(reason, 0.0) < interval:
+        return False
+    _demo_alert_sent[reason] = now
+    return True
+
+
+async def _notify_owner_safe(text: str) -> None:
+    """Сигнал владельцу существующим каналом platform_notify (его дренаж уже крутится в
+    worker.run). Никогда не бросает: сигнал не важнее ответа посетителю. Если owner_chat_id
+    не задан или не число — громкий logger.error, иначе алерт растворился бы молча."""
+    try:
+        raw = (await db.get_owner_chat_id() or "").strip()
+        if not raw.lstrip("-").isdigit():
+            logger.error("demo-chat: owner_chat_id не задан/не число (%r) — алерт НЕ доставлен: %s",
+                         raw, text)
+            return
+        await db.enqueue_platform_notify(int(raw), text)
+    except Exception:  # noqa: BLE001 — очередь уведомлений не должна ронять ответ витрины
+        logger.warning("demo-chat: алерт владельцу не поставлен в очередь", exc_info=True)
+
+
 async def _demo_chat(request: web.Request) -> web.StreamResponse:
     """POST /api/demo-chat: тело {messages:[{role,content}...]} (последнее — текущий вопрос user).
     Возвращает {reply}. Любая ошибка → мягкий JSON (не 5xx-утечка). OPTIONS → preflight."""
     if request.method == "OPTIONS":
         return _cors(web.Response(status=204))
-    if not _rl_allow_chat(_client_ip(request)):
+    if not _rl_allow_chat(_client_ip(request), "demo"):
         return _cors(web.json_response({"error": "rate_limited"}, status=429))
     try:
         body = await request.json()
@@ -301,14 +404,113 @@ async def _demo_chat(request: web.Request) -> web.StreamResponse:
         cfg = None
     if cfg is None:
         return _cors(web.json_response({"error": "demo_off"}, status=503))
+    # ── Суточный потолок демо (дыра C) ────────────────────────────────────────
+    # Место выбрано жёстко: ПОСЛЕ проверки «демо включено» (иначе выключенное демо жгло бы
+    # счётчик) и РОВНО перед единственной платной строкой ask_gateway (позже — деньги уже
+    # потрачены). Сначала бюджет токенов (рубли), затем слот ответа (штуки).
+    #
+    # Что именно ограничивает каждый из двух потолков — честно:
+    #   • DEMO_CHAT_DAILY_LIMIT — число ОТВЕТОВ. Цена одного ответа им не ограничена: объём
+    #     запроса задаёт отправитель (история до _CHAT_MAX_MESSAGES × _CHAT_MAX_LEN символов
+    #     плюс system-промпт тенанта), разброс цены слота — порядок величины.
+    #   • DEMO_CHAT_DAILY_TOKENS — собственно рубли. Читается fail-open (0 при любом промахе),
+    #     поэтому сбой чтения не закрывает витрину; сам гейт read-before, но перед платным
+    #     вызовом оценка запроса БРОНИРУЕТСЯ (_demo_reserve_tokens) и корректируется фактом
+    #     после ответа — иначе бюджет срабатывал бы с задержкой на время полёта параллельных
+    #     запросов, и «потолок в токенах» им бы не был.
+    # Итого суточный расход ограничен минимумом из двух: бюджета токенов и
+    # DEMO_CHAT_DAILY_LIMIT × цена самого дорогого запроса.
+    if config.DEMO_CHAT_DAILY_TOKENS > 0:
+        used_tokens = await db.demo_chat_tokens_used()
+        if used_tokens >= config.DEMO_CHAT_DAILY_TOKENS:
+            logger.warning("demo-chat: суточный бюджет токенов выбран (%s из %s) — отвечаем текстом потолка",
+                           used_tokens, config.DEMO_CHAT_DAILY_TOKENS)
+            # Не чаще раза в сутки: бюджет токенов, в отличие от потолка ответов, не имеет
+            # «ровно одного» момента перебора — без этого владелец получал бы алерт на
+            # каждый запрос до полуночи UTC.
+            if _demo_alert_allow("tokens", interval=86400.0):
+                await _notify_owner_safe(
+                    f"⛔️ Демо-чат на сайте: за сутки израсходовано {used_tokens} токенов из "
+                    f"{config.DEMO_CHAT_DAILY_TOKENS} — витрина отвечает текстом «вернусь завтра».")
+            return _demo_cap_payload()
+    try:
+        within, used = await db.demo_chat_quota_take(cfg["daily_limit"])
+    except Exception:  # noqa: BLE001 — сбой ЗАПИСИ счётчика ≠ исчерпание потолка
+        # Новый режим отказа: конфиг демо — чтение, счётчик — запись. При деградации записи
+        # демо раньше продолжало работать, теперь закрывается. Разводим в логе и в алерте,
+        # чтобы владелец не искал «кто выбрал потолок», когда потолок ни при чём.
+        logger.error("demo-chat: слот суточного счётчика не взят — демо закрыто СБОЕМ БД, "
+                     "а не потолком", exc_info=True)
+        if _demo_alert_allow("db"):
+            await _notify_owner_safe(
+                "⚠️ Демо-чат на сайте закрыт СБОЕМ БД (не потолком): не удалось взять слот "
+                "суточного счётчика. Посетители видят текст «вернусь завтра».")
+        return _demo_cap_payload()
+    if not within:
+        logger.warning("demo-chat: суточный потолок ответов пройден (%s при потолке %s)",
+                       used, cfg["daily_limit"])
+        # Алерт ровно на ПЕРВОМ переборе за сутки. При daily_limit=0 (kill-switch) условие
+        # used == limit + 1 истинно каждый день на первом же запросе — владелец получал бы
+        # ложный сигнал ежедневно, поэтому выключённый потолок молчит.
+        if cfg["daily_limit"] > 0 and used == cfg["daily_limit"] + 1:
+            # Рецепт подъёма — АПСЕРТ, не UPDATE: ключ demo_chat_daily_limit никто не создаёт
+            # (в коде он только читается), на чистой базе UPDATE тронул бы 0 строк, psql
+            # ответил бы «UPDATE 0», и владелец решил бы, что потолок поднят, а витрина
+            # осталась бы закрытой до полуночи UTC.
+            await _notify_owner_safe(
+                f"⛔️ Демо-чат на сайте выбрал суточный потолок ответов ({cfg['daily_limit']}). "
+                "До конца суток (UTC) витрина отвечает текстом «вернусь завтра». "
+                "Поднять потолок без деплоя: insert into app_settings (key, value) values "
+                "('demo_chat_daily_limit','<N>') on conflict (key) do update set "
+                "value = excluded.value, updated_at = now();")
+        return _demo_cap_payload()
+    # Бронь оценки ДО платного вызова. Пишем ДО ask_gateway намеренно: перенос этой строки
+    # ниже вернёт read-before/write-after — параллельные запросы снова проходили бы гейт по
+    # устаревшему числу. При выключенном бюджете (DEMO_CHAT_DAILY_TOKENS = 0) брони нет:
+    # счётчик расхода тогда чисто наблюдательный и пишется одним фактом после ответа.
+    # Системный промпт считаем ОДИН раз и оцениваем ровно тот, что уйдёт в шлюз: иммунитет
+    # (_with_immunity) — это ещё ~500 символов, которые тоже оплачиваются.
+    _system = ai._with_immunity(cfg["system_prompt"])
+    _reserved = 0
+    if config.DEMO_CHAT_DAILY_TOKENS > 0:
+        try:
+            _reserved = _demo_reserve_tokens(_system, history, text)
+            await db.demo_chat_tokens_add(_reserved)
+        except Exception:  # noqa: BLE001 — бронь не важнее ответа: учтём расход фактом
+            logger.warning("demo-chat: бронь токенов не поставлена — учтём расход фактом",
+                           exc_info=True)
+            _reserved = 0
     try:
         answer, _meta = await ai.ask_gateway(
-            text, model=cfg["model"], system_prompt=ai._with_immunity(cfg["system_prompt"]),
+            text, model=cfg["model"], system_prompt=_system,
             fallback=cfg.get("fallback"), history=history,
         )
     except Exception:  # noqa: BLE001 — сеть/шлюз: не роняем, мягкий ответ
         logger.warning("demo-chat: ask_gateway упал", exc_info=True)
-        answer = "Извините, не получилось ответить. Попробуйте ещё раз или напишите нам в Telegram."
+        # _meta присваиваем ЗДЕСЬ же: без этого любое чтение _meta ниже (учёт токенов) дало бы
+        # UnboundLocalError → 500 БЕЗ CORS-заголовков → браузер отбросит ответ, и посетитель
+        # увидит «Связь прервалась» ровно в момент аварии шлюза.
+        answer, _meta = ("Извините, не получилось ответить. Попробуйте ещё раз или напишите "
+                         "нам в Telegram."), None
+    # Сверка брони с фактом. Пишем ДЕЛЬТУ (может быть отрицательной: оценка обычно выше
+    # факта), сумма брони и дельты = реальный расход. Наблюдательная запись — на ответ
+    # посетителю не влияет, поэтому best-effort в своём try/except, как персистенция
+    # веб-лида ниже.
+    try:
+        _usage = _meta.get("usage") if isinstance(_meta, dict) else None
+        if isinstance(_usage, dict):
+            _spent = int(_usage.get("prompt_tokens") or 0) + int(_usage.get("completion_tokens") or 0)
+            _delta = _spent - _reserved
+            if _delta:
+                await db.demo_chat_tokens_add(_delta)
+        elif _reserved:
+            # Факта нет (шлюз упал, отдал не-200 или фолбэк без usage) — бронь СНИМАЕМ.
+            # Держать её значило бы закрывать витрину бюджетом из-за поломки шлюза: в этих
+            # ветках деньги почти всегда не потрачены вовсе, а счётчик должен оставаться
+            # картиной реального расхода (по нему владелец смотрит рубли).
+            await db.demo_chat_tokens_add(-_reserved)
+    except Exception:  # noqa: BLE001
+        logger.warning("demo-chat: суточный расход токенов не сверен с фактом", exc_info=True)
     # Веб-чат идёт МИМО ai.ask_ai (он зовёт ask_gateway напрямую), а служебные маркеры вырезает
     # именно ask_ai → делаем это ЗДЕСЬ: посетитель сайта НИКОГДА не должен увидеть сырой
     # [[ESCALATE]]/[[TRIGGER:N]]. При маркере эскалации — карточка горячего лида в TG-группу
@@ -489,7 +691,9 @@ async def _brief_submit(request: web.Request) -> web.StreamResponse:
     if not _BRIEF_TOKEN_RE.match(token):
         return web.Response(status=404, text="Ссылка недействительна")
     ip = _client_ip(request)
-    if not _rl_allow_chat(ip):
+    # Бакет 'brief' отдельный от 'demo': флуд публичного демо-чата не должен закрывать приём
+    # брифа платящего клиента (раньше оба эндпоинта делили один общий бюджет 120/мин).
+    if not _rl_allow_chat(ip, "brief"):
         return web.Response(status=429, text="Слишком много попыток, попробуйте позже")
     post = await request.post()
     answers = _brief_parse(list(post.items()))
