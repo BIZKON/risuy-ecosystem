@@ -123,6 +123,24 @@
 - [ ] `pricing_smoke.py`: для каждой активной пары provider/model в usage-путях есть строка; эмбеддинг не пропускается.
 - [ ] RED → вписать цены (по данным из ЛК) → dev→прод по «да» → GREEN. Коммит.
 
+> **Отступление от плана (этап 0, 02.08.2026).** Файл `db/migrate_model_prices_leaks.sql` НЕ создавался.
+> Вместо него: эмбеддер закрыт отдельным `db/migrate_model_prices_embedder.sql` (применён, строка
+> `timeweb-tei/multilingual-e5-base` на проде есть), шлюз — новым `db/migrate_model_prices_gateway.sql`
+> (написан, НЕ применён: ждёт цену владельца из ЛК Timeweb; psql падает без `-v price_in`/`-v price_out`).
+> Слаг модели передаётся параметром `-v model_slug` и обязан совпасть с тем, что печатает ШЛЮЗ в поле
+> `model` ответа (`bot-telegram/ai.py:267` отдаёт приоритет модели из ответа, а не запрошенной);
+> у единственного gateway-тенанта (demo-sandbox) запрошенная модель — `deepseek/deepseek-v4-flash`.
+> `effective_from` задаётся ЯВНОЙ меткой `-v ef`, а не `now()`: иначе повторный прогон плодит вторую
+> строку, и она вытесняет первую (читатель берёт максимальный `effective_from`).
+>
+> **Объём «все модели в обороте» закрыт НЕ полностью.** Осталось открытым: модель агентов
+> `timeweb-cloud-ai` вне реестра `tenant_agents` (расход не метрируется вовсе), публичный веб-виджет
+> `/api/demo-chat` (capture не вызывается сознательно — `bot-telegram/bot.py:169`; вместо метеринга
+> введён суточный потолок), gateway-ветка `ai.summarize_dialog` (capture не ставится — мина при
+> включении памяти), брифинг-оркестратор панели (ходит в шлюз своим ключом, тенанта на тот момент нет).
+> Живая проверка 02.08: за 27.07–01.08 в логах бота НЕТ строк «нет цены модели» — значит
+> `_capture_gateway_usage` не звался ни разу и до первого gateway-диалога дыра не течёт.
+
 ### T-1D-2 · Тарифицировать эмбеддинги/RAG (`kind='embedding'`)
 **Files:** modify `bot-telegram/kb.py`, `bot-telegram/multiplex.py`, `bot-telegram/memory.py`, `bot-telegram/handlers.py`, `admin-panel/kb.py`, `admin-panel/app.py`
 **Interfaces:** обернуть точки эмбеддинга `charge_usage(conn, tenant_id, cost_microrub, {kind:'embedding', resource:'embedding', provider, model, units:{tokens}}, idempotence_key='emb:{tenant}:{kind}:{hash}', allow_negative=True)`: `kb.py:59/64` (multiplex.py:254-257, handlers.py:942, memory.py:56/117), `admin-panel/kb.py:110` (app.py:4838). `cost_microrub` из `model_prices` эмбеддера × токены. Потребляет T-1D-1, T-1B-2.
