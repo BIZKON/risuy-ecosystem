@@ -87,11 +87,10 @@ def get_channel_bot(tenant_id, messenger: str):
     return h["bot"] if h else None
 
 
-# ── Тенант-роутер (v1: только Лия) ───────────────────────────────────────────
-tenant_router = Router()
-
-
-@tenant_router.message(Command("start", ignore_case=True))
+# ── Хендлеры тенант-бота ─────────────────────────────────────────────────────
+# Объявлены БЕЗ декораторов: регистрирует их фабрика build_tenant_router() (в конце блока).
+# Так порядок проверки фильтров виден одним списком в одном месте — а в aiogram именно
+# порядок решает, кто поймает апдейт (см. комментарий в фабрике).
 async def t_start(message: Message) -> None:
     """Тенант-бот /start. Если у тенанта включена воронка выдачи лид-магнита (конструктор в
     панели, funnel_enabled) — ведём её: приветствие+согласие → телефон/гейт → выдача. Иначе v1:
@@ -117,7 +116,6 @@ async def t_start(message: Message) -> None:
     )
 
 
-@tenant_router.callback_query(F.data == "consent_yes")
 async def t_consent(cb: CallbackQuery) -> None:
     """Согласие 152-ФЗ в тенант-воронке → set_consent → следующий шаг (телефон/гейт/выдача).
     DB-state-driven (без FSM). На паузе оператора — молчим; воронка выключена — no-op; лид уже
@@ -141,7 +139,6 @@ async def t_consent(cb: CallbackQuery) -> None:
     await funnel.after_consent(funnel_channels.TgFunnelChannel(cb.bot, cb.from_user.id), cfg)
 
 
-@tenant_router.message(F.contact)
 async def t_contact(message: Message) -> None:
     """Телефон (кнопка «Поделиться номером») в тенант-воронке → set_phone → гейт/выдача."""
     if await db.is_bot_paused(message.from_user.id):
@@ -160,7 +157,6 @@ async def t_contact(message: Message) -> None:
     await funnel.after_phone(funnel_channels.TgFunnelChannel(message.bot, message.from_user.id), cfg)
 
 
-@tenant_router.callback_query(F.data == "check_sub")
 async def t_check_sub(cb: CallbackQuery) -> None:
     """Проверка подписки на канал тенанта (гейт). Подписан → выдача; иначе alert. Fail-closed."""
     if await db.is_bot_paused(cb.from_user.id):
@@ -182,7 +178,6 @@ async def t_check_sub(cb: CallbackQuery) -> None:
         await cb.answer(funnel.NOT_SUBSCRIBED_ALERT, show_alert=True)
 
 
-@tenant_router.message(Command("revoke", ignore_case=True))
 async def t_revoke(message: Message) -> None:
     """Отзыв согласия на обработку ПДн субъектом (152-ФЗ ст.9 ч.2 — «в любой момент»): ставит
     erase_requested_at + unsubscribed_at + пишет consent_events('revoked'). Обезличивание — retention-cron
@@ -191,7 +186,49 @@ async def t_revoke(message: Message) -> None:
     await messaging.send_text(message.bot, message.from_user.id, texts.REVOKE_OK, source="system")
 
 
-@tenant_router.message(F.text)
+async def _unsub_reply_text() -> str:
+    """Текст подтверждения отписки с почтой оператора ТЕКУЩЕГО тенанта (contextvar tenant_id).
+    Реквизиты воронки могут быть не заполнены (operator_email=None) — тогда текст без почты, но
+    с /revoke. Сбой чтения настроек не должен съесть подтверждение отписки → фолбэк без почты."""
+    try:
+        email = (await db.get_funnel_config(db.tenant_id())).get("operator_email")
+    except Exception:  # noqa: BLE001 — подтверждение отписки важнее реквизита
+        logger.warning("multiplex: не прочитал реквизиты воронки для текста отписки", exc_info=True)
+        email = None
+    return texts.unsubscribed_ok(email)
+
+
+async def t_unsub(cb: CallbackQuery) -> None:
+    """Inline-кнопка «Отписаться» в футере рассылки тенанта (messaging.broadcast_markup,
+    callback_data='unsub'). До этого фикса кнопка была мёртвой у ВСЕХ тенант-ботов: обработчик
+    жил только у Школы (handlers.on_unsub), а её роутер в диспетчер тенанта не включается.
+
+    Отписка ≠ отзыв согласия (/revoke): прекращаются рассылки и авто-касания, обработка ПДн
+    продолжается, consent_events НЕ пишем. Гейтов (пауза оператора / erase / провенанс) здесь
+    нет сознательно: аутбаунд-лид обязан иметь возможность отказаться, иначе fail-closed-гейт
+    превращается в ловушку. Идемпотентно (coalesce в db.set_unsubscribed)."""
+    await cb.answer()   # первым действием: часы на кнопке гаснут сразу, нет «query is too old»
+    # Паритет с VK/MAX: волеизъявление лида видно в переписке. На callback_query LoggingMiddleware
+    # не висит (multiplex вешает её только на message) → логируем сами.
+    await db.log_message(tg_user_id=cb.from_user.id, direction="in", text="[кнопка «Отписаться»]")
+    await db.set_unsubscribed(cb.from_user.id)
+    await messaging.send_text(cb.bot, cb.from_user.id, await _unsub_reply_text(), source="system")
+
+
+async def t_stop(message: Message) -> None:
+    """Отписка командой /stop ИЛИ словом «СТОП» текстом (регистрируется дважды: Command и
+    F.text.func(_is_unsub) — см. build_tenant_router). Слово закрывает паритет с VK/MAX: раньше
+    «СТОП» в тенант-боте TG уходил в Лию, то есть в платный вызов LLM вместо отписки.
+
+    upsert_start НЕ зовём: не заводим запись ПДн на человека, который просит его не трогать.
+    В VK/MAX так было исторически (upsert стоял ПЕРЕД веткой отписки) — выровнено тем же
+    релизом: там лид создаётся ниже веток волеизъявления. Подтверждаем всегда, как /stop Школы;
+    отдельный текст «нечего отписывать» — решение владельца (Р5.3), сейчас не вводим."""
+    await db.set_unsubscribed(message.from_user.id)
+    await messaging.send_text(
+        message.bot, message.from_user.id, await _unsub_reply_text(), source="system")
+
+
 async def t_text(message: Message, bot: Bot) -> None:
     """Свободный текст → ответ Лии тенанта (AI из tenant_settings) + метеринг.
 
@@ -301,7 +338,6 @@ async def t_text(message: Message, bot: Bot) -> None:
             lead_key=str(message.from_user.id))
 
 
-@tenant_router.message(F.document)
 async def t_document(message: Message, bot: Bot) -> None:
     """Слой B: документ от лида тенанта → триггер типа documents (если настроен у тенанта)."""
     if await db.is_bot_paused(message.from_user.id):     # перехват оператора (как t_text/Школа)
@@ -364,10 +400,21 @@ def _shop_markup(products: list[dict]) -> InlineKeyboardMarkup:
     ])
 
 
-@tenant_router.message(Command("shop", ignore_case=True))
 async def t_shop(message: Message, bot: Bot) -> None:
     """Витрина тенанта (TG): активные оферы с кнопками «Купить». Доступно, когда тенант подключил
-    кассу (shop_yookassa_* в vault, раздел «Продукты»). Лид создаётся, как при /start."""
+    кассу (shop_yookassa_* в vault, раздел «Продукты»). Лид создаётся, как при /start.
+
+    Гейты стоят ДО upsert_start и как у остальных отвечающих хендлеров тенанта: команда была
+    мёртвой (регистрировалась ниже catch-all t_text), фикс порядка открыл её у ВСЕХ тенант-ботов
+    одним деплоем — поверхность обязана подчиняться общим правилам, а не появляться с дырой.
+    Послаблений «как у отписки» здесь нет: витрина с платёжной ссылкой — продающий экран, а не
+    волеизъявление субъекта, поэтому отозвавшему согласие её не показываем и запись ПДн (upsert)
+    на него не трогаем (в VK/MAX ветка продаж и так стоит НИЖЕ erase-гейта)."""
+    if await db.is_bot_paused(message.from_user.id):     # перехват оператора (как t_start/t_text)
+        return
+    # Субъект отозвал согласие → бот молчит (стоп-обработка ПДн, 152-ФЗ), как t_text и VK/MAX.
+    if await db.is_erase_requested(message.from_user.id):
+        return
     try:
         await db.upsert_start(tg_user_id=message.from_user.id, source="other")
     except Exception:  # noqa: BLE001 — лид не критичен для показа витрины
@@ -388,7 +435,6 @@ async def t_shop(message: Message, bot: Bot) -> None:
         source="system", reply_markup=_shop_markup(products))
 
 
-@tenant_router.callback_query(F.data.startswith("buy:"))
 async def t_buy(cb: CallbackQuery, bot: Bot) -> None:
     """Клик «Купить» у тенант-бота (TG) → платёж ЮKassa на КАССУ ТЕНАНТА → ссылка «Перейти к
     оплате». Логика — общая _make_pay_url (messenger='tg'). Подтверждение ловит вебхук панели."""
@@ -412,6 +458,41 @@ async def t_buy(cb: CallbackQuery, bot: Bot) -> None:
     ])
     await messaging.send_text(
         bot, cb.from_user.id, texts.pay_message(product), source="system", reply_markup=pay_kb)
+
+
+# ── Фабрика тенант-роутера ───────────────────────────────────────────────────
+def build_tenant_router() -> Router:
+    """НОВЫЙ Router на КАЖДЫЙ Dispatcher тенанта.
+
+    Модульный синглтон здесь был блокером второго тенант-бота: aiogram 3 на повторном
+    include того же Router в другой Dispatcher бросает RuntimeError «Router is already
+    attached» (проверено на 3.30). Вызов стоит в _run_tenant → таска второго тенанта падала
+    бы сразу, а _reconcile поднимал её заново каждые 60 с. На проде тенант-бот пока один,
+    поэтому дыра не проявлялась.
+
+    ⚠️ ПОРЯДОК РЕГИСТРАЦИИ = порядок проверки фильтров. Хендлер НИЖЕ catch-all F.text (t_text)
+    недостижим: t_text на '/'-текст просто возвращает None, а aiogram считает апдейт
+    обработанным и дальше не идёт. Так молча умер /shop — команды и отписку словом держим
+    ВЫШЕ t_text, а t_text регистрируем последним.
+    """
+    r = Router()
+    # Команды (все — выше catch-all).
+    r.message.register(t_start, Command("start", ignore_case=True))
+    r.message.register(t_revoke, Command("revoke", ignore_case=True))
+    r.message.register(t_stop, Command("stop", ignore_case=True))
+    r.message.register(t_shop, Command("shop", ignore_case=True))
+    # Отписка словом «СТОП» — ФИЛЬТРОМ, а не проверкой в теле: хендлер с ранним return съел бы
+    # ВЕСЬ текст (пропагация на нём заканчивается) и Лия замолчала бы у всех тенантов.
+    r.message.register(t_stop, F.text.func(_is_unsub))
+    r.message.register(t_contact, F.contact)
+    r.message.register(t_document, F.document)
+    r.message.register(t_text, F.text)          # catch-all — строго последним
+    # Callback-кнопки (фильтры не пересекаются, порядок значения не имеет).
+    r.callback_query.register(t_unsub, F.data == "unsub")   # == callback_data в messaging.broadcast_markup
+    r.callback_query.register(t_consent, F.data == "consent_yes")
+    r.callback_query.register(t_check_sub, F.data == "check_sub")
+    r.callback_query.register(t_buy, F.data.startswith("buy:"))
+    return r
 
 
 # ── contextvar tenant_id per-update ──────────────────────────────────────────
@@ -513,8 +594,11 @@ async def _run_tenant(tenant_id, bot: Bot) -> None:
     # к БД без tenant_id (заказ/продукт/креды кассы ушли бы не тому тенанту или упали).
     dp.callback_query.outer_middleware(_TenantContextMiddleware(tenant_id))
     dp.message.outer_middleware(messaging.LoggingMiddleware())  # лог входящих (tenant_id из contextvar)
-    dp.include_router(tenant_router)
     try:
+        # Внутри try сознательно: сбой сборки/включения роутера иначе гасит таску МОЛЧА
+        # (_stop_tenant глотает исключение), и тенант-бот перезапускался бы каждые 60 с без
+        # единой строки в логе. Роутер — свой на каждый Dispatcher (см. build_tenant_router).
+        dp.include_router(build_tenant_router())
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except asyncio.CancelledError:
@@ -559,12 +643,18 @@ async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, p
     эскалация). tenant-контекст ставим ЯВНО (VK-поллер не идёт через aiogram-middleware)."""
     token = db.current_tenant_id.set(tenant_id)
     try:
-        await db.upsert_start(from_id, source="vk", messenger="vk")
         # C3: отписка от рассылок по слову «СТОП» (футер VK/MAX-рассылки). До продаж/Лии.
+        # ⚠️ ВЫШЕ upsert_start (152-ФЗ, паритет с TG t_stop): не заводим и не обновляем запись ПДн
+        # на человека, который просит его не трогать. Лида может не быть вовсе — тогда
+        # set_unsubscribed вернёт None (отписывать нечего), а строка лога ляжет с lead_id=NULL
+        # (колонка nullable; в TG t_stop подтверждение логируется ровно так же).
         if _is_unsub(text):
             await db.log_message(tg_user_id=from_id, messenger="vk", direction="in", text=text)
             await db.set_unsubscribed(from_id, messenger="vk")
-            await vkbot.send(peer_id, texts.UNSUBSCRIBED_OK)
+            # Тенант-нейтральный текст с почтой ЭТОГО тенанта (школьная константа слала лиду
+            # чужого тенанта почту Школы). Реквизиты читаем внутри ветки — get_funnel_config
+            # ниже по коду сюда не доезжает.
+            await vkbot.send(peer_id, await _unsub_reply_text())
             return
         # 152-ФЗ: воронка/согласие ДО продаж и Лии. Отзыв обрабатываем в любой момент.
         if funnel.is_revoke(text):
@@ -573,6 +663,9 @@ async def _vk_respond(vkbot, tenant_id, from_id: int, peer_id: int, text: str, p
             return
         if await db.is_erase_requested(from_id, messenger="vk"):
             return  # субъект отозвал согласие → молчим
+        # Лид (инбаунд-opt-in) — ПОСЛЕ веток волеизъявления: отписка/отзыв/«уже отозвал» записи ПДн
+        # не создают и updated_at не двигают. Дальше по коду лид нужен воронке и продажам.
+        await db.upsert_start(from_id, source="vk", messenger="vk")
         fcfg = await db.get_funnel_config(tenant_id)
         if fcfg["enabled"] and funnel.requisites_filled(fcfg):
             lead = await db.get_lead_snapshot(from_id, messenger="vk") or {}
@@ -762,13 +855,16 @@ async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str)
     идентичность лида = user_id (→ leads.max_user_id), отвечаем на chat_id (≠ user_id в личке)."""
     token = db.current_tenant_id.set(tenant_id)
     try:
-        await db.upsert_start(user_id, source="max", messenger="max")
-        await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
         # C3: отписка от рассылок по слову «СТОП» (футер VK/MAX-рассылки). До продаж/Лии.
+        # ⚠️ ВЫШЕ upsert_start/note_max_chat_id (152-ФЗ, паритет с TG t_stop): не заводим запись ПДн
+        # и не сохраняем адрес ответа человеку, который просит его не трогать. Отвечаем на chat_id
+        # из апдейта, из БД он тут не нужен. Нет лида → set_unsubscribed вернёт None, лог ляжет
+        # с lead_id=NULL (колонка nullable, как в TG).
         if _is_unsub(text):
             await db.log_message(tg_user_id=user_id, messenger="max", direction="in", text=text)
             await db.set_unsubscribed(user_id, messenger="max")
-            await maxbot.send(chat_id, texts.UNSUBSCRIBED_OK)
+            # Тенант-нейтральный текст с почтой ЭТОГО тенанта (см. VK-ветку).
+            await maxbot.send(chat_id, await _unsub_reply_text())
             return
         # 152-ФЗ: воронка/согласие до продаж и Лии. Отзыв — в любой момент.
         if funnel.is_revoke(text):
@@ -777,6 +873,10 @@ async def _max_respond(maxbot, tenant_id, user_id: int, chat_id: int, text: str)
             return
         if await db.is_erase_requested(user_id, messenger="max"):
             return  # субъект отозвал согласие → молчим
+        # Лид и адрес ответа — ПОСЛЕ веток волеизъявления (см. VK): отписка/отзыв/«уже отозвал»
+        # записи ПДн не создают. Дальше по коду лид нужен воронке, витрине и Лие.
+        await db.upsert_start(user_id, source="max", messenger="max")
+        await db.note_max_chat_id(user_id, chat_id)   # C3: адрес ответа MAX (≠ user_id в личке)
         fcfg = await db.get_funnel_config(tenant_id)
         if fcfg["enabled"] and funnel.requisites_filled(fcfg):
             lead = await db.get_lead_snapshot(user_id, messenger="max") or {}

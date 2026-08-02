@@ -52,8 +52,12 @@ async def main() -> None:
     try:
         # ── 0. TG-инвариант аудитории (чистая проверка, без БД) ──
         print("0. _audience_where:")
+        # Хвост «and provenance = 'inbound_optin'» — часть неотменяемого фильтра (152-ФЗ, путь 6):
+        # аутбаунд-лиду без opt-in рассылку не шлём. Ожидание пинит db._audience_where побайтово
+        # (сам фильтр не трогаем — он побайтово синхронизирован с панелью).
         expected_tg = ("messenger = 'tg' and tg_user_id is not null and consent = true "
-                       "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false")
+                       "and unsubscribed_at is null and erase_requested_at is null and bot_paused = false "
+                       "and provenance = 'inbound_optin'")
         check("tg байт-в-байт прежняя строка", db._audience_where("tg") == expected_tg, db._audience_where("tg"))
         check("vk → vk_user_id is not null", "vk_user_id is not null" in db._audience_where("vk"))
         check("max → max_chat_id is not null (адрес ответа)", "max_chat_id is not null" in db._audience_where("max"))
