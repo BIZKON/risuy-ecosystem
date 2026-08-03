@@ -19,10 +19,14 @@ alter table tenant_agents enable row level security;
 do $$ begin
     if not exists (select 1 from pg_policies
                    where tablename = 'tenant_agents' and policyname = 'tenant_isolation') then
+        -- nullif обязателен: после RESET ALL значение GUC становится ПУСТОЙ СТРОКОЙ, а ''::uuid
+        -- даёт 22P02 посреди транзакции вместо «0 строк» (канон — schema_team_agents.sql).
+        -- Живым базам политику чинит db/migrate_tenant_agents_rls_nullif.sql; здесь — чтобы
+        -- чистая инсталляция не воспроизвела ту же ловушку.
         create policy tenant_isolation on tenant_agents
             for all
-            using (tenant_id = current_setting('app.tenant_id', true)::uuid)
-            with check (tenant_id = current_setting('app.tenant_id', true)::uuid);
+            using (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid)
+            with check (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid);
     end if;
 end $$;
 

@@ -64,11 +64,11 @@ async def main():
         adb.set_active_tenant(str(ta))
         await adb.upsert_team_agent(ta, slug="sales", name="Продажи", role_preset="mark",
                                     system_prompt="p-sales", escalation_chat_id="", escalation_topic_id=None,
-                                    is_orchestrator=False, memory_enabled=False,
+                                    is_orchestrator=False, memory_enabled=False, kb_enabled=False,
                                     actor="smoke", ip=None, user_agent=None)
         await adb.upsert_team_agent(ta, slug="support", name="Поддержка", role_preset=None,
                                     system_prompt="p-support", escalation_chat_id="", escalation_topic_id=None,
-                                    is_orchestrator=False, memory_enabled=False,
+                                    is_orchestrator=False, memory_enabled=False, kb_enabled=False,
                                     actor="smoke", ip=None, user_agent=None)
         rows = await adb.list_team_agents(ta)
         check("CRUD: 2 агента видны под своим тенантом", len(rows) == 2, str(len(rows)))
@@ -78,7 +78,7 @@ async def main():
         check("ровно один is_default", len(defs) == 1 and defs[0]["slug"] == "sales")
         await adb.upsert_team_agent(ta, slug="sales", name="Продажи2", role_preset="mark",
                                     system_prompt="p2", escalation_chat_id="", escalation_topic_id=None,
-                                    is_orchestrator=False, memory_enabled=False,
+                                    is_orchestrator=False, memory_enabled=False, kb_enabled=False,
                                     actor="smoke", ip=None, user_agent=None)
         check("upsert не плодит дубль", len(await adb.list_team_agents(ta)) == 2)
         await adb.disable_team_agent(ta, "support", actor="smoke", ip=None, user_agent=None)

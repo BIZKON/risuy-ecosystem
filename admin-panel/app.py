@@ -1367,7 +1367,8 @@ async def dialog_set_persona(
         return _chat_return(lead_id, from_, err="bad_persona")
     if persona:
         try:
-            await _ensure_persona_agent(persona)
+            await _ensure_persona_agent(
+                persona, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
         except timeweb_ai.TimewebAIError:
             import logging
             logging.getLogger("admin-panel").exception("ensure_persona_agent (диалог) не удался")
@@ -4126,6 +4127,12 @@ def _agents_err_text(err: str | None) -> str | None:
                            "не содержать пробелов (напр. https://api.timeweb.ai/v1).",
         "persona_name": "Укажите имя роли — без него сотрудника не создать.",
         "persona_dup": "Не удалось создать роль (конфликт идентификатора). Попробуйте ещё раз.",
+        "agent_not_metered": "Настройки сохранены, но агент НЕ попал в реестр учёта: "
+                             "его расход не будет списан ни одному тенанту. Проверьте, что ID "
+                             "агента взят из вашего аккаунта Timeweb и задан токен ИИ.",
+        "agent_other_tenant": "Настройки сохранены, но этот агент уже закреплён за другим "
+                              "клиентом — учёт его расхода остался прежним. Сначала отвяжите "
+                              "агента от прежнего владельца.",
     }.get(err or "")
 
 
@@ -4268,7 +4275,46 @@ async def agents_save(
         gateway_base_url=gateway_base_url, system_prompt=system_prompt, fallback=fallback,
         actor=session.actor, ip=_ip(request), user_agent=_ua(request), persona=persona,
     )
+    # Реестр метеринга: агент, вписанный сюда руками, отвечает лидам Школы (bot-telegram/db.py
+    # читает этот app_settings), но снапшот-воркер видит только tenant_agents — вне реестра его
+    # расход не спишется никому. Форма принимает access_id (UUID), реестру нужен числовой id,
+    # поэтому резолвим через список агентов аккаунта. Сохранение настроек уже прошло: неудача
+    # регистрации не откатывает его, а честно показывается предупреждением.
+    if backend == "cloud_ai" and agent_id:
+        warn = await _register_global_agent(
+            agent_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
+        if warn:
+            return RedirectResponse(url=f"/agents?saved=1&err={warn}", status_code=303)
     return RedirectResponse(url="/agents?saved=1", status_code=303)
+
+
+async def _register_global_agent(
+    access_id: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> str:
+    """Закрепить глобального агента Школы за дефолтным тенантом. "" — успех, иначе код ошибки
+    для _agents_err_text. Сеть и токен опциональны: без них просто предупреждаем."""
+    import logging  # канон файла: logging подтягивается локально в местах использования
+
+    tid = await _persona_agent_tenant()
+    if not tid:
+        return "agent_not_metered"
+    try:
+        agents = await timeweb_ai.list_agents()
+    except timeweb_ai.TimewebAIError:
+        logging.getLogger("admin-panel").exception(
+            "Реестр агентов: не удалось получить список агентов аккаунта для %r", access_id)
+        return "agent_not_metered"
+    nid = next((a.get("id") for a in agents
+                if (a.get("access_id") or "").strip() == access_id), None)
+    if not nid:
+        logging.getLogger("admin-panel").error(
+            "Реестр агентов: агент с access_id %r не найден в аккаунте — расход не метрируется",
+            access_id)
+        return "agent_not_metered"
+    ok = await db.register_tenant_agent(
+        tid, nid, access_id=access_id, note="глобальный агент (раздел «ИИ-агенты»)",
+        actor=actor, ip=ip, user_agent=user_agent)
+    return "" if ok else "agent_other_tenant"
 
 
 @app.post("/agents/ai-inference-rf")
@@ -5330,7 +5376,8 @@ async def channels_set_persona(
     if persona:
         prompt = all_personas[persona]["prompt"]
         try:
-            agent_access_id = await _ensure_persona_agent(persona)
+            agent_access_id = await _ensure_persona_agent(
+                persona, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
         except timeweb_ai.TimewebAIError:
             return RedirectResponse(url="/channels?err=tw", status_code=303)
 
@@ -5420,17 +5467,60 @@ def _persona_effective_prompt(role: str, tasks: str, behavior: str, knowledge: s
     return "\n\n".join(parts)
 
 
-async def _ensure_persona_agent(slug: str) -> str:
+async def _persona_agent_tenant():
+    """Тенант, за которым числится ГЛОБАЛЬНЫЙ агент персоны, — дефолтный (Школа).
+
+    Персон-агенты живут в глобальных app_settings (`ai_persona_agent__<slug>`), а читает их
+    только School-путь бота (bot-telegram/db.py::get_ai_overrides) — значит их расход
+    принадлежит дефолтному тенанту. Активный кабинет платформы для этого не годится: у
+    env-админа это «первый живой тенант по created_at» (admin-panel/auth.py:302), то есть
+    случайный клиент получил бы в счёт расход Школы.
+    """
+    return await db.get_tenant_id_by_slug(config.DEFAULT_TENANT_SLUG)
+
+
+async def _ensure_persona_agent(
+    slug: str, *, actor: str, ip: str | None, user_agent: str | None,
+) -> str:
     """access_id cloud-ai агента персоны: из реестра (один агент на персону) или создаём
     через API + сохраняем оба id (access для вызова, числовой для PATCH) и эффективный промпт.
     Берём АКТУАЛЬНЫЙ промпт роли (инструкция+знания владельца), иначе каркас пресета.
     Нет токена ИИ → "" (канал/per-lead тогда полагается на промпт для gateway-бэкенда).
-    TimewebAIError (сбой создания) пробрасывается вызывающему — он решает, что показать."""
+    TimewebAIError (сбой создания) пробрасывается вызывающему — он решает, что показать.
+
+    Каждый созданный агент ОБЯЗАН попасть в реестр tenant_agents: снапшот-воркер метрирует
+    только его содержимое (bot-telegram/metering_worker.py:94,105), агент вне реестра жжёт
+    токены мимо любого счёта. Регистрация идемпотентна и стоит на ОБЕИХ ветках: ветка
+    создания достижима лишь однажды, поэтому агенты, созданные до этой правки, попадают
+    в реестр при первом же обращении к персоне.
+
+    ⚠️ Известное ограничение (вне объёма правки): два одновременных POST по одной персоне
+    могут создать двух платных агентов — сериализации здесь нет и не было. Второй окажется
+    в app_settings (last-write-wins), первый останется сиротой; снять его можно
+    db.unregister_tenant_agent.
+    """
     existing = await db.get_persona_agent(slug)
     if existing:
+        role = await db.get_persona_role(slug)
+        nid = (role.get("nid") or "").strip()
+        if nid:
+            tid = await _persona_agent_tenant()
+            # Идемпотентно: повтор не пишет аудит. Молчаливый False (агент уже за другим
+            # тенантом) диагностируется по логу и аудиту tenant_agent_conflict в db.py.
+            await db.register_tenant_agent(
+                tid, nid, access_id=existing, note=f"персона {slug}",
+                actor=actor, ip=ip, user_agent=user_agent)
         return existing
     if not config.TIMEWEB_AI_ENABLED:
         return ""
+    # Тенанта резолвим ДО платного создания: без него агент оказался бы вне реестра, то есть
+    # был бы оплачен нами и не выставлен никому. Тип ошибки — TimewebAIError, потому что оба
+    # вызывающих уже показывают по нему внятный отказ (иначе пришлось бы плодить ветки).
+    tid = await _persona_agent_tenant()
+    if not tid:
+        raise timeweb_ai.TimewebAIError(
+            f"Не найден тенант по умолчанию «{config.DEFAULT_TENANT_SLUG}» — "
+            f"агент персоны не создан, чтобы его расход не потерялся")
     role = await db.get_persona_role(slug)
     prompt = _persona_effective_prompt(role["role"], role["tasks"], role["behavior"], role["knowledge"])
     # Имя агента — из мерджа пресетов+динамики (НЕ из config.PERSONA_PRESETS: на новом
@@ -5440,6 +5530,9 @@ async def _ensure_persona_agent(slug: str) -> str:
         f'{preset["name"]} — {preset["role"]}', prompt, model_id=config.PERSONA_AGENT_MODEL_ID,
     )
     await db.save_persona_agent(slug, created["access_id"], created.get("id"), prompt)
+    await db.register_tenant_agent(
+        tid, created.get("id"), access_id=created["access_id"], note=f"персона {slug}",
+        actor=actor, ip=ip, user_agent=user_agent)
     return created["access_id"]
 
 

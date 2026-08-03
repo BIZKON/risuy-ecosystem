@@ -4039,6 +4039,97 @@ async def disable_team_agent(
             return True
 
 
+# ── Реестр агентов тенантов (вход метеринга cloud-ai) ────────────────────────
+# Снапшот-воркер бота метрирует ТОЛЬКО агентов из tenant_agents
+# (bot-telegram/metering_worker.py:94,105): агент вне реестра расходует токены,
+# которые не попадут ни в чей счёт. До этих функций панель реестр не вела вовсе —
+# единственная прод-строка засеяна руками (db/schema_metering_w3.sql:31).
+# Звать регистратор обязан КАЖДЫЙ путь, создающий или привязывающий cloud-ai агента.
+
+
+async def register_tenant_agent(
+    tenant_id, agent_id, *, access_id: str = "", note: str = "",
+    actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Закрепить cloud-ai агента за тенантом. True — агент числится за ЭТИМ тенантом.
+
+    Идемпотентна: повтор с той же парой возвращает True и аудит не пишет.
+    Чужой агент НЕ перепривязывается молча: `agent_id` — глобальный первичный ключ
+    (db/schema_metering_w3.sql:10), и тихий `do nothing` означал бы, что расход одного
+    тенанта продолжает списываться другому. Такой случай → False + аудит-конфликт;
+    сменить владельца можно только явной парой unregister + register.
+
+    False (без исключения) на пустом tenant_id и на нечисловом agent_id: функция зовётся
+    ПОСЛЕ платного создания агента, и падение здесь превратило бы «агент создан, но не
+    учтён» в «агент создан, а запрос упал 500». Вызывающий обязан показать ошибку.
+    """
+    if not tenant_id:
+        logging.getLogger(__name__).error(
+            "Реестр агентов: пустой tenant_id — агент %r НЕ зарегистрирован, расход не спишется",
+            agent_id)
+        return False
+    try:
+        aid = int(str(agent_id).strip())
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).error(
+            "Реестр агентов: нечисловой agent_id %r (тенант %s) — НЕ зарегистрирован",
+            agent_id, tenant_id)
+        return False
+
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            res = await c.execute(
+                "insert into tenant_agents (agent_id, tenant_id, access_id, note) "
+                "values ($1,$2,$3,$4) on conflict (agent_id) do nothing",
+                aid, tenant_id, (access_id or "").strip() or None, (note or "").strip() or None)
+            if res.endswith(" 0"):
+                # Строка уже есть. Наша (повтор настройки) или чужая (перепутанный агент)?
+                mine = await c.fetchval(
+                    "select 1 from tenant_agents where agent_id = $1 and tenant_id = $2",
+                    aid, tenant_id)
+                if mine:
+                    return True
+                await _insert_audit(
+                    c, actor=actor, action="tenant_agent_conflict", ip=ip, user_agent=user_agent,
+                    detail={"tenant_id": str(tenant_id), "agent_id": aid,
+                            "why": "агент уже закреплён за другим тенантом"})
+                logging.getLogger(__name__).error(
+                    "Реестр агентов: агент %s уже закреплён за другим тенантом — "
+                    "заявка тенанта %s отклонена (иначе расход ушёл бы не тому)", aid, tenant_id)
+                return False
+            await _insert_audit(
+                c, actor=actor, action="tenant_agent_register", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "agent_id": aid,
+                        "access_id": (access_id or "").strip() or None})
+            return True
+
+
+async def unregister_tenant_agent(
+    tenant_id, agent_id, *, actor: str, ip: str | None, user_agent: str | None,
+) -> bool:
+    """Снять агента с тенанта. True — строка удалена. Нужна для перепривязки: без неё
+    реестр — дверь в одну сторону и ошибочная привязка неисправима из панели.
+    Снапшоты (agent_token_snapshots) НЕ трогаем: они история расхода, а не принадлежности."""
+    if not tenant_id:
+        return False
+    try:
+        aid = int(str(agent_id).strip())
+    except (TypeError, ValueError):
+        return False
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
+            res = await c.execute(
+                "delete from tenant_agents where agent_id = $1 and tenant_id = $2", aid, tenant_id)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(
+                c, actor=actor, action="tenant_agent_unregister", ip=ip, user_agent=user_agent,
+                detail={"tenant_id": str(tenant_id), "agent_id": aid})
+            return True
+
+
 # ── Reseller-платформа Wave 1: tenancy + vault (ТЗ §4.1/§4.5) ────────────────
 # RLS: tenant_secrets закрыт политикой по current_setting('app.tenant_id') —
 # каждый запрос к нему идёт в транзакции ПОСЛЕ set_config(..., is_local=true).
