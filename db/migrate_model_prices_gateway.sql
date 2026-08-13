@@ -1,55 +1,41 @@
--- Токен-биллинг, этап 0 (дыра A): строка model_prices для AI GATEWAY (api.timeweb.ai).
+-- Токен-биллинг, этап 0 (дыра A): цены модели AI GATEWAY (api.timeweb.ai).
 --
--- ЗАЧЕМ. bot-telegram/ai.py:317-322 ищет цену строго по provider='timeweb-ai-gateway' и модели.
--- Строки нет → _capture_gateway_usage выходит ДО charge_usage (ai.py:334), расход НЕ списывается
--- и восстановить его нельзя: списание at-most-once, ключ идемпотентности привязан к request_id
--- конкретного ответа (ai.py:274-284). То есть без этой строки любой тенант на backend='gateway'
--- обслуживается бесплатно и навсегда.
+-- ЗАЧЕМ. bot-telegram/ai.py:317-322 ищет цену по provider='timeweb-ai-gateway' и ТОЧНОМУ слагу
+-- модели. Строки нет → _capture_gateway_usage выходит ДО charge_usage (ai.py:334): расход не
+-- списывается и не восстанавливается (списание at-most-once, ключ привязан к request_id ответа).
 --
--- ⚠️ БЕЗ РЕАЛЬНЫХ ЦЕН НЕ ПРИМЕНЯТЬ. Цены передаются psql-переменными; не задать их — psql упадёт,
--- и это НАМЕРЕННО (guardrail «цены не выдумываем»). Плейсхолдеров-заглушек здесь нет.
+-- ЦЕНЫ (ЛК Timeweb, снято владельцем 07.08.2026) — DeepSeek V4 Flash:
+--   вход  18,9 ₽ за 1 млн токенов → 18 900 µRUB за 1 000 токенов
+--   выход 37,8 ₽ за 1 млн токенов → 37 800 µRUB за 1 000 токенов
+-- Себестоимость blended ≈ 28,35 ₽/млн против курса продажи 1 500 ₽/млн (billing_token_rate) —
+-- маржа ≈ 98 %. Для сравнения: на V4 Pro (352,35 ₽/млн) маржа 76,5 %.
 --
--- ЧТО ВПИСАТЬ (данные владельца из ЛК Timeweb):
---   price_in  — себестоимость ВХОДНЫХ токенов, µRUB за 1000 токенов (1 ₽ = 1 000 000 µRUB).
---   price_out — себестоимость ВЫХОДНЫХ токенов, µRUB за 1000 токенов.
---   Перевод из «₽ за млн токенов» P:  price = P * 1000.   Пример: 19 ₽/млн → 19000.
---   model_slug — слаг модели В ТОЙ ФОРМЕ, В КАКОЙ ЕГО ПЕЧАТАЕТ ШЛЮЗ в поле "model" ответа
---                (ai.py:267 отдаёт приоритет модели ИЗ ОТВЕТА, а не запрошенной в настройке).
---   ef — момент начала действия, ЯВНОЙ меткой: -v ef="'2026-08-02 12:00+03'".
+-- 🔴 ДВЕ СТРОКИ НА ОДНУ МОДЕЛЬ — ЭТО НЕ ОШИБКА. Читатель берёт слаг из поля "model" ОТВЕТА шлюза
+-- (ai.py:267), а в настройке тенанта записан запрошенный 'deepseek/deepseek-v4-flash'. Какую из
+-- форм вернёт шлюз — на 07.08 не проверено (в логах бота за неделю нет ни одного capture: путь
+-- ни разу не вызывался). Поэтому покрываем ОБЕ формы одной ценой: поиск идёт по точному model,
+-- строки друг с другом не конфликтуют. Когда в usage_ledger появится фактический слаг — лишнюю
+-- строку можно не трогать, она просто не будет выбираться.
 --
--- 🔴 ПОЧЕМУ ef ЗАДАЁТСЯ ЯВНО, А НЕ now(). Уникальность — по (provider, model, effective_from).
--- При now() повторный прогон даёт ДРУГОЙ момент → on conflict не срабатывает → появляется вторая
--- строка, и она становится действующей (читатель берёт максимальный effective_from). Повтор
--- с опечаткой в цене молча вытеснил бы правильную. Явная метка делает прогон идемпотентным.
+-- effective_from задан ЯВНОЙ меткой, а не now(): при now() повторный прогон дал бы другой момент,
+-- guard `where not exists` не сработал бы, появилась вторая строка и стала бы действующей.
+-- Метка в прошлом — читатель gateway-цены фильтра `<= now()` НЕ имеет (правится отдельно, A3).
 --
--- 🔴 БУДУЩУЮ ДАТУ СТАВИТЬ НЕЛЬЗЯ: читатель gateway-цены (ai.py:317-322) берёт последнюю строку
--- БЕЗ фильтра effective_from <= now(), то есть строка «на завтра» начнёт действовать немедленно.
--- Фильтр добавляется отдельным коммитом (план этапа 0, задача A3) — до него ef только прошлое/сейчас.
---
--- НА ЧТО ВЛИЯЕТ ЦИФРА. Для kind='llm' клиент платит по КУРСУ billing_token_rate (1,5 ₽ за 1000
--- токенов, shared/metering.py:173-179), а цена отсюда идёт в cost_microrub — то есть в СЕБЕСТОИМОСТЬ
--- и маржу отчётов, не в счёт клиенту. Ошибка в цифре искажает маржу; отсутствие строки убивает
--- выручку целиком. Наценка для llm — resource_pricing['llm'] = 1.000 (вшита в курс продажи).
---
--- ПРИМЕНЕНИЕ (СНАЧАЛА risuy_dev, прод risuy — за отдельным явным «да» владельца):
---   psql "<owner-dsn>" -v ON_ERROR_STOP=1 \
---        -v model_slug=deepseek/deepseek-v4-flash \
---        -v price_in=<µRUB/1k> -v price_out=<µRUB/1k> \
---        -v ef="'2026-08-02 12:00+03'" \
---        -f db/migrate_model_prices_gateway.sql
--- ⚠️ twc-migrate.sh psql-переменные НЕ передаёт → через него этот файл не применять.
+-- ПРИМЕНЕНИЕ (сначала risuy_dev, прод risuy — за явным «да» владельца):
+--   psql "<owner-dsn>" -v ON_ERROR_STOP=1 -f db/migrate_model_prices_gateway.sql
 
 insert into model_prices (provider, model, price_in_microrub_per_1k, price_out_microrub_per_1k, effective_from)
-select 'timeweb-ai-gateway', :'model_slug', :price_in, :price_out, :ef::timestamptz
+select v.provider, v.model, v.pin, v.pout, v.ef
+  from (values
+          ('timeweb-ai-gateway', 'deepseek/deepseek-v4-flash', 18900::bigint, 37800::bigint, timestamptz '2026-08-07 12:00+03'),
+          ('timeweb-ai-gateway', 'deepseek-v4-flash',          18900::bigint, 37800::bigint, timestamptz '2026-08-07 12:00+03')
+       ) as v(provider, model, pin, pout, ef)
  where not exists (
-   select 1 from model_prices
-    where provider = 'timeweb-ai-gateway'
-      and model = :'model_slug'
-      and effective_from = :ef::timestamptz
+   select 1 from model_prices m
+    where m.provider = v.provider and m.model = v.model and m.effective_from = v.ef
  );
 
--- Проверка: ВСЕ строки провайдера, а не одна действующая — оператор обязан видеть, что не наплодил
--- версий и что «действующей» стала именно та, которую он вписал (последняя по effective_from).
+-- Проверка: ВСЕ строки провайдера — оператор должен видеть, что не наплодил версий.
 select provider, model, price_in_microrub_per_1k, price_out_microrub_per_1k, effective_from,
        (effective_from <= now()) as deystvuet_seychas
   from model_prices

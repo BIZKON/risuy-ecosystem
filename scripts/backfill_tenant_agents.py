@@ -51,17 +51,24 @@ async def main() -> None:
         if not tid:
             raise SystemExit(f"ОТКАЗ: тенант «{TENANT_SLUG}» не найден — некому приписать агентов.")
 
-        rows = await c.fetch(
-            "select key, value from app_settings "
-            "where key like 'ai_persona_agent_nid__%' and coalesce(value,'') <> '' order by key")
-        access = {r["key"].split("ai_persona_agent__", 1)[1]: (r["value"] or "").strip()
-                  for r in await c.fetch(
-                      "select key, value from app_settings where key like 'ai_persona_agent__%'")}
+        # ⚠️ LIKE в PostgreSQL трактует '_' как ОДИН ЛЮБОЙ символ, поэтому паттерн
+        # 'ai_persona_agent__%' захватывает и ключи 'ai_persona_agent_nid__*'. Берём широкую
+        # выборку одним запросом и разбираем префиксы в Python — там подчёркивание буквальное.
+        NID_PREFIX = "ai_persona_agent_nid__"
+        ACC_PREFIX = "ai_persona_agent__"
+        raw = await c.fetch(
+            "select key, value from app_settings where key like 'ai%persona%agent%' order by key")
+
+        rows = [r for r in raw
+                if r["key"].startswith(NID_PREFIX) and (r["value"] or "").strip()]
+        access = {r["key"][len(ACC_PREFIX):]: (r["value"] or "").strip()
+                  for r in raw
+                  if r["key"].startswith(ACC_PREFIX) and not r["key"].startswith(NID_PREFIX)}
 
         plan: list[tuple[str, int, str]] = []   # (слаг персоны, числовой id, access_id)
         skipped: list[str] = []
         for r in rows:
-            slug = r["key"].split("ai_persona_agent_nid__", 1)[1]
+            slug = r["key"][len(NID_PREFIX):]
             try:
                 nid = int((r["value"] or "").strip())
             except ValueError:
