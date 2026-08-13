@@ -3903,8 +3903,14 @@ async def delete_tenant_trigger(
 
 # ── СП-1 «Команда отделов»: CRUD team_agents (RLS). Раздел панели «ИИ-команда» (/my-team). ──
 # Паттерн tenant_triggers: каждая мутация в транзакции ПОСЛЕ set_config('app.tenant_id') + _insert_audit.
+# 🔴 ПРАВИЛО ROUND-TRIP (Э3). Каждое поле, участвующее в upsert_team_agent, ОБЯЗАНО присутствовать
+# и здесь, и в admin-panel/app.py::_present_team_agent. Иначе форма отдаёт поле пустым и молча
+# затирает значение: так kb_enabled не доходил до шаблона (my_team.html:53 → Undefined → галка
+# всегда снята), и любое сохранение агента выключало базу знаний. Регресс пинится смоуком
+# scripts/team_agents_db_smoke.py («сохранить без изменений — ничего не изменилось»).
 _TEAM_AGENT_SELECT = ("id, slug, name, role_preset, system_prompt, escalation_chat_id, "
-                      "escalation_topic_id, is_default, is_orchestrator, memory_enabled, enabled, position")
+                      "escalation_topic_id, is_default, is_orchestrator, memory_enabled, "
+                      "kb_enabled, enabled, position")
 
 
 async def list_team_agents(tenant_id) -> list[asyncpg.Record]:

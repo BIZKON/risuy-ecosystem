@@ -6420,11 +6420,17 @@ def _team_err_text(err: str | None) -> str | None:
 
 
 def _present_team_agent(r) -> dict:
+    """Строка team_agents → словарь для шаблона my_team.html.
+
+    🔴 ПРАВИЛО ROUND-TRIP (Э3): здесь обязано быть КАЖДОЕ поле, участвующее в db.upsert_team_agent,
+    иначе форма отправит его пустым и молча затрёт. Пропуск kb_enabled именно так и выключал базу
+    знаний при любом сохранении агента (my_team.html:53 читал Undefined → галка всегда снята)."""
     return {
         "slug": r["slug"], "name": r["name"] or "", "role_preset": r["role_preset"] or "",
         "system_prompt": r["system_prompt"] or "", "escalation_chat_id": r["escalation_chat_id"] or "",
         "escalation_topic_id": r["escalation_topic_id"], "is_default": r["is_default"],
         "is_orchestrator": r["is_orchestrator"], "memory_enabled": r["memory_enabled"],
+        "kb_enabled": r["kb_enabled"],
         "enabled": r["enabled"],
     }
 

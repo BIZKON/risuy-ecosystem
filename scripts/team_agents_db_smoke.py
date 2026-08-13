@@ -25,6 +25,11 @@ assert "/risuy_dev" in TEAM_DSN.split("?")[0], "только risuy_dev"
 FAILS: list[str] = []
 SLUG_T = "smoke-team-a"
 
+# Поля, которые форма «ИИ-команда» отправляет в db.upsert_team_agent. Каждое обязано доезжать
+# обратно через _TEAM_AGENT_SELECT и _present_team_agent — иначе сохранение затирает значение.
+UPSERT_FIELDS = ("name", "role_preset", "system_prompt", "escalation_chat_id",
+                 "escalation_topic_id", "is_orchestrator", "memory_enabled", "kb_enabled")
+
 
 def check(name, cond, detail=""):
     print(f"  {'OK ' if cond else 'FAIL'} {name}" + (f" — {detail}" if detail else ""))
@@ -90,6 +95,25 @@ async def main():
             v = await c.fetchval("select value from tenant_settings where tenant_id=$1 and key=$2",
                                  ta, "agent_for_channel__tg")
         check("set_channel_agent: ключ записан", v == "sales", str(v))
+
+        # ── Э3, регресс round-trip: «открыть агента и сохранить без изменений» не должно менять
+        # НИ ОДНОГО поля. Пинит правило «поле в upsert_team_agent ⇒ поле в _TEAM_AGENT_SELECT и в
+        # _present_team_agent». Пока kb_enabled выпадал из SELECT, форма отдавала его пустым и
+        # каждое сохранение агента молча выключало базу знаний тенанту.
+        await adb.upsert_team_agent(ta, slug="rt", name="Кругорейс", role_preset="mark",
+                                    system_prompt="инструкции", escalation_chat_id="-1005001",
+                                    escalation_topic_id=7, is_orchestrator=True, memory_enabled=True,
+                                    kb_enabled=True, actor="smoke", ip=None, user_agent=None)
+        before = next(r for r in await adb.list_team_agents(ta) if r["slug"] == "rt")
+        missing = [f for f in UPSERT_FIELDS if f not in before.keys()]
+        check("round-trip: SELECT отдаёт все поля формы", not missing, ", ".join(missing) or "—")
+        if not missing:
+            # Сохраняем ровно тем, что пришло из SELECT — так делает форма, открытая и не тронутая.
+            await adb.upsert_team_agent(ta, slug="rt", actor="smoke", ip=None, user_agent=None,
+                                        **{f: before[f] for f in UPSERT_FIELDS})
+            after = next(r for r in await adb.list_team_agents(ta) if r["slug"] == "rt")
+            diff = [f"{f}: {before[f]!r}→{after[f]!r}" for f in UPSERT_FIELDS if before[f] != after[f]]
+            check("round-trip: сохранение без изменений ничего не меняет", not diff, "; ".join(diff) or "—")
         # RLS: чужой тенант не видит (ctx None → 0)
         adb.set_active_tenant(None)
         async with adb.pool.acquire() as c:

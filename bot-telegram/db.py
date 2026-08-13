@@ -1749,6 +1749,38 @@ _TEAM_AGENT_COLS = ("id, slug, name, role_preset, system_prompt, backend, agent_
                     "memory_enabled, kb_enabled, enabled")
 
 
+def _merge_agent_cfg(picked, legacy: dict) -> dict:
+    """Склейка «агент команды поверх легаси-конфига тенанта». Чистая (без БД) — чтобы правило
+    наследования пиналось смоуком, а не проверялось глазами.
+
+    🔴 ПРАВИЛО (Э3): поля, которые агент команды может не заполнить, наследуются от легаси —
+    промпт, фолбэк, agent_id. Асимметрия здесь стоит дорого: пока промпт брался как `or ''`,
+    появление строки team_agents с пустым промптом оставляло живого тенанта БЕЗ инструкций
+    (demo-sandbox настроен легаси-ключом ai_system_prompt через scripts/seed_demo_tenant.py).
+    Добавляешь поле в team_agents — реши здесь же, наследуется оно или нет."""
+    backend = (picked["backend"] or "").strip()
+    if backend not in _AI_BACKENDS:
+        backend = "cloud_ai"
+    return {
+        "enabled": legacy["enabled"],
+        "backend": backend,
+        # agent_id агента команды; если у него свой не задан (создан в панели без провижининга) —
+        # наследуем cloud-ai агента тенанта (легаси), иначе cloud_ai-ветка t_text молчала бы.
+        "agent_id": (picked["agent_id"] or "").strip() or legacy["agent_id"],
+        "model": legacy["model"],
+        "gateway_base_url": legacy["gateway_base_url"],
+        "system_prompt": picked["system_prompt"] or legacy["system_prompt"],
+        "fallback": picked["fallback_text"] or legacy["fallback"],
+        "kb_enabled": bool(picked["kb_enabled"]),  # СП-2a: per-agent тумблер базы знаний
+        "agent_slug": picked["slug"],
+        "escalation_chat_id": (picked["escalation_chat_id"] or "").strip(),
+        "escalation_topic_id": picked["escalation_topic_id"],
+        "is_orchestrator": bool(picked["is_orchestrator"]),
+        "memory_enabled": bool(picked["memory_enabled"]),
+        "team_agent_id": str(picked["id"]),  # PK team_agents — FK agent_memory.agent_id (СП-2-память)
+    }
+
+
 async def resolve_team_agent_cfg(tid, *, source=None, lead_agent_slug=None) -> dict:
     """Конфиг ИИ для тенант-бота с выбором агента команды (team_agents). Слои диалог>канал>дефолт;
     если команды нет/никто не подошёл — ФОЛБЭК на легаси get_tenant_ai_overrides (поведение как раньше).
@@ -1773,28 +1805,8 @@ async def resolve_team_agent_cfg(tid, *, source=None, lead_agent_slug=None) -> d
                               channel_slug=(channel_slug or "").strip() or None)
     if picked is None:
         return await get_tenant_ai_overrides(tid)
-    backend = (picked["backend"] or "").strip()
-    if backend not in _AI_BACKENDS:
-        backend = "cloud_ai"
     legacy = await get_tenant_ai_overrides(tid)  # для model/gateway_base_url/enabled тенанта
-    return {
-        "enabled": legacy["enabled"],
-        "backend": backend,
-        # agent_id агента команды; если у него свой не задан (создан в панели без провижининга) —
-        # наследуем cloud-ai агента тенанта (легаси), иначе cloud_ai-ветка t_text молчала бы.
-        "agent_id": (picked["agent_id"] or "").strip() or legacy["agent_id"],
-        "model": legacy["model"],
-        "gateway_base_url": legacy["gateway_base_url"],
-        "system_prompt": picked["system_prompt"] or "",
-        "fallback": picked["fallback_text"] or legacy["fallback"],
-        "kb_enabled": bool(picked["kb_enabled"]),  # СП-2a: per-agent тумблер базы знаний
-        "agent_slug": picked["slug"],
-        "escalation_chat_id": (picked["escalation_chat_id"] or "").strip(),
-        "escalation_topic_id": picked["escalation_topic_id"],
-        "is_orchestrator": bool(picked["is_orchestrator"]),
-        "memory_enabled": bool(picked["memory_enabled"]),
-        "team_agent_id": str(picked["id"]),  # PK team_agents — FK agent_memory.agent_id (СП-2-память)
-    }
+    return _merge_agent_cfg(picked, legacy)
 
 
 async def get_funnel_config(tid) -> dict:
