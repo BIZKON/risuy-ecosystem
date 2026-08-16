@@ -6075,6 +6075,93 @@ async def set_partner_status(partner_id: str, status: str, *, actor: str,
     return True
 
 
+async def create_partner_payout(partner_id, amount_rub, *, method, note, actor: str,
+                                ip: str | None = None, user_agent: str | None = None) -> str:
+    """Отметить выплату партнёру.
+
+    Перевод делает человек: PayPal, Stripe и Wise в РФ не работают, писать под них
+    интеграцию бессмысленно. В системе — только отметка, чтобы «к выплате» уменьшилось и
+    партнёр видел ту же цифру, что и владелец.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            owner = await c.fetchval("select owner_tenant_id from partners where id = $1", partner_id)
+            new_id = await c.fetchval(
+                "insert into partner_payouts (partner_id, owner_tenant_id, amount_rub, method, "
+                "                             note, created_by) "
+                "values ($1,$2,$3,$4,$5,$6) returning id",
+                partner_id, owner, amount_rub, method, note, actor)
+            await _insert_audit(c, actor=actor, action="partner_payout_created", ip=ip,
+                                user_agent=user_agent,
+                                detail={"partner_id": str(partner_id), "amount": str(amount_rub)})
+    return str(new_id)
+
+
+async def set_partner_rate(partner_id, rate_percent, *, actor: str, ip: str | None = None,
+                           user_agent: str | None = None) -> bool:
+    """Сменить ставку партнёра.
+
+    Прошлое не трогает: в каждом начислении лежит КОПИЯ ставки на момент начисления, и
+    правка настроек её не переписывает — иначе отчёт партнёру менялся бы задним числом.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            res = await c.execute("update partners set rate_percent = $1 where id = $2",
+                                  rate_percent, partner_id)
+            if res.endswith(" 0"):
+                return False
+            await _insert_audit(c, actor=actor, action="partner_rate_changed", ip=ip,
+                                user_agent=user_agent,
+                                detail={"partner_id": str(partner_id), "rate": str(rate_percent)})
+    return True
+
+
+async def set_partner_parent(partner_id, parent_id, *, actor: str, ip: str | None = None,
+                             user_agent: str | None = None) -> bool:
+    """Назначить наставника. False — привязка создала бы цикл и отвергнута.
+
+    A привёл B, B не может стать наставником A: иначе два партнёра начисляли бы друг другу
+    с каждой продажи. Дерево читаем целиком — партнёров десятки, а не миллионы, и
+    рекурсивный CTE ради этого не нужен; проверка живёт в чистой функции и покрыта
+    смоуком без базы.
+    """
+    async with pool.acquire() as c:
+        rows = await c.fetch("select id, parent_id from partners")
+        parent_of = {str(r["id"]): (str(r["parent_id"]) if r["parent_id"] else None) for r in rows}
+        if partner_money.would_create_cycle(
+                str(partner_id), str(parent_id) if parent_id else None, parent_of):
+            async with c.transaction():
+                await _insert_audit(c, actor=actor, action="partner_parent_cycle_rejected", ip=ip,
+                                    user_agent=user_agent,
+                                    detail={"partner_id": str(partner_id),
+                                            "parent_id": str(parent_id)})
+            return False
+        async with c.transaction():
+            await c.execute("update partners set parent_id = $1 where id = $2", parent_id, partner_id)
+            await _insert_audit(c, actor=actor, action="partner_parent_set", ip=ip,
+                                user_agent=user_agent,
+                                detail={"partner_id": str(partner_id),
+                                        "parent_id": str(parent_id) if parent_id else None})
+    return True
+
+
+async def partner_accruals_for(partner_id):
+    """Начисления партнёра для карточки владельца."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            "select source_kind, client_kind, level, rate_percent, amount_rub, reason, created_at "
+            "from partner_accruals where partner_id = $1 order by created_at desc limit 200",
+            partner_id)
+
+
+async def partner_payouts_for(partner_id):
+    """Выплаты партнёра для карточки владельца."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            "select amount_rub, paid_at, method, note, created_by from partner_payouts "
+            "where partner_id = $1 order by paid_at desc limit 100", partner_id)
+
+
 async def partner_totals(partner_ids: list) -> dict:
     """Начислено / выплачено / к выплате по каждому партнёру.
 

@@ -204,6 +204,37 @@ async def main():
                                     _h.sha256(t3.encode()).hexdigest())
             check("приглашение осталось непогашенным", used is None, str(used))
 
+            print("13. Наставника нельзя привязать так, чтобы получился цикл:")
+            # seller уже подопечный mentor'а → сделать seller наставником mentor'а нельзя.
+            bad = await db.set_partner_parent(mentor_id, seller_id, actor="smoke")
+            check("привязка, дающая цикл, отбита", bad is False, f"вернул={bad}")
+            still = await c.fetchval("select parent_id from partners where id = $1", mentor_id)
+            check("наставник наставника не проставился", still is None, str(still))
+            ok2 = await db.set_partner_parent(seller_id, mentor_id, actor="smoke")
+            check("нормальная привязка проходит", ok2 is True, f"вернул={ok2}")
+
+            print("14. Выплата уменьшает «к выплате»:")
+            await c.execute("delete from partner_accruals where client_id = $1", tenant_id)
+            await c.execute("update tenants set partner_id = $1 where id = $2", seller_id, tenant_id)
+            async with c.transaction():
+                await db.accrue_for_payment(
+                    c, source_kind="service_invoice", source_id=SRC1,
+                    client_kind="tenant", client_id=tenant_id, amount_rub=Decimal("7500"))
+            await db.create_partner_payout(seller_id, Decimal("500.00"), method="СБП",
+                                           note=None, actor="smoke")
+            t = (await db.partner_totals([seller_id]))[str(seller_id)]
+            check("начислено 1500.00", t["accrued"] == Decimal("1500.00"), str(t["accrued"]))
+            check("выплачено 500.00", t["paid"] == Decimal("500.00"), str(t["paid"]))
+            check("к выплате 1000.00", t["due"] == Decimal("1000.00"), str(t["due"]))
+
+            print("15. Смена ставки не переписывает прошлые начисления:")
+            await db.set_partner_rate(seller_id, Decimal("40"), actor="smoke")
+            was = await c.fetchval(
+                "select rate_percent from partner_accruals "
+                "where partner_id = $1 and reason = 'sale'", seller_id)
+            check("в начислении осталась прежняя ставка", was == Decimal("20.00"), str(was))
+            await db.set_partner_rate(seller_id, Decimal("20"), actor="smoke")
+
             await _cleanup(c)
     finally:
         await db.pool.close()

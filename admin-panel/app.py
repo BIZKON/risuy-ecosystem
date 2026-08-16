@@ -27,7 +27,7 @@ import uuid
 import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from math import ceil
 from urllib.parse import urlencode
 
@@ -6838,8 +6838,9 @@ async def partners_page(request: Request, session: auth.Session = Depends(requir
     _require_admin(session)
     partners = await db.list_partners()
     base = await db.get_bot_public_base_url()
+    totals = await db.partner_totals([p["id"] for p in partners])
     return templates.TemplateResponse(request, "partners.html", {
-        "partners": partners, "base_url": base, "saved": saved, "err": err,
+        "partners": partners, "base_url": base, "saved": saved, "err": err, "totals": totals,
         "csrf_token": session.csrf_token, "session": session, "active": "partners"})
 
 
@@ -6878,6 +6879,65 @@ async def partners_set_chat_id(request: Request, partner_id: uuid.UUID,
     if not ok:
         return RedirectResponse(url="/partners?err=not_found", status_code=303)
     return RedirectResponse(url="/partners?saved=chat", status_code=303)
+
+
+def _money(raw: str) -> Decimal | None:
+    """Сумма из формы. None — не число. Запятая как разделитель: её вводят чаще точки."""
+    try:
+        return Decimal((raw or "").replace(",", ".").strip())
+    except (InvalidOperation, AttributeError):
+        return None
+
+
+@app.post("/partners/{partner_id}/payout")
+async def partners_payout(request: Request, partner_id: uuid.UUID,
+                          session: auth.Session = Depends(require_session),
+                          csrf_token: str = Form(""), amount: str = Form(""),
+                          method: str = Form(""), note: str = Form("")):
+    """Отметить выплату партнёру. Перевод делает человек, здесь только отметка."""
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    value = _money(amount)
+    if value is None or value <= 0:
+        return RedirectResponse(url=f"/partners/{partner_id}?err=bad_amount", status_code=303)
+    await db.create_partner_payout(partner_id, value, method=method.strip() or None,
+                                   note=note.strip() or None, actor=session.actor,
+                                   ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url=f"/partners/{partner_id}?saved=payout", status_code=303)
+
+
+@app.post("/partners/{partner_id}/rate")
+async def partners_rate(request: Request, partner_id: uuid.UUID,
+                        session: auth.Session = Depends(require_session),
+                        csrf_token: str = Form(""), rate: str = Form("")):
+    """Сменить ставку. Прошлые начисления не меняются — в них лежит копия ставки."""
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    value = _money(rate)
+    if value is None or not (0 <= value <= 100):
+        return RedirectResponse(url=f"/partners/{partner_id}?err=bad_rate", status_code=303)
+    if not await db.set_partner_rate(partner_id, value, actor=session.actor,
+                                     ip=_ip(request), user_agent=_ua(request)):
+        return RedirectResponse(url="/partners?err=not_found", status_code=303)
+    return RedirectResponse(url=f"/partners/{partner_id}?saved=rate", status_code=303)
+
+
+@app.post("/partners/{partner_id}/parent")
+async def partners_parent(request: Request, partner_id: uuid.UUID,
+                          session: auth.Session = Depends(require_session),
+                          csrf_token: str = Form(""), parent_id: str = Form("")):
+    """Назначить наставника. Цикл в дереве отбивается и попадает в аудит."""
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    raw = (parent_id or "").strip()
+    try:
+        parent = uuid.UUID(raw) if raw else None
+    except ValueError:
+        return RedirectResponse(url=f"/partners/{partner_id}?err=bad_parent", status_code=303)
+    if not await db.set_partner_parent(partner_id, parent, actor=session.actor,
+                                       ip=_ip(request), user_agent=_ua(request)):
+        return RedirectResponse(url=f"/partners/{partner_id}?err=cycle", status_code=303)
+    return RedirectResponse(url=f"/partners/{partner_id}?saved=parent", status_code=303)
 
 
 # ---- Кабинет партнёра: /partner, /partner/team ------------------------------ #
@@ -6966,8 +7026,18 @@ async def partner_detail(request: Request, partner_id: uuid.UUID,
     if not partner:
         raise StarletteHTTPException(status_code=404, detail="Партнёр не найден")
     tenants = await db.list_partner_tenants(partner_id)
+    accruals = await db.partner_accruals_for(partner_id)
+    payouts = await db.partner_payouts_for(partner_id)
+    totals = (await db.partner_totals([partner_id])).get(
+        str(partner_id), {"accrued": Decimal(0), "paid": Decimal(0), "due": Decimal(0)})
+    all_partners = await db.list_partners()
+    qp = request.query_params
     return templates.TemplateResponse(request, "partner_detail.html", {
-        "partner": partner, "tenants": tenants,
+        "partner": partner, "tenants": tenants, "accruals": accruals, "payouts": payouts,
+        "totals": totals, "all_partners": all_partners,
+        "base_url": await db.get_bot_public_base_url(),
+        # Токен приглашения показывается ОДИН раз: в базе только его sha256.
+        "invite": qp.get("invite"), "saved": qp.get("saved"), "err": qp.get("err"),
         "csrf_token": session.csrf_token, "session": session, "active": "partners"})
 
 

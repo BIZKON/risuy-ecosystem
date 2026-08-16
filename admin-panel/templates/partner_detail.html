@@ -56,4 +56,151 @@
   </div>
   {% endif %}
 </section>
+{# ── Деньги партнёра ─────────────────────────────────────────────────────── #}
+<section class="section" aria-label="Деньги партнёра">
+  <h2 class="section__title section__title--lg">Начислено и выплачено</h2>
+
+  {% if saved == 'payout' %}<p class="flash flash--ok">Выплата отмечена.</p>{% endif %}
+  {% if saved == 'rate' %}<p class="flash flash--ok">Ставка сохранена. Прошлые начисления не изменились.</p>{% endif %}
+  {% if saved == 'parent' %}<p class="flash flash--ok">Наставник сохранён.</p>{% endif %}
+  {% if err == 'cycle' %}<p class="flash flash--error">Так нельзя: этот партнёр уже стоит выше по цепочке, получился бы замкнутый круг.</p>{% endif %}
+  {% if err == 'bad_amount' %}<p class="flash flash--error">Сумма должна быть числом больше нуля.</p>{% endif %}
+  {% if err == 'bad_rate' %}<p class="flash flash--error">Ставка — число от 0 до 100.</p>{% endif %}
+  {% if err == 'bad_parent' %}<p class="flash flash--error">Наставник не распознан, выберите из списка.</p>{% endif %}
+
+  <div class="stat-row">
+    <div class="stat"><span class="stat__label">Начислено</span>
+      <span class="stat__value mono">{{ '%.2f'|format(totals.accrued) }} ₽</span></div>
+    <div class="stat"><span class="stat__label">Выплачено</span>
+      <span class="stat__value mono">{{ '%.2f'|format(totals.paid) }} ₽</span></div>
+    <div class="stat"><span class="stat__label">К выплате</span>
+      <span class="stat__value mono">{{ '%.2f'|format(totals.due) }} ₽</span></div>
+  </div>
+
+  {% if invite %}
+  <p class="flash flash--ok">Ссылка для входа — покажите её партнёру, повторно она не откроется:<br>
+    <code class="mono mono--break">{{ base_url }}/partner/join/{{ invite }}</code></p>
+  {% endif %}
+
+  {# ── Выплата ── #}
+  <form class="form-row" method="post" action="/partners/{{ partner.id }}/payout" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Сумма выплаты, ₽</span>
+      <input class="field__input mono" type="text" name="amount" inputmode="decimal" required>
+    </label>
+    <label class="field">
+      <span class="field__label">Способ</span>
+      <input class="field__input" type="text" name="method" maxlength="80" placeholder="карта, СБП, счёт ИП">
+    </label>
+    <button class="btn btn--dark" type="submit">Отметить выплату</button>
+  </form>
+  <details class="hint hint--block"><summary>Зачем это поле</summary>
+    Перевод вы делаете сами — картой, по СБП или на счёт ИП. Здесь только отметка, чтобы
+    «к выплате» уменьшилось и партнёр видел ту же цифру, что и вы. Если ошиблись, не
+    удаляйте строку: сделайте новую отметку и напишите пояснение в примечании — история
+    денег не переписывается задним числом.</details>
+
+  {# ── Ставка ── #}
+  <form class="form-row" method="post" action="/partners/{{ partner.id }}/rate" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Ставка, %</span>
+      <input class="field__input mono" type="text" name="rate" inputmode="decimal"
+             value="{{ '%.0f'|format(partner.rate_percent) }}">
+    </label>
+    <button class="btn btn--secondary" type="submit">Сохранить ставку</button>
+  </form>
+  <details class="hint hint--block"><summary>Зачем это поле</summary>
+    Доля партнёра с первой оплаты приведённого клиента. По умолчанию 20%. Прошлые
+    начисления не изменятся: в каждом лежит ставка на момент начисления — иначе отчёт
+    партнёру поменялся бы задним числом и кто-то оказался бы должен.</details>
+
+  {# ── Наставник ── #}
+  <form class="form-row" method="post" action="/partners/{{ partner.id }}/parent">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field__label">Наставник</span>
+      <select class="field__input" name="parent_id">
+        <option value="">— нет —</option>
+        {% for cand in all_partners if cand.id != partner.id %}
+        <option value="{{ cand.id }}" {% if partner.parent_id and partner.parent_id == cand.id %}selected{% endif %}>{{ cand.name|e }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn btn--secondary" type="submit">Сохранить наставника</button>
+  </form>
+  <details class="hint hint--block"><summary>Зачем это поле</summary>
+    Кто привёл и обучил этого партнёра. Наставнику идёт 5% сверх с продаж подопечного —
+    из нашей доли, сам партнёр от этого не теряет ничего. Срок — 12 месяцев с даты, когда
+    подопечный присоединился. Пусто — наставнических нет.</details>
+
+  {# ── Доступ ── #}
+  <form method="post" action="/partners/{{ partner.id }}/invite">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn btn--secondary" type="submit">Выдать доступ в кабинет</button>
+  </form>
+  <details class="hint hint--block"><summary>Зачем это нужно</summary>
+    Создаёт одноразовую ссылку на трое суток. Партнёр по ней сам заведёт email и пароль —
+    пароля мы не видим и подсказать не сможем. Пока доступ не выдан, партнёр своих
+    начислений не видит и будет спрашивать вас.</details>
+</section>
+
+{# ── Начисления ──────────────────────────────────────────────────────────── #}
+<section class="section" aria-label="Начисления">
+  <h2 class="section__title section__title--lg">Начисления</h2>
+  {% if accruals %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead><tr>
+        <th scope="col">Дата</th><th scope="col">Причина</th><th scope="col">Уровень</th>
+        <th scope="col">Ставка</th><th scope="col">Сумма</th>
+      </tr></thead>
+      <tbody>
+        {% for a in accruals %}
+        <tr>
+          <td class="nowrap muted">{{ a.created_at.strftime('%d.%m.%Y') }}</td>
+          <td>{% if a.reason == 'sale' %}продажа{% elif a.reason == 'mentor' %}наставнические{% else %}возврат{% endif %}</td>
+          <td class="num">{{ a.level }}</td>
+          <td class="num mono">{{ '%.0f'|format(a.rate_percent) }}%</td>
+          <td class="num mono">{{ '%.2f'|format(a.amount_rub) }} ₽</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Начислений пока нет</p>
+    <p class="empty__text">Первое появится в момент, когда приведённый клиент оплатит.</p>
+  </div>
+  {% endif %}
+</section>
+
+{# ── Выплаты ─────────────────────────────────────────────────────────────── #}
+<section class="section" aria-label="Выплаты">
+  <h2 class="section__title section__title--lg">Выплаты</h2>
+  {% if payouts %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead><tr>
+        <th scope="col">Дата</th><th scope="col">Способ</th>
+        <th scope="col">Кто отметил</th><th scope="col">Сумма</th>
+      </tr></thead>
+      <tbody>
+        {% for p in payouts %}
+        <tr>
+          <td class="nowrap muted">{{ p.paid_at.strftime('%d.%m.%Y') }}</td>
+          <td>{{ p.method|e if p.method else '—' }}</td>
+          <td class="muted">{{ p.created_by|e }}</td>
+          <td class="num mono">{{ '%.2f'|format(p.amount_rub) }} ₽</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="hint muted">Выплат пока не было.</p>
+  {% endif %}
+</section>
 {% endblock %}

@@ -55,6 +55,8 @@
           <th scope="col">Тенантов</th>
           <th scope="col">Прошли бриф</th>
           <th scope="col">Chat ID</th>
+          <th scope="col">Начислено</th>
+          <th scope="col">К выплате</th>
           <th scope="col">Статус</th>
         </tr>
       </thead>
@@ -68,6 +70,8 @@
           </td>
           <td class="num">{{ p.tenant_count }}</td>
           <td class="num">{{ p.brief_done }}</td>
+          <td class="num mono">{{ '%.2f'|format(totals.get(p.id|string, {}).get('accrued', 0)) }} ₽</td>
+          <td class="num mono">{{ '%.2f'|format(totals.get(p.id|string, {}).get('due', 0)) }} ₽</td>
           <td>
             <form class="inline-form" method="post" action="/partners/{{ p.id }}/chat-id" autocomplete="off">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
