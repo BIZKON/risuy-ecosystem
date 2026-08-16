@@ -2997,11 +2997,18 @@ async def set_order_status_with_audit(
                 await c.execute("select set_config('app.tenant_id', $1, true)", str(old["tenant_id"]))
                 await c.execute("update leads set status = 'converted' where id = $1", old["lead_id"])
                 converted = True
+            # Сторно партнёру при возврате (спека §6.1). Пишем ТОЛЬКО при реальном
+            # переходе в refunded: повторный вызов увидит refunded и сюда не дойдёт —
+            # тем же приёмом, что _apply_order_paid защищается от повторного вебхука.
+            stornoed = 0
+            if new_status == "refunded" and old["status"] != "refunded":
+                stornoed = await storno_for_source(c, source_kind="order", source_id=order_id)
             await _insert_audit(
                 c, actor=actor, action="order_status", ip=ip, user_agent=user_agent,
                 detail={"order_id": str(order_id),
                         "status": {"old": old["status"], "new": new_status},
-                        "lead_converted": converted},
+                        "lead_converted": converted,
+                        "partner_storno": stornoed},
             )
             return row
 
@@ -3064,6 +3071,24 @@ async def accrue_for_payment(
         if new_id:
             created.append(str(new_id))
     return created
+
+
+async def storno_for_source(c, *, source_kind: str, source_id) -> int:
+    """Сторнировать партнёрские начисления по источнику. Возвращает число строк сторно.
+
+    Возвращаем клиенту — снимаем и у продавца, и у наставника: иначе на возврате
+    партнёрская сеть зарабатывает, а мы платим дважды.
+
+    🔴 Отражает ФАКТИЧЕСКИЕ строки начисления, а не пересчитывает от текущей ставки:
+    ставка партнёра могла измениться между продажей и возвратом, и пересчёт оставил бы на
+    балансе разницу, которой никто не заметит.
+
+    SECURITY DEFINER по той же причине, что и начисление: в платформенном контуре строки
+    имеют owner_tenant_id is null, а GUC равен тенанту-плательщику.
+    """
+    return await c.fetchval(
+        "select storno_partner_accruals($1, $2)", source_kind, source_id
+    ) or 0
 
 
 async def _apply_order_paid(c, row, payment_id: str) -> asyncpg.Record:

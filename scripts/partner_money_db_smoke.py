@@ -135,6 +135,35 @@ async def main():
                     client_kind="tenant", client_id=tenant_id, amount_rub=Decimal("7500"))
             check("вернул пусто", not none_rows, f"вернул={none_rows}")
 
+            print("7. Возврат сторнирует по всем уровням и обнуляет баланс:")
+            await c.execute("delete from partner_accruals where client_id = $1", tenant_id)
+            await c.execute("update tenants set partner_id = $1 where id = $2", seller_id, tenant_id)
+            async with c.transaction():
+                await db.accrue_for_payment(
+                    c, source_kind="service_invoice", source_id=SRC1,
+                    client_kind="tenant", client_id=tenant_id, amount_rub=Decimal("7500"))
+            # 🔴 Ставка меняется МЕЖДУ продажей и возвратом: сторно обязано отражать
+            # фактические строки, а не пересчитывать от новой ставки.
+            await c.execute("update partners set rate_percent = 35 where id = $1", seller_id)
+            async with c.transaction():
+                back = await db.storno_for_source(c, source_kind="service_invoice", source_id=SRC1)
+            check("сторно по обоим уровням", back == 2, f"строк={back}")
+            total = await c.fetchval(
+                "select coalesce(sum(amount_rub),0) from partner_accruals where client_id = $1",
+                tenant_id)
+            check("баланс обнулился, несмотря на смену ставки",
+                  total == Decimal("0.00"), str(total))
+
+            print("8. Повторный возврат не уводит партнёра в минус:")
+            async with c.transaction():
+                twice = await db.storno_for_source(c, source_kind="service_invoice", source_id=SRC1)
+            total = await c.fetchval(
+                "select coalesce(sum(amount_rub),0) from partner_accruals where client_id = $1",
+                tenant_id)
+            check("второе сторно ничего не создало", twice == 0, f"строк={twice}")
+            check("баланс по-прежнему ноль", total == Decimal("0.00"), str(total))
+            await c.execute("update partners set rate_percent = 20 where id = $1", seller_id)
+
             await _cleanup(c)
     finally:
         await db.pool.close()

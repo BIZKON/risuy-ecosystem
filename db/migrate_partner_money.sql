@@ -159,6 +159,38 @@ as $$
     returning id
 $$;
 
+-- Сторно по возврату: отражает ФАКТИЧЕСКИЕ строки начисления этого источника.
+-- 🔴 Не пересчитывает от текущей ставки: ставка партнёра могла измениться между продажей
+-- и возвратом, и пересчёт оставил бы на балансе разницу, которой никто не заметит.
+-- Баланс обязан сходиться в ноль.
+-- Идемпотентно: строка, по которой сторно уже есть, пропускается (not exists), поэтому
+-- повторный возврат не уводит партнёра в минус. Уникальным индексом это не закрыть —
+-- возврат бывает частичным и не один.
+create or replace function storno_partner_accruals(p_source_kind text, p_source_id uuid)
+returns integer
+language sql
+security definer
+set search_path = public
+as $$
+    with inserted as (
+        insert into partner_accruals (partner_id, owner_tenant_id, source_kind, source_id,
+                                      client_kind, client_id, level, rate_percent, amount_rub, reason)
+        select a.partner_id, a.owner_tenant_id, a.source_kind, a.source_id,
+               a.client_kind, a.client_id, a.level, a.rate_percent, -a.amount_rub, 'refund'
+          from partner_accruals a
+         where a.source_kind = p_source_kind
+           and a.source_id   = p_source_id
+           and a.reason in ('sale','mentor')
+           and not exists (
+               select 1 from partner_accruals r
+                where r.source_kind = a.source_kind and r.source_id = a.source_id
+                  and r.partner_id  = a.partner_id  and r.level     = a.level
+                  and r.reason = 'refund')
+        returning 1
+    )
+    select count(*)::integer from inserted
+$$;
+
 -- ── 6. Гранты ────────────────────────────────────────────────────────────────────
 -- delete не даём нигде: начисления и выплаты не удаляются, а сторнируются.
 do $$ begin
@@ -166,5 +198,6 @@ do $$ begin
         grant select, insert, update on partner_accruals, partner_payouts, partner_invites to panel_rw;
         grant execute on function partner_pair_for_client(text, uuid) to panel_rw;
         grant execute on function insert_partner_accrual(uuid, uuid, text, uuid, text, uuid, smallint, numeric, numeric, text) to panel_rw;
+        grant execute on function storno_partner_accruals(text, uuid) to panel_rw;
     end if;
 end $$;
