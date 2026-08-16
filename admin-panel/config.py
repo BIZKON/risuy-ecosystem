@@ -6,6 +6,7 @@
 или SESSION_SECRET слишком короткий. Это единственная защита от «забыли задать env».
 """
 import os
+from decimal import Decimal
 
 
 def _req(name: str) -> str:
@@ -849,3 +850,20 @@ DADATA_SECRET_KEY = os.environ.get("DADATA_SECRET_KEY", "")
 DADATA_TIMEOUT_SEC = _opt_int("DADATA_TIMEOUT_SEC", 5)
 DADATA_DAILY_LIMIT = _opt_int("DADATA_DAILY_LIMIT", 50000)   # суточный лимит тарифа «Лёгкий»
 PROSPECT_TTL_DAYS = _opt_int("PROSPECT_TTL_DAYS", 60)        # TTL карточки (рефреш при показе; задел)
+
+# --- Партнёрская программа (спека 2026-08-16) ------------------------------------
+# Ставка продавца. Источник истины — здесь; default 20 в колонке partners.rate_percent
+# существует только для строк, заведённых до этого кода.
+PARTNER_RATE_PERCENT = Decimal(os.environ.get("PARTNER_RATE_PERCENT", "20"))
+# Наставнику — СВЕРХ доли продавца, из нашей маржи. Продавец не теряет ничего.
+MENTOR_RATE_PERCENT = Decimal(os.environ.get("MENTOR_RATE_PERCENT", "5"))
+# Срок наставнических от joined_at ПОДОПЕЧНОГО. Без срока обязательство становится
+# бессрочной рентой: привёл однажды — получаешь через пять лет.
+MENTOR_BONUS_MONTHS = _opt_int("MENTOR_BONUS_MONTHS", 12)
+# 🔴 Наставники — только в НАШЕМ контуре. Многоуровневая механика, выданная третьим
+# лицам, ст. 172.2 УК делает проблемой площадки, то есть нашей. Спека §10.1.
+PARTNER_MENTORS_TENANT_ENABLED = (
+    os.environ.get("PARTNER_MENTORS_TENANT_ENABLED", "false").strip().lower() == "true"
+)
+# Сколько живёт одноразовая ссылка-приглашение партнёра.
+PARTNER_INVITE_TTL_HOURS = _opt_int("PARTNER_INVITE_TTL_HOURS", 72)
