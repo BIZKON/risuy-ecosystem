@@ -19,7 +19,14 @@
 {# ── Завести партнёра ── #}
 <section class="card" aria-label="Новый партнёр">
   <h2 class="card__title">Добавить партнёра</h2>
-  <p class="card__note">Реф-код сгенерируется автоматически. Chat ID можно добавить сразу или позже — он нужен только для уведомлений партнёру.</p>
+  <p class="card__note">Реф-код сгенерируется автоматически. Chat ID нужен, чтобы партнёр
+    получал приглашение и уведомления о начислениях прямо в Telegram, — без него ссылку
+    придётся передавать самому. Наставник и ставка правятся и позже, в карточке.</p>
+  <details class="hint hint--block"><summary>Зачем наставник</summary>
+    Тот, кто привёл и обучил этого партнёра. Наставнику идёт 5% сверх с продаж
+    подопечного — из нашей доли, сам партнёр не теряет ничего. Срок — 12 месяцев с
+    сегодняшнего дня. Задним числом менять нельзя: это переписало бы историю начислений.
+  </details>
   <form method="post" action="/partners/create" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="form-row">
@@ -30,6 +37,19 @@
       <label class="field">
         <span class="field__label">Chat ID для уведомлений <span class="field__hint">опционально</span></span>
         <input class="field__input mono" type="text" name="tg_chat_id" placeholder="123456789">
+      </label>
+    </div>
+    <div class="form-row">
+      <label class="field">
+        <span class="field__label">Наставник <span class="field__hint">опционально</span></span>
+        <select class="field__input" name="parent_id">
+          <option value="">— нет —</option>
+          {% for cand in partners %}<option value="{{ cand.id }}">{{ cand.name|e }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span class="field__label">Ставка, % <span class="field__hint">по умолчанию 20</span></span>
+        <input class="field__input mono" type="text" name="rate" inputmode="decimal" placeholder="20">
       </label>
     </div>
     <div class="form-actions">

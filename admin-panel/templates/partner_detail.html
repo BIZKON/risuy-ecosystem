@@ -78,8 +78,13 @@
   </div>
 
   {% if invite %}
-  <p class="flash flash--ok">Ссылка для входа — покажите её партнёру, повторно она не откроется:<br>
-    <code class="mono mono--break">{{ base_url }}/partner/join/{{ invite }}</code></p>
+  <p class="flash flash--ok">
+    {% if invite_sent %}Ссылка отправлена партнёру в Telegram. Дублируем на случай, если
+    он попросит:{% else %}Ссылка для входа — передайте её партнёру. Повторно она не
+    откроется:{% endif %}<br>
+    {% if panel_base %}<code class="mono mono--break">{{ panel_base }}/partner/join/{{ invite }}</code>
+    {% else %}<b>Не задан PANEL_PUBLIC_BASE_URL</b> — соберите ссылку вручную:
+    <code class="mono">/partner/join/{{ invite }}</code> на адресе панели.{% endif %}</p>
   {% endif %}
 
   {# ── Выплата ── #}

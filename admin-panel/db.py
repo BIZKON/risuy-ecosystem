@@ -3029,6 +3029,47 @@ async def set_order_status_with_audit(
 
 # ── Phase 1B: онлайн-оплата продаж школы (вебхук + «счёт из диалога») ─────────
 
+async def notify_partners_about_accrual(source_kind: str, source_id) -> int:
+    """Сказать партнёрам в Telegram, что им начислено. Возвращает число уведомлений.
+
+    🔴 BEST-EFFORT и СТРОГО ВНЕ транзакции оплаты. Инвариант проекта с Куска C:
+    уведомление НИКОГДА не ломает основной поток. Молчащий Telegram не должен приводить
+    к тому, что платёж не принят, — деньги важнее сообщения.
+
+    Партнёр и без уведомления увидит начисление в кабинете; сообщение экономит ему
+    заход и снимает вопрос «а мне начислили?» в нашу сторону.
+    """
+    sent = 0
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "select a.amount_rub, a.level, p.tg_chat_id, t.name as client_name "
+                "  from partner_accruals a "
+                "  join partners p on p.id = a.partner_id "
+                "  left join tenants t on t.id = a.client_id and a.client_kind = 'tenant' "
+                " where a.source_kind = $1 and a.source_id = $2 and a.reason in ('sale','mentor')",
+                source_kind, source_id)
+        base = (config.PANEL_PUBLIC_BASE_URL or "").rstrip("/")
+        for r in rows:
+            chat = (r["tg_chat_id"] or "").strip()
+            if not chat or not chat.lstrip("-").isdigit():
+                continue   # партнёр не привязал Telegram — это норма, не ошибка
+            what = "вашу продажу" if r["level"] == 0 else "продажу вашего партнёра"
+            who = f" (клиент: {r['client_name']})" if r["client_name"] else ""
+            text = (f"Вам начислено {r['amount_rub']:.2f} ₽ за {what}{who}."
+                    + (f"\n\nКабинет: {base}/partner" if base else ""))
+            try:
+                await enqueue_platform_notify(int(chat), text)
+                sent += 1
+            except Exception:
+                logging.getLogger("admin-panel").warning(
+                    "не удалось поставить уведомление партнёру в очередь", exc_info=True)
+    except Exception:
+        logging.getLogger("admin-panel").warning(
+            "уведомление о начислении не собрано", exc_info=True)
+    return sent
+
+
 # ── Внедрение: разовая продажа услуги нам (спека §15) ────────────────────────────
 # 🔴 Единственный источник партнёрских денег в НАШЕМ контуре. Абонплата им НЕ является —
 # решение владельца 16.08: тарифы это расходник на токены и серверы.
@@ -3119,7 +3160,10 @@ async def mark_implementation_paid_by_payment(payment_id: str, *, implementation
                 c, actor="yookassa-webhook", action="implementation_paid",
                 detail={"implementation_id": str(upd["id"]), "payment_id": payment_id,
                         "amount": str(upd["amount_rub"])})
-            return upd
+            paid_row = upd
+    # ВНЕ транзакции: деньги уже зафиксированы, уведомление их не отменяет.
+    await notify_partners_about_accrual("implementation", paid_row["id"])
+    return paid_row
 
 
 async def set_implementation_status(implementation_id, new_status: str, *, actor: str,

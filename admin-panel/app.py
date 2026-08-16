@@ -6855,13 +6855,29 @@ async def partners_page(request: Request, session: auth.Session = Depends(requir
 
 @app.post("/partners/create")
 async def partners_create(request: Request, session: auth.Session = Depends(require_session),
-                          name: str = Form(""), tg_chat_id: str = Form(""), csrf_token: str = Form("")):
+                          name: str = Form(""), tg_chat_id: str = Form(""),
+                          parent_id: str = Form(""), rate: str = Form(""),
+                          csrf_token: str = Form("")):
     _require_admin(session)
     await _enforce_csrf(request, session, csrf_token)
     if not name.strip():
         return RedirectResponse(url="/partners?err=no_name", status_code=303)
-    await db.create_partner(name, tg_chat_id, actor=session.actor, ip=_ip(request), user_agent=_ua(request))
-    return RedirectResponse(url="/partners?saved=created", status_code=303)
+    new_id, _ref = await db.create_partner(name, tg_chat_id, actor=session.actor,
+                                           ip=_ip(request), user_agent=_ua(request))
+    # Наставник и ставка — прямо здесь: иначе владелец заводит партнёра, потом идёт в
+    # карточку и проставляет их вторым заходом, а на третьем партнёре забывает.
+    raw_parent = (parent_id or "").strip()
+    if raw_parent:
+        try:
+            await db.set_partner_parent(new_id, uuid.UUID(raw_parent), actor=session.actor,
+                                        ip=_ip(request), user_agent=_ua(request))
+        except ValueError:
+            pass   # мусор в поле — партнёр уже создан, наставника проставят в карточке
+    value = _money(rate) if (rate or "").strip() else None
+    if value is not None and 0 <= value <= 100:
+        await db.set_partner_rate(new_id, value, actor=session.actor,
+                                  ip=_ip(request), user_agent=_ua(request))
+    return RedirectResponse(url=f"/partners/{new_id}?saved=created", status_code=303)
 
 
 @app.post("/partners/{partner_id}/status")
@@ -7057,7 +7073,8 @@ async def partner_cabinet(request: Request, session: auth.Session = Depends(requ
     partner = await _partner_of(session)
     data = await db.partner_cabinet_data(partner["id"])
     return templates.TemplateResponse(request, "partner_cabinet.html", {
-        "partner": partner, "base_url": config.SERVICE_SITE_URL, "session": session,
+        "partner": partner, "base_url": await db.get_bot_public_base_url(),
+        "session": session,
         "csrf_token": session.csrf_token, "active": "partner", **data})
 
 
@@ -7082,9 +7099,29 @@ async def partners_invite(request: Request, partner_id: uuid.UUID,
         return RedirectResponse(url="/partners?err=not_found", status_code=303)
     raw = await db.create_partner_invite(partner_id, actor=session.actor,
                                          ip=_ip(request), user_agent=_ua(request))
+    # Если Telegram партнёра известен — отправляем ссылку ему сами. Best-effort: сбой
+    # доставки не должен отменять выданное приглашение, владелец всё равно увидит ссылку
+    # на экране и сможет передать её как угодно.
+    sent = False
+    chat = (partner["tg_chat_id"] or "").strip() if partner["tg_chat_id"] else ""
+    base = (config.PANEL_PUBLIC_BASE_URL or "").rstrip("/")
+    if chat and chat.lstrip("-").isdigit() and base:
+        try:
+            await db.enqueue_platform_notify(
+                int(chat),
+                "Вам открыт доступ в партнёрский кабинет.\n\n"
+                f"Заведите вход по ссылке: {base}/partner/join/{raw}\n\n"
+                "Ссылка одноразовая и действует трое суток.")
+            sent = True
+        except Exception:
+            import logging
+            logging.getLogger("admin-panel").warning(
+                "приглашение партнёру не поставлено в очередь", exc_info=True)
     # Токен уходит в query один раз, чтобы владелец скопировал ссылку. В базе его нет —
     # только sha256, поэтому показать повторно мы не сможем, и это правильно.
-    return RedirectResponse(url=f"/partners/{partner_id}?invite={raw}", status_code=303)
+    return RedirectResponse(
+        url=f"/partners/{partner_id}?invite={raw}" + ("&sent=1" if sent else ""),
+        status_code=303)
 
 
 # ---- /partner/join/{token} — партнёр заводит себе вход (сессии ещё нет) ----- #
@@ -7135,9 +7172,14 @@ async def partner_detail(request: Request, partner_id: uuid.UUID,
     return templates.TemplateResponse(request, "partner_detail.html", {
         "partner": partner, "tenants": tenants, "accruals": accruals, "payouts": payouts,
         "totals": totals, "all_partners": all_partners,
+        # 🔴 ДВА разных адреса, и путать их нельзя: реф-ссылку /p/{code} отдаёт БОТ,
+        # а страницу входа /partner/join/{token} — ПАНЕЛЬ. Один base_url на оба даёт
+        # ссылку, которая молча не открывается.
         "base_url": await db.get_bot_public_base_url(),
+        "panel_base": (config.PANEL_PUBLIC_BASE_URL or "").rstrip("/"),
         # Токен приглашения показывается ОДИН раз: в базе только его sha256.
-        "invite": qp.get("invite"), "saved": qp.get("saved"), "err": qp.get("err"),
+        "invite": qp.get("invite"), "invite_sent": qp.get("sent") == "1",
+        "saved": qp.get("saved"), "err": qp.get("err"),
         "csrf_token": session.csrf_token, "session": session, "active": "partners"})
 
 
