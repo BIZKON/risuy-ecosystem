@@ -6075,6 +6075,67 @@ async def set_partner_status(partner_id: str, status: str, *, actor: str,
     return True
 
 
+async def partner_totals(partner_ids: list) -> dict:
+    """Начислено / выплачено / к выплате по каждому партнёру.
+
+    🔴 Два запроса с group by, а НЕ коррелированный подзапрос на строку. Подзапрос в
+    select на этом классе задач молча вернул нули при верных данных в базе — партнёр
+    увидел бы «начислено 0» при оплаченном счёте и пришёл бы спорить.
+    """
+    ids = [str(p) for p in partner_ids]
+    if not ids:
+        return {}
+    async with pool.acquire() as c:
+        acc = await c.fetch(
+            "select partner_id, coalesce(sum(amount_rub),0) s from partner_accruals "
+            "where partner_id = any($1::uuid[]) group by partner_id", ids)
+        pay = await c.fetch(
+            "select partner_id, coalesce(sum(amount_rub),0) s from partner_payouts "
+            "where partner_id = any($1::uuid[]) group by partner_id", ids)
+    accrued = {str(r["partner_id"]): r["s"] for r in acc}
+    paid = {str(r["partner_id"]): r["s"] for r in pay}
+    out = {}
+    for pid in ids:
+        a = accrued.get(pid, Decimal(0))
+        p = paid.get(pid, Decimal(0))
+        out[pid] = {"accrued": a, "paid": p, "due": a - p}
+    return out
+
+
+async def partner_cabinet_data(partner_id) -> dict:
+    """Всё, что партнёр видит о себе: начисления, выплаты, приведённые клиенты."""
+    async with pool.acquire() as c:
+        accruals = await c.fetch(
+            "select source_kind, client_kind, client_id, level, rate_percent, amount_rub, "
+            "       reason, created_at from partner_accruals "
+            "where partner_id = $1 order by created_at desc limit 200", partner_id)
+        payouts = await c.fetch(
+            "select amount_rub, paid_at, method, note from partner_payouts "
+            "where partner_id = $1 order by paid_at desc limit 100", partner_id)
+        clients = await c.fetch(
+            "select t.id, t.name, t.created_at from tenants t "
+            "where t.partner_id = $1 order by t.created_at desc", partner_id)
+    totals = (await partner_totals([partner_id])).get(
+        str(partner_id), {"accrued": Decimal(0), "paid": Decimal(0), "due": Decimal(0)})
+    return {"accruals": accruals, "payouts": payouts, "clients": clients, "totals": totals}
+
+
+async def partner_team_data(partner_id):
+    """Приведённые партнёры и начисленное С НИХ.
+
+    ⚠️ Чужих клиентов по именам наставник не видит: он получает процент с оборота, а не
+    доступ к чужой клиентской базе (спека §8.3).
+    """
+    async with pool.acquire() as c:
+        team = await c.fetch(
+            "select id, name, joined_at, status from partners where parent_id = $1 "
+            "order by joined_at desc", partner_id)
+        earned = await c.fetchval(
+            "select coalesce(sum(amount_rub),0) from partner_accruals "
+            "where partner_id = $1 and level = 1", partner_id)
+    return [dict(r) for r in team], (earned or Decimal(0))
+
+
 async def create_partner_invite(partner_id, *, actor: str, ip: str | None = None,
                                 user_agent: str | None = None) -> str:
     """Одноразовая ссылка-приглашение партнёру. Возвращает СЫРОЙ токен.

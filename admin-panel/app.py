@@ -6880,6 +6880,36 @@ async def partners_set_chat_id(request: Request, partner_id: uuid.UUID,
     return RedirectResponse(url="/partners?saved=chat", status_code=303)
 
 
+# ---- Кабинет партнёра: /partner, /partner/team ------------------------------ #
+async def _partner_of(session: auth.Session):
+    """Партнёр текущей сессии. Доступ даёт СТРОКА в partners, а не роль: партнёр не член
+    команды тенанта. Отключённый партнёр входа не имеет, даже если учётка жива."""
+    if session.role != "partner":
+        raise HTTPException(status_code=403, detail="Раздел партнёра")
+    partner = await db.partner_by_login_actor(session.actor)
+    if not partner:
+        raise HTTPException(status_code=403, detail="Партнёр не найден или отключён")
+    return partner
+
+
+@app.get("/partner", response_class=HTMLResponse)
+async def partner_cabinet(request: Request, session: auth.Session = Depends(require_session)):
+    partner = await _partner_of(session)
+    data = await db.partner_cabinet_data(partner["id"])
+    return templates.TemplateResponse(request, "partner_cabinet.html", {
+        "partner": partner, "base_url": config.SERVICE_SITE_URL, "session": session,
+        "csrf_token": session.csrf_token, "active": "partner", **data})
+
+
+@app.get("/partner/team", response_class=HTMLResponse)
+async def partner_team(request: Request, session: auth.Session = Depends(require_session)):
+    partner = await _partner_of(session)
+    team, earned = await db.partner_team_data(partner["id"])
+    return templates.TemplateResponse(request, "partner_team.html", {
+        "partner": partner, "team": team, "earned": earned, "session": session,
+        "csrf_token": session.csrf_token, "active": "partner_team"})
+
+
 @app.post("/partners/{partner_id}/invite")
 async def partners_invite(request: Request, partner_id: uuid.UUID,
                           session: auth.Session = Depends(require_session),

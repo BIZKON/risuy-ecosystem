@@ -49,6 +49,8 @@
 {%- elif name == 'companies' -%}<path d="M3 21h18M6 21V7l6-4 6 4v14"/><path d="M9 9h.01M15 9h.01M9 13h.01M15 13h.01M9 17h.01M15 17h.01"/>
 {%- elif name == 'club' -%}<circle cx="9" cy="8" r="3"/><path d="M2 20a7 7 0 0 1 14 0"/><circle cx="18" cy="9" r="2.5"/><path d="M16.5 12.5a5 5 0 0 1 5.5 5"/>
 {%- elif name == 'partners' -%}<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 8 2 2 4-4"/>
+{%- elif name == 'partner' -%}<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M7 15h4"/>
+{%- elif name == 'partner_team' -%}<circle cx="9" cy="8" r="3"/><path d="M2 20a7 7 0 0 1 14 0"/><path d="m17 8 2 2 4-4"/>
 {%- elif name == 'logout' -%}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
 {%- endif -%}
 </svg>
@@ -84,7 +86,7 @@
 <body class="app {% block body_class %}{% endblock %}">
   {% block chrome %}
   <aside class="sidebar" aria-label="Разделы">
-    <a class="sidebar__brand" href="/">
+    <a class="sidebar__brand" href="{% if session and session.role == 'partner' %}/partner{% else %}/{% endif %}">
       <span class="sidebar__logo" aria-hidden="true">АП</span>
       <span class="sidebar__brandtext">
         <span class="sidebar__name">ИИ-Агент&nbsp;Про</span>
@@ -93,6 +95,12 @@
     </a>
 
     <nav class="snav" aria-label="Основная навигация">
+      {%- if session and session.role == 'partner' %}
+      {# Партнёру открыт только его раздел (спека §8.2). Показывать остальное значило бы
+         вести его на 403: ссылка, которая не работает, хуже отсутствующей. #}
+      {{ nav_item('partner',      '/partner',      'Мой кабинет',  active) }}
+      {{ nav_item('partner_team', '/partner/team', 'Мои партнёры', active) }}
+      {%- else %}
       {{ nav_item('dashboard',    '/',           'Статистика', active) }}
       {{ nav_item('dialogs',      '/dialogs',    'Диалоги',    active, nav_dialogs_badge|default(0, true)) }}
       {# «Каналы» — ролевой раздел (Слой C): платформе — атрибуция/персоны, клиенту — self-serve подключение #}
@@ -126,6 +134,7 @@
       {%- if session and session.is_platform %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('brief', '/brief-center', 'Бриф-центр', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('partners', '/partners', 'Партнёры', active) }}{% endif %}
+      {%- endif %}
     </nav>
 
     {% if csrf_token %}

@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block title %}Мой кабинет{% endblock %}
+{% block body_class %}page-partner-cabinet{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">{{ partner.name|e }}</h1>
+  <p class="page-head__hint">
+    Ваша ссылка: <code class="mono">{{ base_url }}/p/{{ partner.ref_code }}</code> —
+    отдайте её клиенту. Когда он оплатит, вознаграждение появится здесь само,
+    спрашивать никого не нужно.
+  </p>
+</div>
+
+<section class="section" aria-label="Итоги">
+  <div class="stat-row">
+    <div class="stat">
+      <span class="stat__label">Начислено</span>
+      <span class="stat__value mono">{{ '%.2f'|format(totals.accrued) }} ₽</span>
+    </div>
+    <div class="stat">
+      <span class="stat__label">Выплачено</span>
+      <span class="stat__value mono">{{ '%.2f'|format(totals.paid) }} ₽</span>
+    </div>
+    <div class="stat">
+      <span class="stat__label">К выплате</span>
+      <span class="stat__value mono">{{ '%.2f'|format(totals.due) }} ₽</span>
+    </div>
+  </div>
+  <details class="hint hint--block">
+    <summary>Как считается вознаграждение</summary>
+    Вам идёт {{ '%.0f'|format(partner.rate_percent) }}% с первой оплаты каждого
+    приведённого клиента. Пополнения баланса в счёт не идут — только оплата внедрения
+    или абонплаты. «К выплате» — это начислено минус уже выплаченное; если клиенту
+    сделали возврат, начисление по нему снимается отдельной строкой.
+  </details>
+</section>
+
+{% if not clients and not accruals %}
+<section class="card" aria-label="Онбординг">
+  <h2 class="card__title">Пока пусто — и это нормально</h2>
+  <p class="card__note">
+    Отдайте ссылку выше клиенту. Он перейдёт по ней в бота, назовёт компанию, а мы
+    заведём ему кабинет и запомним, что клиент ваш. Вознаграждение начислится в момент
+    первой оплаты и появится на этой странице.
+  </p>
+</section>
+{% else %}
+
+<section class="section" aria-label="Приведённые клиенты">
+  <h2 class="section__title section__title--lg">Приведённые клиенты</h2>
+  {% if clients %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead><tr><th scope="col">Компания</th><th scope="col">Заведена</th></tr></thead>
+      <tbody>
+        {% for c in clients %}
+        <tr>
+          <td>{{ c.name|e }}</td>
+          <td class="nowrap muted">{{ c.created_at.strftime('%d.%m.%Y') if c.created_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="hint muted">По вашей ссылке пока никто не зарегистрировался.</p>
+  {% endif %}
+</section>
+
+<section class="section" aria-label="Начисления">
+  <h2 class="section__title section__title--lg">Начисления</h2>
+  {% if accruals %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Дата</th><th scope="col">За что</th>
+          <th scope="col">Ставка</th><th scope="col">Сумма</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in accruals %}
+        <tr>
+          <td class="nowrap muted">{{ a.created_at.strftime('%d.%m.%Y') }}</td>
+          <td>
+            {% if a.reason == 'sale' %}Ваша продажа
+            {% elif a.reason == 'mentor' %}Продажа вашего партнёра
+            {% else %}Возврат клиенту{% endif %}
+          </td>
+          <td class="mono">{{ '%.0f'|format(a.rate_percent) }}%</td>
+          <td class="mono">{{ '%.2f'|format(a.amount_rub) }} ₽</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="hint muted">Начислений пока нет.</p>
+  {% endif %}
+</section>
+
+<section class="section" aria-label="Выплаты">
+  <h2 class="section__title section__title--lg">Выплаты</h2>
+  {% if payouts %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr><th scope="col">Дата</th><th scope="col">Способ</th><th scope="col">Сумма</th></tr>
+      </thead>
+      <tbody>
+        {% for p in payouts %}
+        <tr>
+          <td class="nowrap muted">{{ p.paid_at.strftime('%d.%m.%Y') }}</td>
+          <td>{{ p.method|e if p.method else '—' }}</td>
+          <td class="mono">{{ '%.2f'|format(p.amount_rub) }} ₽</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="hint muted">Выплат пока не было.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

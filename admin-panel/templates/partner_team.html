@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Мои партнёры{% endblock %}
+{% block body_class %}page-partner-team{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Хлебные крошки">
+  <a href="/partner">← Мой кабинет</a>
+</nav>
+
+<div class="page-head">
+  <h1 class="page-head__title">Мои партнёры</h1>
+  <p class="page-head__hint">
+    С их продаж вам идёт 5% сверх — из нашей доли, их собственное вознаграждение от
+    этого не уменьшается. Начисления идут первые 12 месяцев с даты, когда партнёр
+    присоединился.
+  </p>
+</div>
+
+<section class="section" aria-label="Итог">
+  <div class="stat">
+    <span class="stat__label">Начислено с их продаж</span>
+    <span class="stat__value mono">{{ '%.2f'|format(earned) }} ₽</span>
+  </div>
+</section>
+
+{% if team %}
+<div class="table-wrap">
+  <table class="table table--zebra">
+    <thead>
+      <tr><th scope="col">Партнёр</th><th scope="col">С нами с</th><th scope="col">Статус</th></tr>
+    </thead>
+    <tbody>
+      {% for t in team %}
+      <tr>
+        <td>{{ t.name|e }}</td>
+        <td class="nowrap muted">{{ t.joined_at.strftime('%d.%m.%Y') if t.joined_at else '—' }}</td>
+        <td>
+          {% if t.status == 'active' %}<span class="pill pill--ok">Активен</span>
+          {% else %}<span class="pill pill--bad">Отключён</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="hint muted">Клиентов ваших партнёров по именам мы не показываем: вы получаете
+  процент с оборота, а их клиентская база остаётся их.</p>
+{% else %}
+<section class="card" aria-label="Онбординг">
+  <h2 class="card__title">Вы пока никого не пригласили</h2>
+  <p class="card__note">
+    Если приведёте партнёра, с каждой его продажи вам будет идти 5% сверх — первые
+    12 месяцев. Напишите нам, и мы выдадим ему доступ, а вас запишем наставником.
+  </p>
+</section>
+{% endif %}
+{% endblock %}
