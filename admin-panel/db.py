@@ -3545,13 +3545,12 @@ async def mark_service_invoice_paid_by_payment(
                 """,
                 row["id"], card_last4,
             )
-            # Партнёрское начисление — в той же транзакции (спека §6). app.tenant_id выше
-            # уже выставлен, но партнёр может быть ПЛАТФОРМЕННЫМ — поэтому
-            # accrue_for_payment ходит через SECURITY DEFINER, а не прямым запросом.
-            await accrue_for_payment(
-                c, source_kind="service_invoice", source_id=upd["id"],
-                client_kind="tenant", client_id=tenant_id, amount_rub=row["amount"],
-            )
+            # 🔴 ПАРТНЁРСКОГО НАЧИСЛЕНИЯ ЗДЕСЬ НЕТ И БЫТЬ НЕ ДОЛЖНО.
+            # Решение владельца 16.08.2026: абонплата — расходник на токены и серверы, она
+            # целиком идёт нам, партнёру с неё не причитается ничего. Партнёрская доля
+            # считается только от ВНЕДРЕНИЯ (см. accrue_for_payment и раздел внедрений).
+            # Врезка сюда была ошибкой первой редакции спеки и снята до появления первого
+            # партнёра — денег она не тронула (партнёров на проде было 0).
             await _insert_audit(
                 c, actor=actor, action="service_invoice_paid",
                 detail={"invoice_id": str(row["id"]), "payment_id": payment_id},
