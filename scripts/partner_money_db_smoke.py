@@ -29,6 +29,7 @@ FAILS = []
 PSELLER = "СМОУК Продавец"
 PMENTOR = "СМОУК Наставник"
 TNAME = "СМОУК Тенант-плательщик"
+PLOGIN = "smoke-partner@example.test"
 SRC1 = "11111111-1111-1111-1111-111111111111"
 SRC2 = "22222222-2222-2222-2222-222222222222"
 
@@ -46,6 +47,9 @@ async def _cleanup(c):
                        (select id from partners where name in ($1,$2))""", PSELLER, PMENTOR)
     await c.execute("delete from tenants where name = $1", TNAME)
     await c.execute("update partners set parent_id = null where name in ($1,$2)", PSELLER, PMENTOR)
+    await c.execute("""delete from partner_invites where partner_id in
+                       (select id from partners where name in ($1,$2))""", PSELLER, PMENTOR)
+    await c.execute("delete from admin_users where username = $1", PLOGIN)
     await c.execute("delete from partners where name in ($1,$2)", PSELLER, PMENTOR)
 
 
@@ -163,6 +167,42 @@ async def main():
             check("второе сторно ничего не создало", twice == 0, f"строк={twice}")
             check("баланс по-прежнему ноль", total == Decimal("0.00"), str(total))
             await c.execute("update partners set rate_percent = 20 where id = $1", seller_id)
+
+            print("9. Приглашение одноразовое и заводит вход одной транзакцией:")
+            token = await db.create_partner_invite(seller_id, actor="smoke")
+            res = await db.register_partner_login(token, PLOGIN, "$argon2id$fake$hash")
+            check("вход заведён", res == "ok", res)
+            who = await db.partner_by_login_actor(PLOGIN)
+            check("партнёр находится по логину", who is not None and str(who["id"]) == str(seller_id))
+            role = await c.fetchval("select role from admin_users where username = $1", PLOGIN)
+            check("роль partner", role == "partner", str(role))
+
+            print("10. Повторное использование того же токена отбивается:")
+            again = await db.register_partner_login(token, "other@example.test", "$argon2id$fake$hash")
+            check("вернул bad_token", again == "bad_token", again)
+            leftover = await c.fetchval(
+                "select count(*) from admin_users where username = $1", "other@example.test")
+            check("вторая учётка не создана", leftover == 0, f"строк={leftover}")
+
+            print("11. Просроченное приглашение не работает:")
+            t2 = await db.create_partner_invite(seller_id, actor="smoke")
+            import hashlib as _h
+            await c.execute("update partner_invites set expires_at = now() - interval '1 hour' "
+                            "where token_hash = $1", _h.sha256(t2.encode()).hexdigest())
+            check("вернул bad_token",
+                  await db.register_partner_login(t2, "late@example.test", "$argon2id$fake$hash")
+                  == "bad_token")
+
+            print("12. Занятый логин НЕ сжигает приглашение:")
+            await c.execute("delete from admin_users where username = $1", PLOGIN)
+            await c.execute("insert into admin_users (username, password_hash, role) "
+                            "values ($1, $2, 'operator')", PLOGIN, "$argon2id$fake$hash")
+            t3 = await db.create_partner_invite(seller_id, actor="smoke")
+            busy = await db.register_partner_login(t3, PLOGIN, "$argon2id$fake$hash")
+            check("вернул exists", busy == "exists", busy)
+            used = await c.fetchval("select used_at from partner_invites where token_hash = $1",
+                                    _h.sha256(t3.encode()).hexdigest())
+            check("приглашение осталось непогашенным", used is None, str(used))
 
             await _cleanup(c)
     finally:

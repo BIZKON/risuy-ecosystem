@@ -433,6 +433,28 @@ def clear_session_cookie(response) -> None:
 # POST сверяется constant-time. Несовпадение → 403 (бросаем в app.py).
 # Для /login (сессии ещё нет) — отдельный pre-session токен в подписанной cookie.
 # --------------------------------------------------------------------------- #
+# Единственный префикс, открытый принципалу «партнёр». Спека §8.2.
+PARTNER_PREFIX = "/partner"
+
+
+def partner_may_access(path: str) -> bool:
+    """Пускать ли партнёрскую сессию на этот путь.
+
+    🔴 БЕЛЫЙ список, а не чёрный. Гейты в панели писались в мире, где принципала
+    «партнёр» не существовало; правило «партнёру запрещено вот это» пропустит всё, что
+    добавят завтра. Здесь наоборот: закрыто всё, кроме явно открытого.
+
+    Проверяем точное совпадение или границу сегмента: «/partnerX» и «/partner-admin»
+    начинаются с «/partner», но это ДРУГИЕ маршруты. Точки-точки и «//» отсекаем до
+    сравнения — нормализацию пути мы не контролируем.
+    """
+    if not path or not path.startswith("/") or path.startswith("//"):
+        return False
+    if ".." in path or "\\" in path:
+        return False
+    return path == PARTNER_PREFIX or path.startswith(PARTNER_PREFIX + "/")
+
+
 def check_csrf(session_token: str, submitted: str | None) -> bool:
     if not submitted:
         return False

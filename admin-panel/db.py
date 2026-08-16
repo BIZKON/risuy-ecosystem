@@ -6075,6 +6075,72 @@ async def set_partner_status(partner_id: str, status: str, *, actor: str,
     return True
 
 
+async def create_partner_invite(partner_id, *, actor: str, ip: str | None = None,
+                                user_agent: str | None = None) -> str:
+    """Одноразовая ссылка-приглашение партнёру. Возвращает СЫРОЙ токен.
+
+    В базу уходит только sha256: утечка дампа не должна давать вход в чужой кабинет с
+    чужими деньгами (образец — password_reset_tokens).
+    """
+    raw = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    expires = datetime.now(timezone.utc) + timedelta(hours=config.PARTNER_INVITE_TTL_HOURS)
+    async with pool.acquire() as c:
+        async with c.transaction():
+            await c.execute(
+                "insert into partner_invites (token_hash, partner_id, expires_at, created_by) "
+                "values ($1,$2,$3,$4)", digest, partner_id, expires, actor)
+            await _insert_audit(c, actor=actor, action="partner_invite_created", ip=ip,
+                                user_agent=user_agent, detail={"partner_id": str(partner_id)})
+    return raw
+
+
+async def register_partner_login(token: str, username: str, password_hash: str, *,
+                                 ip: str | None = None, user_agent: str | None = None) -> str:
+    """Погасить приглашение и завести партнёру вход. "ok" | "bad_token" | "exists".
+
+    🔴 Всё ОДНОЙ транзакцией. Если гасить приглашение отдельным вызовом, а учётку заводить
+    следующим, то сбой на втором шаге сжигает одноразовую ссылку впустую: партнёр остаётся
+    без входа, а ссылка больше не работает. Здесь либо всё, либо ничего.
+
+    Пароль приходит уже хешированным: сырого мы не видим и не логируем.
+    """
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    async with pool.acquire() as c:
+        async with c.transaction():
+            inv = await c.fetchrow(
+                "select partner_id, expires_at, used_at from partner_invites "
+                "where token_hash = $1 for update", digest)
+            if inv is None or inv["used_at"] is not None:
+                return "bad_token"
+            if inv["expires_at"] < datetime.now(timezone.utc):
+                return "bad_token"
+            res = await c.execute(
+                "insert into admin_users (username, password_hash, role, active, created_by) "
+                "values ($1,$2,'partner',true,'partner-join') on conflict (username) do nothing",
+                username, password_hash)
+            if res.endswith(" 0"):
+                return "exists"   # логин занят — приглашение НЕ гасим, транзакция откатится
+            await c.execute("update partner_invites set used_at = now() where token_hash = $1", digest)
+            await c.execute("update partners set login_actor = $1, email = $1 where id = $2",
+                            username, inv["partner_id"])
+            await _insert_audit(c, actor="partner-join", action="partner_login_registered", ip=ip,
+                                user_agent=user_agent,
+                                detail={"partner_id": str(inv["partner_id"]), "username": username})
+    return "ok"
+
+
+async def partner_by_login_actor(actor: str):
+    """Партнёр по имени учётной записи панели.
+
+    Доступ в кабинет даёт СТРОКА в partners, а не роль: партнёр не член команды тенанта и
+    в memberships не попадает. Отключённый партнёр входа не имеет.
+    """
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select * from partners where login_actor = $1 and status = 'active'", actor)
+
+
 async def set_partner_chat_id(partner_id: str, tg_chat_id: str | None, *, actor: str,
                              ip: str | None, user_agent: str | None) -> bool:
     val = (tg_chat_id or "").strip() or None

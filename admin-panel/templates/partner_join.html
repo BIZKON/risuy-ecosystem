@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Вход партнёра{% endblock %}
+{% block body_class %}page-partner-join{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Заведите вход в кабинет</h1>
+  <p class="page-head__hint">Ссылка одноразовая и действует трое суток. Пароль придумайте
+    сами — мы его не видим и подсказать не сможем, но пришлём ссылку на смену, если
+    забудете.</p>
+</div>
+
+{% if err == 'bad_token' %}
+<p class="flash flash--error">Ссылка недействительна, просрочена или уже использована.
+  Попросите новую у того, кто вас пригласил.</p>
+{% endif %}
+{% if err == 'exists' %}
+<p class="flash flash--error">На этот email уже заведён вход. Войдите обычным способом
+  или восстановите пароль — приглашение осталось действующим.</p>
+{% endif %}
+{% if err == 'bad_email' %}
+<p class="flash flash--error">Проверьте адрес: нужен рабочий email.</p>
+{% endif %}
+{% if err == 'weak' %}
+<p class="flash flash--error">Пароль короче 10 символов.</p>
+{% endif %}
+
+<section class="card" aria-label="Заведение входа">
+  <form method="post" action="/partner/join/{{ token }}" autocomplete="off">
+    <label class="field">
+      <span class="field__label">Ваш email</span>
+      <span class="field__hint">Он же логин. На него придёт ссылка, если забудете пароль.</span>
+      <input class="field__input" type="email" name="email" required maxlength="200">
+    </label>
+    <label class="field">
+      <span class="field__label">Пароль</span>
+      <span class="field__hint">От 10 символов.</span>
+      <input class="field__input" type="password" name="password" required minlength="10">
+    </label>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit">Создать вход</button>
+    </div>
+  </form>
+</section>
+
+<details class="hint hint--block">
+  <summary>Что будет в кабинете</summary>
+  Ваши приведённые клиенты, начисленное вознаграждение и выплаты. Вознаграждение
+  появляется само в момент, когда клиент оплачивает, — спрашивать никого не нужно.
+  Данные других партнёров и чужих клиентов вам не видны.
+</details>
+{% endblock %}

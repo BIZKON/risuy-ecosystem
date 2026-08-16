@@ -231,6 +231,16 @@ async def require_session(request: Request) -> auth.Session:
     # Харденинг №2: фиксируем активный тенант запроса → каждый acquire пула проставит его
     # в app.tenant_id (RLS на leads/messages/outbox). Запрос и хендлеры — одна asyncio-задача,
     # contextvar виден сквозь Depends. Маршруты без сессии (login/health/webhook) сюда не идут.
+    # Партнёр живёт только в своём разделе (спека §8.2). Гейт БЕЛЫМ списком: маршрут,
+    # добавленный завтра, закрыт партнёру по умолчанию, а не по факту того, что о нём
+    # вспомнили. Активного тенанта у партнёра нет и быть не должно — иначе его сессия
+    # проставила бы app.tenant_id и открыла тенантские данные первым же маршрутом,
+    # который забудут закрыть.
+    if session.role == "partner":
+        if not auth.partner_may_access(request.url.path):
+            raise HTTPException(status_code=403, detail="Раздел недоступен")
+        db.set_active_tenant(None)
+        return session
     db.set_active_tenant(session.active_tenant_id)
     return session
 
@@ -6868,6 +6878,53 @@ async def partners_set_chat_id(request: Request, partner_id: uuid.UUID,
     if not ok:
         return RedirectResponse(url="/partners?err=not_found", status_code=303)
     return RedirectResponse(url="/partners?saved=chat", status_code=303)
+
+
+@app.post("/partners/{partner_id}/invite")
+async def partners_invite(request: Request, partner_id: uuid.UUID,
+                          session: auth.Session = Depends(require_session),
+                          csrf_token: str = Form("")):
+    """Выдать партнёру одноразовую ссылку, по которой он заведёт себе вход."""
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    partner = await db.get_partner(partner_id)
+    if not partner:
+        return RedirectResponse(url="/partners?err=not_found", status_code=303)
+    raw = await db.create_partner_invite(partner_id, actor=session.actor,
+                                         ip=_ip(request), user_agent=_ua(request))
+    # Токен уходит в query один раз, чтобы владелец скопировал ссылку. В базе его нет —
+    # только sha256, поэтому показать повторно мы не сможем, и это правильно.
+    return RedirectResponse(url=f"/partners/{partner_id}?invite={raw}", status_code=303)
+
+
+# ---- /partner/join/{token} — партнёр заводит себе вход (сессии ещё нет) ----- #
+@app.get("/partner/join/{token}", response_class=HTMLResponse)
+async def partner_join_form(request: Request, token: str):
+    return templates.TemplateResponse(request, "partner_join.html",
+                                      {"token": token, "err": request.query_params.get("err")})
+
+
+@app.post("/partner/join/{token}")
+async def partner_join(request: Request, token: str,
+                       email: str = Form(""), password: str = Form("")):
+    """Погасить приглашение и завести учётную запись партнёра.
+
+    Пароль партнёр ставит сам — мы его не видим никогда; дальше работает существующий
+    /forgot-password. Гашение приглашения и создание учётки — одной транзакцией в db.
+    """
+    actor = (email or "").strip().lower()
+    if "@" not in actor or len(actor) > 200:
+        return RedirectResponse(url=f"/partner/join/{token}?err=bad_email", status_code=303)
+    if len(password) < 10:
+        return RedirectResponse(url=f"/partner/join/{token}?err=weak", status_code=303)
+    res = await db.register_partner_login(
+        token, actor, await auth.hash_password(password),
+        ip=_ip(request), user_agent=_ua(request))
+    if res == "bad_token":
+        return RedirectResponse(url=f"/partner/join/{token}?err=bad_token", status_code=303)
+    if res == "exists":
+        return RedirectResponse(url=f"/partner/join/{token}?err=exists", status_code=303)
+    return RedirectResponse(url="/login?saved=partner_joined", status_code=303)
 
 
 # ---- /partners/{id} — карточка (uuid-типизация → мусор не дойдёт до SQL) --- #

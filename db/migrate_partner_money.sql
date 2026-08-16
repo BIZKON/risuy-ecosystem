@@ -34,6 +34,14 @@ create index if not exists partners_parent_idx on partners (parent_id) where par
 create unique index if not exists partners_login_actor_uq
     on partners (login_actor) where login_actor is not null;
 
+-- Роль «партнёр» в учётных записях панели. Check-ограничение пересоздаётся свободно
+-- (в отличие от enum, где ADD VALUE нельзя использовать в той же транзакции).
+-- 🔴 Партнёр — НЕ оператор и НЕ админ: он вообще не член команды, membership не получает,
+-- и открытый ему префикс ровно один (/partner/*, белый список в auth.partner_may_access).
+alter table admin_users drop constraint if exists admin_users_role_chk;
+alter table admin_users add constraint admin_users_role_chk
+    check (role in ('admin', 'operator', 'partner'));
+
 -- ── 2. Начисления ────────────────────────────────────────────────────────────────
 create table if not exists partner_accruals (
     id              uuid primary key default gen_random_uuid(),
