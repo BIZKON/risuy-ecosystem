@@ -123,6 +123,23 @@ async def main():
             except asyncpg.PostgresError:
                 check("запись чужого контура отбита with check", True)
 
+            print("ФАЗА A2. Владелец платформы видит СВОИХ партнёров, имея активного тенанта:")
+            # 🔴 Регрессия на реальную ошибку, найденную живым прогоном 16.08.2026.
+            # У env-админа активный тенант ТОЖЕ проставлен («первый живой»), поэтому
+            # политика, различавшая контуры только по app.tenant_id, прятала от владельца
+            # его собственных партнёров: раздел «Партнёры» показывал пустоту.
+            await c.execute("select set_config('app.tenant_id', $1, false)", str(tenant_id))
+            await c.execute("select set_config('app.is_platform', 'on', false)")
+            names = {r["name"] for r in await c.fetch(
+                "select name from partners where name in ($1,$2)", PLATFORM, TENANTP)}
+            check("платформенный партнёр виден при GUC-тенанте", PLATFORM in names, str(names))
+
+            await c.execute("select set_config('app.is_platform', 'off', false)")
+            names = {r["name"] for r in await c.fetch(
+                "select name from partners where name in ($1,$2)", PLATFORM, TENANTP)}
+            check("без is_platform тенант НЕ видит платформенного", PLATFORM not in names, str(names))
+            check("и видит своего", TENANTP in names, str(names))
+
             print("ФАЗА B. Боевая конфигурация: начисление платформенному партнёру проходит:")
             for t in FORCED:
                 await c.execute(f"alter table {t} no force row level security")

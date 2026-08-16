@@ -42,13 +42,22 @@ pool: asyncpg.Pool | None = None
 # в денежных функциях/скане платформы перекрывают это внутри своей транзакции — ок.
 # Бот ходит owner-ролью и RLS обходит (§8.7), его этот хук не касается.
 _active_tenant: contextvars.ContextVar = contextvars.ContextVar("panel_active_tenant", default=None)
+# 🔴 Платформенность сессии ОТДЕЛЬНЫМ GUC, и вот почему. У env-админа активный тенант ТОЖЕ
+# проставлен (auth.create_session: «первый живой»), поэтому политика, различающая контуры
+# только по app.tenant_id, спрятала бы от владельца платформы его собственных партнёров —
+# раздел «Партнёры» показывал бы пустоту, а «Создать партнёра» падал бы на with check.
+# Тенантская сессия платформенной не бывает (is_platform == env-админ), утечки нет.
+_is_platform: contextvars.ContextVar = contextvars.ContextVar("panel_is_platform", default=False)
 
 
-def set_active_tenant(tenant_id) -> None:
+def set_active_tenant(tenant_id, *, is_platform: bool = False) -> None:
     """Запоминает активный тенант запроса (зовёт require_session). Дальше каждый acquire
     пула проставит его в app.tenant_id (RLS). None → не ставим (GUC после reset пуст →
-    current_setting=NULL → RLS отдаёт 0 строк без ошибки касту '' → uuid)."""
+    current_setting=NULL → RLS отдаёт 0 строк без ошибки касту '' → uuid).
+
+    is_platform уезжает вторым GUC — см. комментарий к _is_platform выше."""
     _active_tenant.set(str(tenant_id) if tenant_id else None)
+    _is_platform.set(bool(is_platform))
 
 
 async def get_tenant_id_by_slug(slug: str):
@@ -66,6 +75,11 @@ async def _apply_tenant_guc(conn: asyncpg.Connection) -> None:
     tid = _active_tenant.get()
     if tid:
         await conn.execute("select set_config('app.tenant_id', $1, false)", tid)
+    # Ставим ВСЕГДА, в том числе 'off': после RESET ALL значение пусто, а политика
+    # партнёрских таблиц сравнивает его строкой — пустое и 'off' для неё одно и то же,
+    # но явное 'off' читается однозначно при разборе на живой базе.
+    if _is_platform.get():
+        await conn.execute("select set_config('app.is_platform', 'on', false)")
 
 # --- Allow-list'ы для динамики в SQL (никогда не подставляем имя/направление сырьём) ---
 # Канон значений — в config (единый источник, совпадает со схемой/ботом). Здесь —

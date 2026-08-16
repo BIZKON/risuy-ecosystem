@@ -239,9 +239,9 @@ async def require_session(request: Request) -> auth.Session:
     if session.role == "partner":
         if not auth.partner_may_access(request.url.path):
             raise HTTPException(status_code=403, detail="Раздел недоступен")
-        db.set_active_tenant(None)
+        db.set_active_tenant(None, is_platform=False)
         return session
-    db.set_active_tenant(session.active_tenant_id)
+    db.set_active_tenant(session.active_tenant_id, is_platform=session.is_platform)
     return session
 
 
