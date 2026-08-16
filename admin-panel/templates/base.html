@@ -134,6 +134,7 @@
       {%- if session and session.is_platform %}{{ nav_item('tenants', '/tenants', 'Клиенты', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('brief', '/brief-center', 'Бриф-центр', active) }}{% endif %}
       {%- if session and session.is_platform %}{{ nav_item('partners', '/partners', 'Партнёры', active) }}{% endif %}
+      {%- if session and session.is_platform %}{{ nav_item('products', '/implementations', 'Внедрения', active) }}{% endif %}
       {%- endif %}
     </nav>
 

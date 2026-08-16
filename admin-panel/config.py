@@ -867,3 +867,6 @@ PARTNER_MENTORS_TENANT_ENABLED = (
 )
 # Сколько живёт одноразовая ссылка-приглашение партнёра.
 PARTNER_INVITE_TTL_HOURS = _opt_int("PARTNER_INVITE_TTL_HOURS", 72)
+# Цена внедрения по умолчанию. Правится в форме: договорные внедрения бывают дороже,
+# но подставлять каждый раз руками — способ однажды ошибиться на порядок.
+IMPLEMENTATION_PRICE_RUB = Decimal(os.environ.get("IMPLEMENTATION_PRICE_RUB", "60000"))

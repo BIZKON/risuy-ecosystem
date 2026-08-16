@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% from "_macros.html" import flash %}
+
+{% block title %}Внедрения{% endblock %}
+{% block body_class %}page-implementations{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-head__title">Внедрения</h1>
+  <p class="page-head__hint">Разовая продажа работ клиенту. Именно с внедрения идёт
+    вознаграждение партнёру — с абонплаты не идёт ничего.</p>
+</div>
+
+{% if saved == 'created' %}{{ flash('Внедрение заведено. Скопируйте ссылку на оплату из таблицы и отдайте клиенту.', 'ok') }}{% endif %}
+{% if saved == 'canceled' %}{{ flash('Внедрение отменено.', 'ok') }}{% endif %}
+{% if saved == 'refunded' %}{{ flash('Отмечен возврат. Доля партнёра сторнирована.', 'ok') }}{% endif %}
+{% if err == 'no_yookassa' %}{{ flash('Онлайн-оплата выключена: не заданы ключи ЮKassa.', 'error') }}{% endif %}
+{% if err == 'no_tenant' %}{{ flash('Выберите клиента.', 'error') }}{% endif %}
+{% if err == 'bad_amount' %}{{ flash('Сумма должна быть числом больше нуля.', 'error') }}{% endif %}
+{% if err == 'yk_failed' %}{{ flash('ЮKassa не приняла платёж. Внедрение сохранено — попробуйте создать ссылку ещё раз.', 'error') }}{% endif %}
+{% if err == 'not_found' %}{{ flash('Внедрение не найдено.', 'error') }}{% endif %}
+
+<section class="card" aria-label="Новое внедрение">
+  <h2 class="card__title">Завести внедрение</h2>
+  <p class="card__note">Создаём строку у себя, затем ссылку на оплату в ЮKassa. Ссылку
+    отдаёте клиенту сами — как только он оплатит, партнёру начислится
+    {{ '%.0f'|format(partner_rate) }}% без вашего участия.</p>
+  <form method="post" action="/implementations/create" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-row">
+      <label class="field">
+        <span class="field__label">Клиент</span>
+        <select class="field__input" name="tenant_id" required>
+          <option value="">— выберите —</option>
+          {% for t in tenants %}<option value="{{ t.id }}">{{ t.name|e }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span class="field__label">Что внедряем</span>
+        <input class="field__input" type="text" name="title" maxlength="120"
+               placeholder="Внедрение ИИ-агента">
+      </label>
+    </div>
+    <div class="form-row">
+      <label class="field">
+        <span class="field__label">Сумма, ₽</span>
+        <input class="field__input mono" type="text" name="amount" inputmode="decimal"
+               value="{{ '%.0f'|format(default_price) }}">
+      </label>
+      <label class="field">
+        <span class="field__label">Email клиента <span class="field__hint">для чека</span></span>
+        <input class="field__input" type="email" name="email" maxlength="200">
+      </label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn--dark" type="submit" {% if not yookassa_enabled %}disabled{% endif %}>
+        Создать ссылку на оплату
+      </button>
+    </div>
+  </form>
+  <details class="hint hint--block"><summary>Зачем эти поля</summary>
+    <b>Клиент</b> — кому внедряем. От него же система узнаёт, какой партнёр его привёл и
+    кому уйдёт вознаграждение; если партнёра нет, никому ничего не начислится.<br>
+    <b>Сумма</b> подставлена из настройки ({{ '%.0f'|format(default_price) }} ₽), но
+    правится: договорные внедрения бывают дороже.<br>
+    <b>Email</b> нужен для чека по 54-ФЗ. Без него ссылка всё равно создастся, но чек не
+    уйдёт — для оплаты физлицом это нарушение.<br>
+    Вознаграждение партнёру начисляется <b>только за первое</b> внедрение клиента:
+    второй проект тому же клиенту комиссии не даёт.
+  </details>
+</section>
+
+<section class="section" aria-label="Внедрения">
+  <h2 class="section__title section__title--lg">Все внедрения</h2>
+  {% if items %}
+  <div class="table-wrap">
+    <table class="table table--zebra">
+      <thead>
+        <tr>
+          <th scope="col">Клиент</th><th scope="col">Что</th><th scope="col">Сумма</th>
+          <th scope="col">Партнёр</th><th scope="col">Статус</th>
+          <th scope="col">Ссылка на оплату</th><th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in items %}
+        <tr{% if i.status in ('canceled','refunded') %} class="row--muted"{% endif %}>
+          <td>{{ i.tenant_name|e }}</td>
+          <td>{{ i.title|e }}</td>
+          <td class="num mono">{{ '%.2f'|format(i.amount_rub) }} ₽</td>
+          <td>{% if i.partner_name %}{{ i.partner_name|e }}{% else %}<span class="muted">нет</span>{% endif %}</td>
+          <td>
+            {% if i.status == 'paid' %}<span class="pill pill--ok">оплачено</span>
+              {% if i.paid_at %}<span class="muted nowrap">{{ i.paid_at.strftime('%d.%m.%Y') }}</span>{% endif %}
+            {% elif i.status == 'pending' %}<span class="badge">ждёт оплаты</span>
+            {% elif i.status == 'canceled' %}<span class="pill pill--bad">отменено</span>
+            {% else %}<span class="pill pill--bad">возврат</span>{% endif %}
+          </td>
+          <td>
+            {% if i.payment_url and i.status == 'pending' %}
+            <code class="mono mono--break">{{ i.payment_url }}</code>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>
+            {% if i.status == 'pending' %}
+            <form class="inline-form" method="post" action="/implementations/{{ i.id }}/status">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="status" value="canceled">
+              <button class="btn btn--danger-ghost btn--sm" type="submit">Отменить</button>
+            </form>
+            {% elif i.status == 'paid' %}
+            <form class="inline-form" method="post" action="/implementations/{{ i.id }}/status">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="status" value="refunded">
+              <button class="btn btn--danger-ghost btn--sm" type="submit">Возврат</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <details class="hint hint--block"><summary>Про возврат</summary>
+    Деньги клиенту возвращаете вы сами в личном кабинете ЮKassa. Кнопка здесь только
+    отмечает возврат в системе и снимает начисленное партнёру — и с продавца, и с
+    наставника. Без этой отметки на возврате партнёрская сеть заработала бы, а заплатили
+    бы вы дважды.
+  </details>
+  {% else %}
+  <div class="empty empty--inline">
+    <p class="empty__title">Внедрений пока нет</p>
+    <p class="empty__text">Заведите первое формой выше — клиент получит ссылку, а партнёр
+      вознаграждение.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

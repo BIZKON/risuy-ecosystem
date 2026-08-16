@@ -3029,6 +3029,124 @@ async def set_order_status_with_audit(
 
 # ── Phase 1B: онлайн-оплата продаж школы (вебхук + «счёт из диалога») ─────────
 
+# ── Внедрение: разовая продажа услуги нам (спека §15) ────────────────────────────
+# 🔴 Единственный источник партнёрских денег в НАШЕМ контуре. Абонплата им НЕ является —
+# решение владельца 16.08: тарифы это расходник на токены и серверы.
+
+async def create_implementation(tenant_id, title: str, amount_rub, *, note: str | None,
+                                actor: str, ip: str | None = None,
+                                user_agent: str | None = None) -> str:
+    """Завести клиенту внедрение. Ссылка на оплату прикрепляется отдельно, после
+    создания платежа в ЮKassa: сначала строка в своей базе, потом деньги наружу."""
+    async with pool.acquire() as c:
+        async with c.transaction():
+            new_id = await c.fetchval(
+                "insert into implementations (tenant_id, title, amount_rub, note, created_by) "
+                "values ($1,$2,$3,$4,$5) returning id",
+                tenant_id, title, amount_rub, note, actor)
+            await _insert_audit(c, actor=actor, action="implementation_created", ip=ip,
+                                user_agent=user_agent,
+                                detail={"implementation_id": str(new_id),
+                                        "tenant_id": str(tenant_id), "amount": str(amount_rub)})
+    return str(new_id)
+
+
+async def attach_implementation_payment(implementation_id, payment_id: str, payment_url: str) -> None:
+    """Прикрепить созданный платёж к внедрению."""
+    async with pool.acquire() as c:
+        await c.execute(
+            "update implementations set yookassa_payment_id = $1, payment_url = $2 where id = $3",
+            payment_id, payment_url, implementation_id)
+
+
+async def get_implementation(implementation_id):
+    async with pool.acquire() as c:
+        return await c.fetchrow(
+            "select i.*, t.name as tenant_name, t.partner_id from implementations i "
+            "join tenants t on t.id = i.tenant_id where i.id = $1", implementation_id)
+
+
+async def list_implementations(*, limit: int = 100):
+    """Внедрения с клиентом и партнёром, которому уйдёт комиссия."""
+    async with pool.acquire() as c:
+        return await c.fetch(
+            "select i.id, i.title, i.amount_rub, i.status, i.payment_url, i.paid_at, i.created_at, "
+            "       t.name as tenant_name, p.name as partner_name "
+            "  from implementations i "
+            "  join tenants t on t.id = i.tenant_id "
+            "  left join partners p on p.id = t.partner_id "
+            " order by i.created_at desc limit $1", limit)
+
+
+async def mark_implementation_paid_by_payment(payment_id: str, *, implementation_id=None,
+                                              expected_amount: str | None = None):
+    """Отметить внедрение оплаченным и начислить партнёру. Идемпотентно. None — не найдено.
+
+    Зовётся ИЗ ВЕБХУКА после перепроверки платежа через API ЮKassa. implementation_id —
+    хинт из metadata на случай гонки «создали платёж ↔ ранний вебхук», когда
+    yookassa_payment_id ещё не записан.
+
+    🔴 expected_amount сверяется с суммой внедрения: иначе чужой succeeded-платёж того же
+    магазина с произвольным implementation_id в теле пометил бы наше внедрение оплаченным
+    и начислил бы партнёру 12 000 ₽ из воздуха.
+    """
+    async with pool.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow(
+                "select id, status, tenant_id, amount_rub from implementations "
+                "where yookassa_payment_id = $1 for update", payment_id)
+            if row is None and implementation_id:
+                row = await c.fetchrow(
+                    "select id, status, tenant_id, amount_rub from implementations "
+                    "where id = $1 for update", implementation_id)
+            if row is None:
+                return None
+            if row["status"] == "paid":
+                return row  # повторный вебхук — no-op
+            if expected_amount is not None and Decimal(expected_amount) != Decimal(row["amount_rub"]):
+                return None  # суммы разошлись — платёж не наш, ничего не трогаем
+            upd = await c.fetchrow(
+                "update implementations set status = 'paid', paid_at = coalesce(paid_at, now()), "
+                "       yookassa_payment_id = coalesce(yookassa_payment_id, $2) "
+                " where id = $1 returning id, status, tenant_id, amount_rub",
+                row["id"], payment_id)
+            # Партнёрская доля — в той же транзакции, что отметка оплаты. Правило «только за
+            # первое внедрение» держит частичный уникальный индекс, кода для него не нужно.
+            await accrue_for_payment(
+                c, source_kind="implementation", source_id=upd["id"],
+                client_kind="tenant", client_id=upd["tenant_id"], amount_rub=upd["amount_rub"])
+            await _insert_audit(
+                c, actor="yookassa-webhook", action="implementation_paid",
+                detail={"implementation_id": str(upd["id"]), "payment_id": payment_id,
+                        "amount": str(upd["amount_rub"])})
+            return upd
+
+
+async def set_implementation_status(implementation_id, new_status: str, *, actor: str,
+                                    ip: str | None = None, user_agent: str | None = None) -> bool:
+    """Сменить статус внедрения. Переход в refunded сторнирует партнёрскую долю."""
+    if new_status not in ("pending", "paid", "canceled", "refunded"):
+        raise ValueError(f"Недопустимый статус внедрения: {new_status!r}")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            old = await c.fetchrow(
+                "select status from implementations where id = $1 for update", implementation_id)
+            if old is None:
+                return False
+            await c.execute("update implementations set status = $1 where id = $2",
+                            new_status, implementation_id)
+            stornoed = 0
+            if new_status == "refunded" and old["status"] != "refunded":
+                stornoed = await storno_for_source(
+                    c, source_kind="implementation", source_id=implementation_id)
+            await _insert_audit(c, actor=actor, action="implementation_status", ip=ip,
+                                user_agent=user_agent,
+                                detail={"implementation_id": str(implementation_id),
+                                        "status": {"old": old["status"], "new": new_status},
+                                        "partner_storno": stornoed})
+    return True
+
+
 async def accrue_for_payment(
     c, *, source_kind: str, source_id, client_kind: str, client_id,
     amount_rub, at=None, reason_override: str | None = None,

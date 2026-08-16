@@ -4046,6 +4046,15 @@ async def yookassa_webhook(request: Request):
                         amount_micro, config.SERVICE_PLAN_PERIOD_DAYS,
                         payment_method_id=pm_id, receipt_email=meta.get("email") or None,
                         plan_change_snapshot=snap_meta or None)
+            elif meta.get("kind") == "implementation" and meta.get("implementation_id"):
+                # Внедрение (спека §15) — ЕДИНСТВЕННЫЙ источник партнёрской доли в нашем
+                # контуре. Платёж уже перепроверен через API выше; сумма сверяется в db,
+                # иначе чужой succeeded-платёж этого же магазина с произвольным
+                # implementation_id в теле начислил бы партнёру 12 000 ₽ из воздуха.
+                if payment.get("status") == "succeeded" and payment.get("paid"):
+                    await db.mark_implementation_paid_by_payment(
+                        payment_id, implementation_id=meta["implementation_id"],
+                        expected_amount=(payment.get("amount") or {}).get("value"))
             elif meta.get("kind") == "platform_subscription_renewal" and meta.get("tenant_id"):
                 # Wave 2b: безакцептное автосписание (cron) → ПРОДЛЕВАЕТ существующую
                 # подписку (renew_subscription: UPDATE период + included_credits,
@@ -6938,6 +6947,97 @@ async def partners_parent(request: Request, partner_id: uuid.UUID,
                                        ip=_ip(request), user_agent=_ua(request)):
         return RedirectResponse(url=f"/partners/{partner_id}?err=cycle", status_code=303)
     return RedirectResponse(url=f"/partners/{partner_id}?saved=parent", status_code=303)
+
+
+# ---- /implementations — внедрения (спека §15) ------------------------------- #
+@app.get("/implementations", response_class=HTMLResponse)
+async def implementations_page(request: Request,
+                               session: auth.Session = Depends(require_session)):
+    """Внедрения: завести клиенту, отдать ссылку на оплату, видеть статус и комиссию."""
+    _require_admin(session)
+    if not session.is_platform:
+        raise HTTPException(status_code=403, detail="Только владелец платформы")
+    qp = request.query_params
+    return templates.TemplateResponse(request, "implementations.html", {
+        "items": await db.list_implementations(),
+        "tenants": await db.list_tenants_min(),
+        "default_price": config.IMPLEMENTATION_PRICE_RUB,
+        "partner_rate": config.PARTNER_RATE_PERCENT,
+        "yookassa_enabled": config.YOOKASSA_ENABLED,
+        "saved": qp.get("saved"), "err": qp.get("err"),
+        "csrf_token": session.csrf_token, "session": session, "active": "implementations"})
+
+
+@app.post("/implementations/create")
+async def implementations_create(request: Request,
+                                 session: auth.Session = Depends(require_session),
+                                 csrf_token: str = Form(""), tenant_id: str = Form(""),
+                                 title: str = Form(""), amount: str = Form(""),
+                                 email: str = Form(""), note: str = Form("")):
+    """Завести внедрение и сразу получить ссылку на оплату.
+
+    Порядок намеренный: сначала строка в СВОЕЙ базе, потом платёж наружу. Если ЮKassa
+    ответит ошибкой, у нас останется внедрение в pending, которое видно и правится, —
+    а не платёж, о котором мы ничего не знаем.
+    """
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.is_platform:
+        raise HTTPException(status_code=403, detail="Только владелец платформы")
+    if not config.YOOKASSA_ENABLED:
+        return RedirectResponse(url="/implementations?err=no_yookassa", status_code=303)
+    try:
+        tid = uuid.UUID((tenant_id or "").strip())
+    except ValueError:
+        return RedirectResponse(url="/implementations?err=no_tenant", status_code=303)
+    value = _money(amount) if amount.strip() else config.IMPLEMENTATION_PRICE_RUB
+    if value is None or value <= 0:
+        return RedirectResponse(url="/implementations?err=bad_amount", status_code=303)
+    name = (title or "").strip() or "Внедрение ИИ-агента"
+
+    impl_id = await db.create_implementation(
+        tid, name, value, note=(note.strip() or None), actor=session.actor,
+        ip=_ip(request), user_agent=_ua(request))
+
+    host = request.headers.get("host", "")
+    addr = (email or "").strip()
+    try:
+        payment = await yookassa.create_payment(
+            amount=value, currency=config.SERVICE_CURRENCY, description=name[:128],
+            return_url=f"https://{host}/implementations?paid=1",
+            idempotence_key=impl_id,
+            metadata={"kind": "implementation", "implementation_id": impl_id,
+                      "tenant_id": str(tid)},
+            receipt=_service_receipt(addr, name, value) if addr else None,
+        )
+    except yookassa.YooKassaError:
+        import logging
+        logging.getLogger("admin-panel").exception("yookassa create_payment (implementation) failed")
+        return RedirectResponse(url="/implementations?err=yk_failed", status_code=303)
+
+    pid = payment.get("id")
+    conf_url = (payment.get("confirmation") or {}).get("confirmation_url")
+    if not pid or not conf_url:
+        return RedirectResponse(url="/implementations?err=yk_failed", status_code=303)
+    await db.attach_implementation_payment(impl_id, pid, conf_url)
+    return RedirectResponse(url="/implementations?saved=created", status_code=303)
+
+
+@app.post("/implementations/{implementation_id}/status")
+async def implementations_status(request: Request, implementation_id: uuid.UUID,
+                                 session: auth.Session = Depends(require_session),
+                                 csrf_token: str = Form(""), status: str = Form("")):
+    """Отменить внедрение или отметить возврат. Возврат сторнирует долю партнёра."""
+    _require_admin(session)
+    await _enforce_csrf(request, session, csrf_token)
+    if not session.is_platform:
+        raise HTTPException(status_code=403, detail="Только владелец платформы")
+    if status not in ("canceled", "refunded"):
+        return RedirectResponse(url="/implementations?err=bad_status", status_code=303)
+    if not await db.set_implementation_status(implementation_id, status, actor=session.actor,
+                                              ip=_ip(request), user_agent=_ua(request)):
+        return RedirectResponse(url="/implementations?err=not_found", status_code=303)
+    return RedirectResponse(url=f"/implementations?saved={status}", status_code=303)
 
 
 # ---- Кабинет партнёра: /partner, /partner/team ------------------------------ #

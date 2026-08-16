@@ -45,6 +45,8 @@ async def _cleanup(c):
                        (select id from partners where name in ($1,$2))""", PSELLER, PMENTOR)
     await c.execute("""delete from partner_payouts where partner_id in
                        (select id from partners where name in ($1,$2))""", PSELLER, PMENTOR)
+    await c.execute("""delete from implementations where tenant_id in
+                       (select id from tenants where name = $1)""", TNAME)
     await c.execute("delete from tenants where name = $1", TNAME)
     await c.execute("update partners set parent_id = null where name in ($1,$2)", PSELLER, PMENTOR)
     await c.execute("""delete from partner_invites where partner_id in
@@ -234,6 +236,60 @@ async def main():
                 "where partner_id = $1 and reason = 'sale'", seller_id)
             check("в начислении осталась прежняя ставка", was == Decimal("20.00"), str(was))
             await db.set_partner_rate(seller_id, Decimal("20"), actor="smoke")
+
+            print("16. ВНЕДРЕНИЕ — единственный источник партнёрских денег:")
+            await c.execute("delete from partner_accruals where client_id = $1", tenant_id)
+            impl_id = await db.create_implementation(
+                tenant_id, "СМОУК Внедрение", Decimal("60000"), note=None, actor="smoke")
+            paid = await db.mark_implementation_paid_by_payment(
+                "pay-smoke-impl-1", implementation_id=impl_id, expected_amount="60000.00")
+            check("внедрение отмечено оплаченным", paid is not None and paid["status"] == "paid")
+            rows = await c.fetch(
+                "select level, amount_rub, source_kind from partner_accruals "
+                "where client_id = $1 order by level", tenant_id)
+            check("две строки начисления", len(rows) == 2, f"строк={len(rows)}")
+            check("продавцу 12000.00", rows and rows[0]["amount_rub"] == Decimal("12000.00"),
+                  str(rows[0]["amount_rub"]) if rows else "нет")
+            check("наставнику 3000.00", len(rows) > 1 and rows[1]["amount_rub"] == Decimal("3000.00"),
+                  str(rows[1]["amount_rub"]) if len(rows) > 1 else "нет")
+            check("источник — внедрение", rows and rows[0]["source_kind"] == "implementation",
+                  str(rows[0]["source_kind"]) if rows else "нет")
+
+            print("17. Повторный вебхук того же внедрения ничего не меняет:")
+            again = await db.mark_implementation_paid_by_payment(
+                "pay-smoke-impl-1", implementation_id=impl_id, expected_amount="60000.00")
+            total = await c.fetchval(
+                "select count(*) from partner_accruals where client_id = $1", tenant_id)
+            check("вернул строку без изменений", again is not None and again["status"] == "paid")
+            check("начислений по-прежнему 2", total == 2, f"строк={total}")
+
+            print("18. 🔴 ВТОРОЕ внедрение тому же клиенту НЕ начисляет:")
+            impl2 = await db.create_implementation(
+                tenant_id, "СМОУК Внедрение 2", Decimal("60000"), note=None, actor="smoke")
+            await db.mark_implementation_paid_by_payment(
+                "pay-smoke-impl-2", implementation_id=impl2, expected_amount="60000.00")
+            total = await c.fetchval(
+                "select count(*) from partner_accruals where client_id = $1", tenant_id)
+            st2 = await c.fetchval("select status from implementations where id = $1", impl2)
+            check("второе внедрение оплачено", st2 == "paid", str(st2))
+            check("а начислений по-прежнему 2", total == 2, f"строк={total}")
+
+            print("19. Чужая сумма не помечает внедрение оплаченным:")
+            impl3 = await db.create_implementation(
+                tenant_id, "СМОУК Внедрение 3", Decimal("60000"), note=None, actor="smoke")
+            bad = await db.mark_implementation_paid_by_payment(
+                "pay-smoke-impl-3", implementation_id=impl3, expected_amount="100.00")
+            st3 = await c.fetchval("select status from implementations where id = $1", impl3)
+            check("вернул None", bad is None, str(bad))
+            check("статус остался pending", st3 == "pending", str(st3))
+
+            print("20. Возврат внедрения сторнирует долю:")
+            ok = await db.set_implementation_status(impl_id, "refunded", actor="smoke")
+            check("статус сменён", ok is True)
+            summ = await c.fetchval(
+                "select coalesce(sum(amount_rub),0) from partner_accruals where client_id = $1",
+                tenant_id)
+            check("начисленное обнулилось", summ == Decimal("0.00"), str(summ))
 
             await _cleanup(c)
     finally:
