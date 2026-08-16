@@ -29,6 +29,7 @@ from typing import Any
 import asyncpg
 
 import config
+import partner_money
 
 pool: asyncpg.Pool | None = None
 
@@ -3007,6 +3008,64 @@ async def set_order_status_with_audit(
 
 # ── Phase 1B: онлайн-оплата продаж школы (вебхук + «счёт из диалога») ─────────
 
+async def accrue_for_payment(
+    c, *, source_kind: str, source_id, client_kind: str, client_id,
+    amount_rub, at=None, reason_override: str | None = None,
+) -> list[str]:
+    """Начислить партнёру с ОДНОГО принятого платежа. Возвращает id созданных строк.
+
+    Вызывается ВНУТРИ открытой транзакции c, рядом с отметкой «оплачено»: это деньги, а
+    не уведомление — если начисление упало, платёж не должен считаться принятым.
+
+    🔴 Ходит через SECURITY DEFINER-функции, а не прямыми SELECT/INSERT: в платформенном
+    контуре app.tenant_id равен тенанту-плательщику, а партнёр платформенный
+    (owner_tenant_id is null) — политика RLS не показала бы его и не дала записать
+    начисление. Молча, без ошибки. Та же грабля, что чинили на orders.
+
+    Повтор — норма, а не сбой: вебхуки приходят по два раза, поэтому конфликт по любому
+    уникальному индексу гасится в insert_partner_accrual через on conflict do nothing.
+    """
+    moment = at or datetime.now(timezone.utc)
+    rows = await c.fetch("select * from partner_pair_for_client($1, $2)", client_kind, client_id)
+    if not rows:
+        return []  # клиент пришёл сам — обычный случай, не ошибка
+    by_level = {r["role_level"]: r for r in rows}
+    seller_row = by_level.get(0)
+    if seller_row is None or seller_row["status"] != "active":
+        return []
+
+    def _node(row):
+        return partner_money.PartnerNode(
+            id=str(row["partner_id"]),
+            parent_id=str(row["parent_id"]) if row["parent_id"] else None,
+            joined_at=row["joined_at"],
+            rate_percent=Decimal(row["rate_percent"]),
+        )
+
+    seller = _node(seller_row)
+    mentor_row = by_level.get(1)
+    mentor = _node(mentor_row) if mentor_row is not None and mentor_row["status"] == "active" else None
+    # Наставнические — только в НАШЕМ контуре (спека §10.1).
+    mentors_enabled = seller_row["owner_tenant_id"] is None or config.PARTNER_MENTORS_TENANT_ENABLED
+
+    accruals = partner_money.accruals_for_payment(
+        amount_rub=Decimal(amount_rub), seller=seller, mentor=mentor,
+        at=moment, mentors_enabled=mentors_enabled,
+    )
+    created: list[str] = []
+    for a in accruals:
+        new_id = await c.fetchval(
+            "select insert_partner_accrual($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            a.partner_id, seller_row["owner_tenant_id"], source_kind, source_id,
+            client_kind, client_id, a.level, a.rate_percent,
+            -a.amount_rub if reason_override == "refund" else a.amount_rub,
+            reason_override or a.reason,
+        )
+        if new_id:
+            created.append(str(new_id))
+    return created
+
+
 async def _apply_order_paid(c, row, payment_id: str) -> asyncpg.Record:
     """Общее ядро «заказ оплачен» (в ОТКРЫТОЙ транзакции c): orders.paid (+paid_at, +бэкфилл
     provider_payment_id) → лид 'converted' → «спасибо» В КАНАЛ лида через outbox (доставит бот) →
@@ -3049,6 +3108,13 @@ async def _apply_order_paid(c, row, payment_id: str) -> asyncpg.Record:
                     upd["lead_id"], (lead["tg_user_id"] if m == "tg" else None), m,
                     config.ORDER_PAID_MESSAGE,
                 )
+    # Партнёрское начисление — в той же транзакции, что и отметка оплаты (спека §6).
+    # Не best-effort: это деньги, а не уведомление.
+    if upd["lead_id"] is not None:
+        await accrue_for_payment(
+            c, source_kind="order", source_id=upd["id"],
+            client_kind="lead", client_id=upd["lead_id"], amount_rub=upd["amount"],
+        )
     await _insert_audit(
         c, actor="yookassa-webhook", action="order_paid",
         detail={"order_id": str(upd["id"]), "payment_id": payment_id,
@@ -3422,7 +3488,7 @@ async def mark_service_invoice_paid_by_payment(
         async with c.transaction():
             await c.execute("select set_config('app.tenant_id', $1, true)", str(tenant_id))
             row = await c.fetchrow(
-                "select id, status from service_invoices "
+                "select id, status, amount from service_invoices "
                 "where yookassa_payment_id = $1 for update",
                 payment_id,
             )
@@ -3439,6 +3505,13 @@ async def mark_service_invoice_paid_by_payment(
                 returning id, status, plan_key, period_end
                 """,
                 row["id"], card_last4,
+            )
+            # Партнёрское начисление — в той же транзакции (спека §6). app.tenant_id выше
+            # уже выставлен, но партнёр может быть ПЛАТФОРМЕННЫМ — поэтому
+            # accrue_for_payment ходит через SECURITY DEFINER, а не прямым запросом.
+            await accrue_for_payment(
+                c, source_kind="service_invoice", source_id=upd["id"],
+                client_kind="tenant", client_id=tenant_id, amount_rub=row["amount"],
             )
             await _insert_audit(
                 c, actor=actor, action="service_invoice_paid",
