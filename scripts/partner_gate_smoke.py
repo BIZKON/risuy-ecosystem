@@ -61,6 +61,16 @@ check("посторонних открытых маршрутов нет", not s
 check("маршруты вообще нашлись", len(routes) > 50, f"найдено {len(routes)}")
 print(f"  (всего маршрутов: {len(routes)}, открыто партнёру: {len(opened)} — {opened})")
 
+print("4. Отказ гейта — исключением проекта, а не необъявленным именем:")
+# 🔴 Найдено сквозной проверкой на проде 16.08: гейт поднимал fastapi.HTTPException,
+# которого в app.py НЕТ в импортах (проект пользуется StarletteHTTPException). Каждый
+# отказ падал NameError → 500 вместо 403. Гейт при этом держал — но по случайности, а не
+# по замыслу, и в логи летела трассировка на каждый промах партнёра.
+check("нет raise HTTPException( — только StarletteHTTPException",
+      "raise HTTPException(" not in source, "найдено необъявленное имя")
+check("StarletteHTTPException импортирован",
+      "from starlette.exceptions import HTTPException as StarletteHTTPException" in source)
+
 print()
 if FAILS:
     print(f"ПРОВАЛЕНО: {len(FAILS)} — {FAILS}")

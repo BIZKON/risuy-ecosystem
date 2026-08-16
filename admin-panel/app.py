@@ -238,7 +238,7 @@ async def require_session(request: Request) -> auth.Session:
     # который забудут закрыть.
     if session.role == "partner":
         if not auth.partner_may_access(request.url.path):
-            raise HTTPException(status_code=403, detail="Раздел недоступен")
+            raise StarletteHTTPException(status_code=403, detail="Раздел недоступен")
         db.set_active_tenant(None, is_platform=False)
         return session
     db.set_active_tenant(session.active_tenant_id, is_platform=session.is_platform)
@@ -6956,7 +6956,7 @@ async def implementations_page(request: Request,
     """Внедрения: завести клиенту, отдать ссылку на оплату, видеть статус и комиссию."""
     _require_admin(session)
     if not session.is_platform:
-        raise HTTPException(status_code=403, detail="Только владелец платформы")
+        raise StarletteHTTPException(status_code=403, detail="Только владелец платформы")
     qp = request.query_params
     return templates.TemplateResponse(request, "implementations.html", {
         "items": await db.list_implementations(),
@@ -6983,7 +6983,7 @@ async def implementations_create(request: Request,
     _require_admin(session)
     await _enforce_csrf(request, session, csrf_token)
     if not session.is_platform:
-        raise HTTPException(status_code=403, detail="Только владелец платформы")
+        raise StarletteHTTPException(status_code=403, detail="Только владелец платформы")
     if not config.YOOKASSA_ENABLED:
         return RedirectResponse(url="/implementations?err=no_yookassa", status_code=303)
     try:
@@ -7031,7 +7031,7 @@ async def implementations_status(request: Request, implementation_id: uuid.UUID,
     _require_admin(session)
     await _enforce_csrf(request, session, csrf_token)
     if not session.is_platform:
-        raise HTTPException(status_code=403, detail="Только владелец платформы")
+        raise StarletteHTTPException(status_code=403, detail="Только владелец платформы")
     if status not in ("canceled", "refunded"):
         return RedirectResponse(url="/implementations?err=bad_status", status_code=303)
     if not await db.set_implementation_status(implementation_id, status, actor=session.actor,
@@ -7045,10 +7045,10 @@ async def _partner_of(session: auth.Session):
     """Партнёр текущей сессии. Доступ даёт СТРОКА в partners, а не роль: партнёр не член
     команды тенанта. Отключённый партнёр входа не имеет, даже если учётка жива."""
     if session.role != "partner":
-        raise HTTPException(status_code=403, detail="Раздел партнёра")
+        raise StarletteHTTPException(status_code=403, detail="Раздел партнёра")
     partner = await db.partner_by_login_actor(session.actor)
     if not partner:
-        raise HTTPException(status_code=403, detail="Партнёр не найден или отключён")
+        raise StarletteHTTPException(status_code=403, detail="Партнёр не найден или отключён")
     return partner
 
 
