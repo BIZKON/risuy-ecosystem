@@ -6062,10 +6062,24 @@ async def charge_embedding(tenant_id, texts, *, scope: str) -> None:
 
 
 async def create_tenant_brief(tenant_id, *, actor: str, ip: str | None,
-                              user_agent: str | None, ttl_days: int = 30) -> tuple[str, str]:
-    """Создаёт бриф со статусом pending и секретным токеном. Возвращает (id, token)."""
+                              user_agent: str | None,
+                              ttl_days: int | None = None) -> tuple[str, str]:
+    """Создаёт бриф со статусом pending и секретным токеном. Возвращает (id, token).
+
+    🔴 БЕЗ СРОКА по умолчанию (решение владельца 16.08.2026). Раньше стояло 30 дней, и
+    это выстрелило: разосланные клиентам ссылки протухли, клиент открывал её и видел
+    «Ссылка недействительна или истекла» — то есть нашу неаккуратность. Прислать взамен
+    новую нельзя: клиент не обязан верить в «истёкшую ссылку», и повторное письмо
+    читается как давление.
+
+    Срок здесь ничего и не защищал: токен одноразовый по сути — после заполнения бриф
+    уходит из статуса pending, и ссылка сама становится инертной («Бриф уже получен»).
+    Защита — в секретности токена и в одноразовости, а не в таймере.
+
+    ttl_days можно передать явно, если когда-нибудь понадобится ограниченная ссылка.
+    """
     token = secrets.token_hex(16)
-    expires = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    expires = (datetime.now(timezone.utc) + timedelta(days=ttl_days)) if ttl_days else None
     async with pool.acquire() as c:
         async with c.transaction():
             row = await c.fetchrow(
@@ -6083,7 +6097,7 @@ async def list_tenant_briefs() -> list[dict]:
     async with pool.acquire() as c:
         rows = await c.fetch(
             "select b.id, b.tenant_id, t.name as tenant_name, t.slug as tenant_slug, "
-            "b.status, b.created_at, b.submitted_at, b.applied_at "
+            "b.status, b.created_at, b.submitted_at, b.applied_at, b.expires_at "
             "from tenant_brief b join tenants t on t.id = b.tenant_id "
             "order by b.created_at desc")
     return [dict(r) for r in rows]

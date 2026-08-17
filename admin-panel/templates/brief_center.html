@@ -19,7 +19,7 @@
 <div class="table-wrap">
   <table class="table table--zebra">
     <thead>
-      <tr><th>Клиент</th><th>Статус</th><th>Создан</th><th>Ответы получены</th><th>Применён</th><th></th></tr>
+      <tr><th>Клиент</th><th>Статус</th><th>Ссылка</th><th>Создан</th><th>Ответы получены</th><th>Применён</th><th></th></tr>
     </thead>
     <tbody>
       {% for b in briefs %}
@@ -31,6 +31,13 @@
           {% elif b.status == 'proposed' %}<span class="badge">черновик готов</span>
           {% elif b.status == 'applied' %}<span class="badge badge--auto">применён</span>
           {% else %}<span class="muted">{{ b.status|e }}</span>{% endif %}
+        </td>
+        {# Срок ссылки виден явно: раньше его не показывали нигде, и разосланные
+           клиентам ссылки протухли незаметно — клиент видел «недействительна». #}
+        <td>
+          {% if not b.expires_at %}<span class="pill pill--ok">бессрочная</span>
+          {% elif b.expires_at < now %}<span class="pill pill--bad">истекла</span>
+          {% else %}<span class="badge">до {{ b.expires_at.strftime('%d.%m.%Y') }}</span>{% endif %}
         </td>
         <td>{{ b.created_at.strftime('%d.%m.%Y %H:%M') if b.created_at else '—' }}</td>
         <td>{{ b.submitted_at.strftime('%d.%m.%Y %H:%M') if b.submitted_at else '—' }}</td>

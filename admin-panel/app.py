@@ -6747,6 +6747,8 @@ async def brief_center(request: Request, session: auth.Session = Depends(require
     base = await db.get_bot_public_base_url()
     return templates.TemplateResponse(request, "brief_center.html", {
         "briefs": briefs, "tenants": tenants, "base_url": base, "saved": saved, "err": err,
+        # Для колонки «Ссылка»: сравнение срока с текущим моментом делает шаблон.
+        "now": datetime.now(timezone.utc),
         "csrf_token": session.csrf_token, "session": session, "active": "brief"})
 
 
