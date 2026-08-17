@@ -18,7 +18,7 @@
 </div>
 
 <section class="section" aria-label="Тенанты партнёра">
-  <h2 class="section__title section__title--lg">Тенанты по этой реф-ссылке</h2>
+  <h2 class="section__title section__title--lg">Клиенты, пришедшие по его ссылке</h2>
 
   {% if tenants %}
   <div class="table-wrap">
@@ -52,7 +52,7 @@
   {% else %}
   <div class="empty empty--inline">
     <p class="empty__title">От этого партнёра пока нет тенантов</p>
-    <p class="empty__text">Как только клиент придёт по реф-ссылке и пройдёт бриф, он появится здесь.</p>
+    <p class="empty__text">Как только клиент придёт по его ссылке и назовёт компанию, он появится здесь.</p>
   </div>
   {% endif %}
 </section>
@@ -60,6 +60,10 @@
 <section class="section" aria-label="Деньги партнёра">
   <h2 class="section__title section__title--lg">Начислено и выплачено</h2>
 
+  {% if saved == 'created' %}<p class="flash flash--ok"><b>Партнёр создан.</b>
+    Следующий шаг — кнопка <b>«Выдать доступ в кабинет»</b> ниже: она даёт ссылку, по
+    которой партнёр заведёт себе пароль. Ссылка из колонки «Ссылка для клиентов» ему для
+    входа НЕ подходит — она для его клиентов.</p>{% endif %}
   {% if saved == 'payout' %}<p class="flash flash--ok">Выплата отмечена.</p>{% endif %}
   {% if saved == 'rate' %}<p class="flash flash--ok">Ставка сохранена. Прошлые начисления не изменились.</p>{% endif %}
   {% if saved == 'parent' %}<p class="flash flash--ok">Наставник сохранён.</p>{% endif %}
