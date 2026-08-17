@@ -7080,6 +7080,26 @@ async def partner_cabinet(request: Request, session: auth.Session = Depends(requ
         "csrf_token": session.csrf_token, "active": "partner", **data})
 
 
+@app.get("/partner/guide", response_class=HTMLResponse)
+async def partner_guide(request: Request, session: auth.Session = Depends(require_session)):
+    """Обучающий раздел партнёра: что продаём, сколько он получает, как приводить.
+
+    Цифры берутся из тех же констант, что и расчёт начислений, — чтобы страница не
+    разошлась с тем, что партнёр увидит в кабинете. Ставка — ЕГО собственная, а не
+    общая: у партнёров она может отличаться.
+    """
+    partner = await _partner_of(session)
+    econom = (config.SERVICE_PLANS.get("econom") or {}).get("price") or 0
+    return templates.TemplateResponse(request, "partner_guide.html", {
+        "partner": partner,
+        "price": config.IMPLEMENTATION_PRICE_RUB,
+        "rate": Decimal(partner["rate_percent"]),
+        "mentor_rate": config.MENTOR_RATE_PERCENT,
+        "mentor_months": config.MENTOR_BONUS_MONTHS,
+        "min_plan": Decimal(econom),
+        "session": session, "csrf_token": session.csrf_token, "active": "partner_guide"})
+
+
 @app.get("/partner/team", response_class=HTMLResponse)
 async def partner_team(request: Request, session: auth.Session = Depends(require_session)):
     partner = await _partner_of(session)
