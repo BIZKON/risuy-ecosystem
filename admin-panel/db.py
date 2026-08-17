@@ -6226,10 +6226,16 @@ async def list_partners() -> list[dict]:
 
 
 async def get_partner(partner_id: str) -> dict | None:
+    """Партнёр целиком.
+
+    🔴 Список колонок был перечислен поимённо и отстал от схемы: денежная работа добавила
+    rate_percent, parent_id, login_actor и прочее, а карточка их показывает — падало
+    UndefinedError прямо при заведении партнёра (редирект на карточку). Берём звёздочкой:
+    у карточки нет колонок, которые ей не нужны, а список поимённо здесь стоил 500 на
+    первом же живом действии владельца.
+    """
     async with pool.acquire() as c:
-        row = await c.fetchrow(
-            "select id, name, ref_code, tg_chat_id, status, created_at from partners where id = $1",
-            partner_id)
+        row = await c.fetchrow("select * from partners where id = $1", partner_id)
     return dict(row) if row else None
 
 
