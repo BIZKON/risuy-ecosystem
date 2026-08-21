@@ -238,7 +238,7 @@ async def require_session(request: Request) -> auth.Session:
     # который забудут закрыть.
     if session.role == "partner":
         if not auth.partner_may_access(request.url.path):
-            raise StarletteHTTPException(status_code=403, detail="Раздел недоступен")
+            raise StarletteHTTPException(status_code=403, detail=auth.PARTNER_DENIED)
         db.set_active_tenant(None, is_platform=False)
         return session
     db.set_active_tenant(session.active_tenant_id, is_platform=session.is_platform)
@@ -593,6 +593,7 @@ async def login_submit(
     await db.audit(actor=actor, action="login_ok", ip=ip, user_agent=ua,
                    detail={"role": role})
 
+    next_path = auth.landing_for(role, next_path)
     resp = RedirectResponse(url=next_path, status_code=303)
     auth.set_session_cookie(resp, sid)
     auth.clear_login_csrf(resp)
@@ -6637,7 +6638,9 @@ def _error_page(request: Request, status_code: int, message: str) -> Response:
         try:
             resp = templates.TemplateResponse(
                 request, "error.html",
-                {"status_code": status_code, "message": message},
+                {"status_code": status_code, "message": message,
+                 # Сессии здесь нет — признак партнёрского отказа несём текстом.
+                 "partner_denied": message == auth.PARTNER_DENIED},
                 status_code=status_code,
             )
             resp.headers["Cache-Control"] = "no-store"

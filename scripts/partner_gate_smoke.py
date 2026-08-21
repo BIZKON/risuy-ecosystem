@@ -71,6 +71,26 @@ check("нет raise HTTPException( — только StarletteHTTPException",
 check("StarletteHTTPException импортирован",
       "from starlette.exceptions import HTTPException as StarletteHTTPException" in source)
 
+print("5. Куда партнёр попадает СРАЗУ после входа:")
+# 🔴 Регрессия на живой отказ 17.08: партнёр ввёл пароль и получил 403. Форма входа
+# отправляет next="/" по умолчанию — а «/» партнёру закрыт. Мой E2E этого не поймал,
+# потому что я передавал next=/partner явно, чего живой человек не делает.
+check("с дефолтным next=/ ведём в кабинет", auth.landing_for("partner", "/") == "/partner",
+      auth.landing_for("partner", "/"))
+check("с пустым next тоже", auth.landing_for("partner", "") == "/partner")
+check("чужой раздел в next не пропускаем",
+      auth.landing_for("partner", "/companies") == "/partner")
+check("свой раздел в next уважаем",
+      auth.landing_for("partner", "/partner/team") == "/partner/team")
+check("оператора не трогаем", auth.landing_for("operator", "/leads") == "/leads")
+check("админа не трогаем", auth.landing_for("admin", "/") == "/")
+
+print("6. Страница отказа знает партнёрский случай:")
+err = pathlib.Path(ROOT, "admin-panel", "templates", "error.html").read_text(encoding="utf-8")
+check("в шаблоне есть ветка partner_denied", "partner_denied" in err)
+check("ведёт в кабинет, а не на дашборд", "/partner" in err)
+check("признак берётся из константы", "PARTNER_DENIED" in source)
+
 print()
 if FAILS:
     print(f"ПРОВАЛЕНО: {len(FAILS)} — {FAILS}")
