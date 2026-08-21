@@ -89,7 +89,22 @@ print("6. Страница отказа знает партнёрский слу
 err = pathlib.Path(ROOT, "admin-panel", "templates", "error.html").read_text(encoding="utf-8")
 check("в шаблоне есть ветка partner_denied", "partner_denied" in err)
 check("ведёт в кабинет, а не на дашборд", "/partner" in err)
-check("признак берётся из константы", "PARTNER_DENIED" in source)
+check("признак сравнивается с константой", "auth.PARTNER_DENIED" in source)
+# 🔴 Мало объявить признак — надо ПРОВЕСТИ его до страницы. Обработчик исключений
+# намеренно выбрасывает exc.detail и подставляет обобщённый текст, поэтому сравнение
+# по тексту молча не срабатывало: первая редакция этой правки была мертва.
+check("обработчик передаёт признак странице", "partner_denied=denied" in source)
+check("страница принимает параметр", "partner_denied: bool = False" in source)
+
+print("7. Шаблон отказа реально меняет ссылки:")
+from jinja2 import Environment, FileSystemLoader
+env = Environment(loader=FileSystemLoader(pathlib.Path(ROOT, "admin-panel", "templates")))
+tpl = env.get_template("error.html")
+as_partner = tpl.render(status_code=403, message="Доступ запрещён.", partner_denied=True)
+as_other = tpl.render(status_code=403, message="Доступ запрещён.", partner_denied=False)
+check("партнёру — в его кабинет", "В мой кабинет" in as_partner, as_partner[:0])
+check("партнёру НЕ предлагаем дашборд", "На дашборд" not in as_partner)
+check("остальным дашборд на месте", "На дашборд" in as_other)
 
 print()
 if FAILS:

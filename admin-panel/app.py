@@ -6617,7 +6617,11 @@ async def _http_exc_handler(request: Request, exc: StarletteHTTPException):
         422: "Некорректные данные запроса.",
     }
     msg = messages.get(exc.status_code, "Ошибка запроса.")
-    return _error_page(request, exc.status_code, msg)
+    # detail наружу не отдаём (см. выше), но ОДИН его случай нужен странице: партнёру
+    # нельзя предлагать «На дашборд» и «К списку лидов» — они ему тоже закрыты, и он
+    # уходит с 403 на 403. Несём признаком, а не текстом.
+    denied = exc.status_code == 403 and getattr(exc, "detail", "") == auth.PARTNER_DENIED
+    return _error_page(request, exc.status_code, msg, partner_denied=denied)
 
 
 @app.exception_handler(Exception)
@@ -6631,7 +6635,8 @@ async def _unhandled_handler(request: Request, exc: Exception):
     return _error_page(request, 500, "Внутренняя ошибка. Мы уже разбираемся.")
 
 
-def _error_page(request: Request, status_code: int, message: str) -> Response:
+def _error_page(request: Request, status_code: int, message: str, *,
+                partner_denied: bool = False) -> Response:
     """Generic-страница ошибки. HTML для браузера, JSON для прочего."""
     accept = request.headers.get("accept", "")
     if "text/html" in accept:
@@ -6639,8 +6644,7 @@ def _error_page(request: Request, status_code: int, message: str) -> Response:
             resp = templates.TemplateResponse(
                 request, "error.html",
                 {"status_code": status_code, "message": message,
-                 # Сессии здесь нет — признак партнёрского отказа несём текстом.
-                 "partner_denied": message == auth.PARTNER_DENIED},
+                 "partner_denied": partner_denied},
                 status_code=status_code,
             )
             resp.headers["Cache-Control"] = "no-store"
